@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# koji setup — install koji skills into Claude Code
+set -euo pipefail
+
+KOJI_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILLS_DIR="$(dirname "$KOJI_DIR")"
+STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/koji"
+
+echo "=== koji setup ==="
+echo "Source: $KOJI_DIR"
+echo "Skills: $SKILLS_DIR"
+
+# --- Create state directory ---
+mkdir -p "$STATE_DIR"
+echo "State dir: $STATE_DIR"
+
+# --- Make scripts executable ---
+chmod +x "$KOJI_DIR/bin/"*
+echo "Scripts: chmod +x"
+
+# --- Create symlinks ---
+create_link() {
+  local name="$1" target="$2"
+  if [ -L "$SKILLS_DIR/$name" ]; then
+    rm "$SKILLS_DIR/$name"
+  fi
+  ln -sf "koji/$target" "$SKILLS_DIR/$name"
+  echo "  $name -> koji/$target"
+}
+
+echo "Symlinks:"
+create_link "wrap" "wrap"
+create_link "take-note" "take-note"
+create_link "init-koji" "init-koji"
+
+# --- Verify ---
+echo ""
+echo "Installed skills:"
+for skill in wrap take-note init-koji; do
+  if [ -L "$SKILLS_DIR/$skill" ] && [ -f "$SKILLS_DIR/$skill/SKILL.md" ]; then
+    echo "  /$(echo "$skill" | tr '-' '-')  OK"
+  else
+    echo "  /$skill  FAILED" >&2
+  fi
+done
+
+echo ""
+echo "koji is ready. Run /init-koji in any project to get started."
