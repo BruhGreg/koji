@@ -50,6 +50,18 @@ Plus `.koji.yaml` in your project root for configuration.
 
 Start each session with `/kick-off`. End with `/wrap`. Checkpoint mid-session with `/take-note`.
 
+### Skill Args
+
+Some skills accept text after the command to override default behavior:
+
+```
+/kick-off                          → reads last session, resumes from handoff
+/kick-off build the news page      → skips last session, focuses on your intent
+
+/take-note                         → infers progress from conversation context
+/take-note finished auth, doing tests  → uses your note directly
+```
+
 ## Configuration
 
 `.koji.yaml` lives in your project root. All fields are optional — sensible defaults apply.
