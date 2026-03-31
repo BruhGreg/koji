@@ -32,7 +32,26 @@ echo "Has lessons: $HAS_LESSONS"
 
 ### 1. Detect Existing State
 
-Check what already exists. If the project already has `docs/agent-session.md`, `docs/AI_HANDOFF.md`, and `docs/lessons.md`, this is a **migration** — only generate `.koji.yaml` to match existing setup. Do NOT overwrite existing docs.
+Check what already exists in two passes:
+
+**Pass 1 — Check `$DOCS_DIR/` for koji-standard files:**
+If the project already has `docs/agent-session.md`, `docs/AI_HANDOFF.md`, and `docs/lessons.md`, this is a **migration** — only generate `.koji.yaml` to match existing setup. Do NOT overwrite existing docs.
+
+**Pass 2 — Scan for stray session files outside `$DOCS_DIR/`:**
+Search the project root for common session file names that may exist from before koji:
+- `agent-session.md`, `AI_HANDOFF.md`, `lessons.md`, `SESSION_TEMPLATE.md` in root
+- `.agents/workflows/wrap.md`, `agent-context.md` or similar ad-hoc files
+
+If found, tell the user:
+> Found session-related files outside `docs/`:
+> - `./agent-session.md` (6 lines)
+> - `./agent-context.md` (68 lines)
+>
+> 1. **Merge** — incorporate content into `docs/` files and delete originals
+> 2. **Skip** — leave them, I'll handle manually
+> 3. **View** — show me the contents first
+
+If "Merge": read each file, extract useful content (targets → handoff roadmap, session notes → session log, context → CLAUDE.md), write into the appropriate koji doc, then delete the original. If the file is in `.gitignore`, also remove the gitignore entry.
 
 ### 2. Ask Preferences (only for new setups or if .koji.yaml doesn't exist)
 
