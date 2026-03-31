@@ -143,27 +143,23 @@ Check if `.claude/settings.local.json` exists. If it does:
    - Broader `Bash` patterns that aren't standard dev commands (e.g., `Bash(curl:*)`, `Bash(docker:*)`)
    - Commands that touch external services (e.g., `Bash(gh:*)`, `Bash(ssh:*)`)
    - Permissions that are project-specific but not machine-specific (e.g., `Bash(./scripts/deploy.sh)`)
-   - Keep this list short — batch similar ones together, max 3-5 items to ask about
+   - **Minimize prompts aggressively:**
+     - Batch similar permissions into one group (e.g., `docker build`, `docker compose`, `docker run` → ask once as "Docker commands")
+     - If the user already approved or denied a similar pattern in `settings.json` (e.g., they have `Bash(docker build:*)` already), infer their intent for related ones (`docker compose`, `docker run`) and auto-promote without asking
+     - If the deny list has a pattern, auto-skip similar ones without asking
+     - **Goal: zero prompts most sessions.** Only ask when something genuinely new and ambiguous shows up.
 
-5. Present the results. Only show what's actionable — don't overwhelm:
+5. **If there are auto-promoted permissions**, briefly list them (one line summary, not a full list):
 
-   > **Permission hygiene**
-   >
-   > Auto-promoted (safe, reusable):
-   > - `Bash(npm run:*)`
-   > - `Bash(git diff:*)`
-   >
-   > Skipped (one-off/risky):
-   > - `Bash(find /Users/h.b./... )`
-   >
-   > **Your call — keep these?**
-   > 1. `Bash(docker compose:*)` — used 3x this session
-   > 2. `Bash(gh pr:*)` — GitHub CLI commands
-   >
-   > Type the numbers to keep (e.g., "1,2"), "all", or "none".
+   > Promoted 4 permissions to settings.json (git, npm, koji scripts). Run `cat .claude/settings.json` to review.
 
-6. Merge auto-promoted + user-approved into `.claude/settings.json`, preserving existing entries. Do not duplicate.
-7. If no new permissions found at all, skip this step silently.
+6. **Only if there are grey-area items that can't be inferred**, ask — and keep it to one prompt max:
+
+   > One permission needs your call:
+   > - `Bash(docker compose:*)` — keep for next session? (y/n)
+
+7. Merge auto-promoted + user-approved into `.claude/settings.json`, preserving existing entries. Do not duplicate.
+8. If nothing new to promote, skip this step entirely — no output.
 
 ---
 
