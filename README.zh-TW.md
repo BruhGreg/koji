@@ -110,13 +110,14 @@ wrap:
 
 ## `/wrap` 工作流程
 
-當你在工作階段結束時執行 `/wrap`，它會依序執行五個步驟：
+當你在工作階段結束時執行 `/wrap`，它會依序執行六個步驟：
 
 1. **教訓** — 掃描工作階段中的修正或發現。以格式追加至 `lessons.md`：`YYYY-MM-DD — [Agent] — 出了什麼問題 → 預防規則`
 2. **AI 交接** — 更新 `AI_HANDOFF.md`：已完成的任務、新決策、變更的阻礙項目
 3. **工作階段日誌** — 追加新條目至 `agent-session.md`。如達到閾值則歸檔最舊的條目。
-4. **提交提議** — 顯示 `git diff --stat`，提議 conventional commit 訊息，等待核准
-5. **啟動提示** — 為下次工作階段產生 3-5 句的簡報
+4. **提交提議** — 顯示 `git diff --stat`，提議 conventional commit 訊息，等待核准。提交後驗證工作樹是否乾淨，若不乾淨則提供選項：壓縮合併、新提交、或跳過。
+5. **權限維護** — 掃描 `settings.local.json` 中本次工作階段核准的權限。安全的自動升級至 `settings.json`，危險的自動跳過，灰色地帶的才詢問使用者（目標：大多數工作階段零提示）。
+6. **啟動提示** — 為下次工作階段產生 3-5 句的簡報
 
 ## 從專案本地 Wrap 遷移
 
@@ -130,28 +131,36 @@ rm -f .claude/commands/wrap.md
 
 ## 常見問題
 
-**工作階段文件存放在哪裡？**
+### 工作階段文件存放在哪裡？
+
 在各專案的 `docs/` 目錄中，提交至 git。每個專案的教訓、交接和工作階段歷史都屬於該專案。`~/.config/koji/` 只存放你的全域偏好設定（如預設模板）——不含專案資料。
 
-**`/koji-init` 會覆蓋我現有的文件嗎？**
+### `/koji-init` 會覆蓋我現有的文件嗎？
+
 不會。如果 `docs/lessons.md`、`docs/AI_HANDOFF.md` 或 `docs/agent-session.md` 已存在，koji 不會動它們。它只建立缺少的部分，並產生符合現有設定的 `.koji.yaml`。
 
-**我舊的 `/wrap` 工作流程檔案怎麼辦？**
+### 我舊的 `/wrap` 工作流程檔案怎麼辦？
+
 `/koji-init` 會偵測舊式 wrap 檔案（`.agents/workflows/wrap.md`、`.claude/skills/wrap/SKILL.md`、`.claude/commands/wrap.md`）並提議移除。它一定會先詢問——未經你的同意不會刪除任何東西。
 
-**會和 gstack 衝突嗎？**
+### 會和 gstack 衝突嗎？
+
 不會。gstack 沒有 `wrap`、`take-note` 或 `koji-init` 技能，所以符號連結不會碰撞。它們在 `~/.claude/skills/` 中共存。
 
-**`~/.config/koji/` 裡有什麼？**
+### `~/.config/koji/` 裡有什麼？
+
 只有 `config.yaml`，存放你的全域預設值（模板偏好、歸檔策略）。沒有遙測、沒有分析、沒有專案資料。所有工作階段文件都留在專案倉庫中。支援 `XDG_CONFIG_HOME` 環境變數。
 
-**代理怎麼知道要在工作階段開始時讀取交接/教訓？**
+### 代理怎麼知道要在工作階段開始時讀取交接/教訓？
+
 `/koji-init` 會在專案的 `CLAUDE.md` 中新增 `## Session Management (koji)` 區塊，指示在工作階段開始時讀取 `docs/AI_HANDOFF.md` 和 `docs/lessons.md`。Claude Code 在每次工作階段開始時會自動讀取 `CLAUDE.md`。
 
-**可以為不同專案使用不同模板嗎？**
+### 可以為不同專案使用不同模板嗎？
+
 可以。每個專案的 `.koji.yaml` 可以獨立指定 `template: default` 或 `template: simple`。沒有 `.koji.yaml` 的專案使用 `~/.config/koji/config.yaml` 中的全域預設值。
 
-**設定有多難？**
+### 設定有多難？
+
 一行指令：`git clone ... && ./setup`。大約 2 秒。無依賴、無建置步驟、無 npm/bun/pip。純 bash + markdown。
 
 ## 相容性
