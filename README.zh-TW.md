@@ -96,7 +96,7 @@ wrap:
 
 ```
 ~/.claude/skills/koji/        # 模組（git 倉庫）
-├── kick-off/SKILL.md         # /kick-off 技能定義
+├── kick-off/SKILL.md         # /kick-off 技能定義（含版本檢查 + gstack 偵測）
 ├── wrap/SKILL.md             # /wrap 技能定義
 ├── take-note/SKILL.md        # /take-note 技能定義
 ├── koji-init/SKILL.md        # /koji-init 技能定義
@@ -124,14 +124,25 @@ wrap:
 
 ## `/wrap` 工作流程
 
+### `/kick-off`
+
+當你在工作階段開始時執行 `/kick-off`：
+
+1. **版本檢查** — 比較本地與遠端 VERSION。提供更新 / 跳過 / 總是更新選項。
+2. **載入上下文** — 靜默讀取 AI_HANDOFF.md、lessons.md、上次工作階段條目。
+3. **簡報** — 4-5 行摘要：上次工作階段、下一項任務、注意事項、焦點。
+4. **gstack 建議** — 若偵測到 gstack，分析目前開發階段並建議 2-3 個相關工作流程（例如前端工作建議 `/browse`，準備發布建議 `/qa`）。未偵測到 gstack 則跳過。
+
+### `/wrap`
+
 當你在工作階段結束時執行 `/wrap`，它會依序執行六個步驟：
 
 1. **教訓** — 掃描工作階段中的修正或發現。以格式追加至 `lessons.md`：`YYYY-MM-DD — [Agent] — 出了什麼問題 → 預防規則`
 2. **AI 交接** — 更新 `AI_HANDOFF.md`：已完成的任務、新決策、變更的阻礙項目
 3. **工作階段日誌** — 追加新條目至 `agent-session.md`。如達到閾值則歸檔最舊的條目。
-4. **提交提議** — 顯示 `git diff --stat`，提議 conventional commit 訊息，等待核准。提交後驗證工作樹是否乾淨，若不乾淨則提供選項：壓縮合併、新提交、或跳過。
+4. **提交提議** — 顯示 `git diff --stat`，提議 conventional commit 訊息，等待核准。提交後驗證工作樹是否乾淨。
 5. **權限維護** — 掃描 `settings.local.json` 中本次工作階段核准的權限。安全的自動升級至 `settings.json`，危險的自動跳過，灰色地帶的才詢問使用者（目標：大多數工作階段零提示）。
-6. **啟動提示** — 為下次工作階段產生 3-5 句的簡報
+6. **啟動提示** — 為下次工作階段產生 3-5 句的簡報。提醒使用 `/kick-off`。
 
 ## 從專案本地 Wrap 遷移
 

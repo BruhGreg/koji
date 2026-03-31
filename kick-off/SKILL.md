@@ -7,19 +7,44 @@ allowed-tools:
   - Read
   - Grep
   - Glob
+  - AskUserQuestion
 ---
 
 # Kick Off
 
-Run the preamble to detect project configuration:
+Run the preamble to detect project configuration and environment:
 
 ```bash
 source <(~/.claude/skills/koji/bin/koji-detect)
+
+# --- Version check ---
+KOJI_VERSION=$(cat "$KOJI_SKILLS/VERSION" 2>/dev/null | tr -d '[:space:]')
+KOJI_REMOTE_VERSION=$(curl -sf --max-time 3 "https://raw.githubusercontent.com/BruhGreg/koji/main/VERSION" 2>/dev/null | tr -d '[:space:]')
+
 echo "=== koji kick-off ==="
 echo "Project: $PROJECT_NAME"
+echo "koji: v$KOJI_VERSION"
+
+# Version comparison
+if [ -n "$KOJI_REMOTE_VERSION" ] && [ "$KOJI_VERSION" != "$KOJI_REMOTE_VERSION" ]; then
+  echo "UPDATE_AVAILABLE: v$KOJI_VERSION → v$KOJI_REMOTE_VERSION"
+else
+  echo "koji: up to date"
+fi
+
 echo "Has session log: $HAS_SESSION_LOG"
 echo "Has handoff: $HAS_HANDOFF"
 echo "Has lessons: $HAS_LESSONS"
+
+# --- Detect gstack ---
+if [ -d "$HOME/.claude/skills/gstack" ] && [ -f "$HOME/.claude/skills/gstack/VERSION" ]; then
+  GSTACK_VERSION=$(cat "$HOME/.claude/skills/gstack/VERSION" 2>/dev/null | tr -d '[:space:]')
+  echo "gstack: v$GSTACK_VERSION (available)"
+  echo "HAS_GSTACK=true"
+else
+  echo "gstack: not installed"
+  echo "HAS_GSTACK=false"
+fi
 ```
 
 If `HAS_SESSION_LOG` is `false` or `HAS_HANDOFF` is `false`, tell the user to run `/koji-init` first and stop.
@@ -27,6 +52,25 @@ If `HAS_SESSION_LOG` is `false` or `HAS_HANDOFF` is `false`, tell the user to ru
 ---
 
 ## Workflow
+
+### 0. Version check
+
+If the preamble shows `UPDATE_AVAILABLE`:
+
+Use AskUserQuestion:
+
+> koji update available: v{old} → v{new}
+
+Options:
+- A) Update now — pulls latest and re-runs setup (~2 seconds)
+- B) Skip this time
+- C) Always update — auto-update on every kick-off
+
+If A: run `cd ~/.claude/skills/koji && git pull origin main && ./setup` then continue.
+If C: run `koji-config set auto_update true` then update.
+If B: continue without updating.
+
+If `koji-config get auto_update` returns `true` and an update is available, update silently without asking — just show: `koji updated: v{old} → v{new}`.
 
 ### 1. Check for user-provided focus
 
@@ -53,7 +97,36 @@ Output a concise briefing (not a wall of text):
 > Watching out for: [1-line gotcha from lessons, if relevant — otherwise skip]
 >
 > **Focus:** [user's arg if provided, OR the "Notes for Next Session" from the last entry]
->
-> Ready to go. What's first?
 
-Keep it tight — 4-5 lines max. The user already knows their project; they need a quick refresh, not a lecture.
+### 4. Suggest gstack workflows (only if gstack detected)
+
+If `HAS_GSTACK` is `true`, analyze the current dev phase from the handoff and session log, then suggest **2-3 relevant gstack skills** — not all of them, just what makes sense right now.
+
+**Phase detection heuristics:**
+
+- **Planning/early stage** (handoff has mostly unchecked items, few completed):
+  - Suggest: `/office-hours` (brainstorm), `/plan-eng-review` (lock architecture)
+
+- **Active development** (in-progress items, recent code changes):
+  - Suggest: `/investigate` (if debugging), `/browse` (if frontend), `/design-review` (if UI work)
+
+- **Pre-ship** (feature complete, needs polish/review):
+  - Suggest: `/qa` (test + fix), `/review` (pre-landing diff review), `/ship` (create PR)
+
+- **Post-ship** (just deployed or merged):
+  - Suggest: `/canary` (monitor production), `/document-release` (update docs)
+
+- **Security/infrastructure work**:
+  - Suggest: `/cso` (security audit), `/careful` (safety guardrails)
+
+Format as a short suggestion, not a menu:
+
+> **gstack:** Looks like active frontend work — `/browse` to preview, `/design-review` for visual polish, or `/qa` when ready to test.
+
+If gstack is not detected, skip this step entirely — no output.
+
+### 5. Ready
+
+End with:
+
+> Ready to go. What's first?

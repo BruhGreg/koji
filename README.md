@@ -124,13 +124,25 @@ wrap:
 
 ## The `/wrap` Workflow
 
+### `/kick-off`
+
+When you run `/kick-off` at session start:
+
+1. **Version check** — compares local vs remote VERSION. Offers update / skip / always-update.
+2. **Load context** — reads AI_HANDOFF.md, lessons.md, last session entry silently.
+3. **Brief** — 4-5 line summary: last session, next task, gotchas, focus.
+4. **gstack suggestions** — if gstack is installed, detects your dev phase and suggests 2-3 relevant workflows (e.g., `/browse` for frontend, `/qa` for pre-ship). Skipped if gstack not detected.
+
+### `/wrap`
+
 When you run `/wrap` at session end, it executes six steps in order:
 
 1. **Lessons** — Scans the session for corrections or discoveries. Appends to `lessons.md` with format: `YYYY-MM-DD — [Agent] — what went wrong → rule to prevent it`
 2. **AI Handoff** — Updates `AI_HANDOFF.md` with completed tasks, new decisions, changed blockers
 3. **Session Log** — Appends a new entry to `agent-session.md`. Archives oldest entries if threshold is reached.
-4. **Commit Proposal** — Shows `git diff --stat`, proposes a conventional commit message, waits for approval
-5. **Starter Prompt** — Generates a 3-5 sentence briefing for the next session
+4. **Commit Proposal** — Shows `git diff --stat`, proposes a conventional commit message, waits for approval. Verifies clean worktree after.
+5. **Permission Hygiene** — Promotes safe session permissions to `settings.json`, skips risky ones, asks about grey area (zero prompts most sessions).
+6. **Starter Prompt** — Generates a 3-5 sentence briefing for the next session. Reminds to use `/kick-off`.
 
 ## Migration from Project-Local Wrap
 
