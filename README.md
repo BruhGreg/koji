@@ -130,28 +130,36 @@ rm -f .claude/commands/wrap.md
 
 ## FAQ
 
-**Where do session docs live?**
-Locally, in each project's `docs/` directory, committed to git. Each project's lessons, handoff, and session history belong with that project. `~/.koji/` only stores your global preferences (like default template) — no project data.
+### Where do session docs live?
 
-**Will `/init-koji` overwrite my existing docs?**
+Locally, in each project's `docs/` directory, committed to git. Each project's lessons, handoff, and session history belong with that project. `~/.config/koji/` only stores your global preferences (like default template) — no project data.
+
+### Will `/init-koji` overwrite my existing docs?
+
 No. If `docs/lessons.md`, `docs/AI_HANDOFF.md`, or `docs/agent-session.md` already exist, koji leaves them untouched. It only creates what's missing and generates `.koji.yaml` to match your existing setup.
 
-**What about my old `/wrap` workflow files?**
+### What about my old `/wrap` workflow files?
+
 `/init-koji` detects old-style wrap files (`.agents/workflows/wrap.md`, `.claude/skills/wrap/SKILL.md`, `.claude/commands/wrap.md`) and offers to remove them. It always asks first — nothing is deleted without your approval.
 
-**Does it conflict with gstack?**
+### Does it conflict with gstack?
+
 No. gstack has no `wrap`, `take-note`, or `init-koji` skills, so the symlinks don't collide. They coexist in `~/.claude/skills/`.
 
-**What does `~/.config/koji/` contain?**
+### What does `~/.config/koji/` contain?
+
 Just `config.yaml` with your global defaults (template preference, archive strategy). No telemetry, no analytics, no project data. All session docs stay in the project repo. Respects `XDG_CONFIG_HOME` if set.
 
-**How does the agent know to read handoff/lessons at session start?**
+### How does the agent know to read handoff/lessons at session start?
+
 `/init-koji` adds a `## Session Management (koji)` section to your project's `CLAUDE.md` with instructions to read `docs/AI_HANDOFF.md` and `docs/lessons.md` on session start. Claude Code reads `CLAUDE.md` automatically at the beginning of every session.
 
-**Can I use different templates per project?**
-Yes. Each project's `.koji.yaml` can specify `template: default` or `template: simple` independently. Global default in `~/.koji/config.yaml` is used when a project has no `.koji.yaml`.
+### Can I use different templates per project?
 
-**How hard is it to set up?**
+Yes. Each project's `.koji.yaml` can specify `template: default` or `template: simple` independently. Global default in `~/.config/koji/config.yaml` is used when a project has no `.koji.yaml`.
+
+### How hard is it to set up?
+
 One command: `git clone ... && ./setup`. Takes ~2 seconds. No dependencies, no build step, no npm/bun/pip. Pure bash + markdown.
 
 ## Works With
