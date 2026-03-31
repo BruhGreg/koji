@@ -106,7 +106,14 @@ If any task changed state (completed, blocked, scoped differently, new architect
 
 3. Present the commit message(s) and ask: **"Commit with this message?"**
 4. Do NOT auto-commit. Wait for explicit approval.
-5. **After committing**, run `git status` to verify the worktree is clean. If there are still uncommitted changes, warn the user.
+5. **After committing**, run `git status` to verify the worktree is clean. If there are still uncommitted changes, present choices:
+
+   > Worktree is not clean. What would you like to do?
+   > 1. **Squash** — amend the last commit to include remaining changes
+   > 2. **New commit** — create a separate commit for the leftover changes
+   > 3. **Skip** — leave as-is (type anything else to discuss)
+
+   Wait for the user's choice. If they type something other than 1/2/3, treat it as a discussion prompt and respond accordingly.
 
 ---
 
