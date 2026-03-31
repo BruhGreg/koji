@@ -1,7 +1,7 @@
 ---
 description: "Bootstrap koji session management in the current project. Creates docs scaffolding, templates, and .koji.yaml config."
 user-invocable: true
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools:
   - Bash
   - Read

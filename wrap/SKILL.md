@@ -1,7 +1,7 @@
 ---
 description: "End-of-session wrap. Updates lessons, AI handoff, session log, archives old sessions, proposes commit, and generates starter prompt."
 user-invocable: true
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools:
   - Bash
   - Read
