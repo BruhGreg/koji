@@ -20,12 +20,13 @@ git clone --depth 1 https://github.com/BruhGreg/koji.git ~/.claude/skills/koji
 cd ~/.claude/skills/koji && ./setup
 ```
 
-That's it. Three skills are now available in Claude Code:
+That's it. Four skills are now available in Claude Code:
 
 | Skill | What it does |
 |-------|-------------|
-| `/wrap` | End-of-session: update lessons, handoff, session log, archive, propose commit, generate starter prompt |
-| `/take-note` | Mid-session: save progress to current session entry without committing |
+| `/kick-off` | Start session: load handoff, lessons, last session — or `/kick-off build the news page` for a custom focus |
+| `/wrap` | End session: update lessons, handoff, session log, archive, propose commit, generate starter prompt |
+| `/take-note` | Mid-session: save progress — or `/take-note finished auth, moving to tests` with inline note |
 | `/koji-init` | Bootstrap: create docs scaffolding and `.koji.yaml` in any project |
 
 ## Quick Start
@@ -47,7 +48,7 @@ docs/
 
 Plus `.koji.yaml` in your project root for configuration.
 
-At the end of every session, run `/wrap`. Mid-session, run `/take-note`.
+Start each session with `/kick-off`. End with `/wrap`. Checkpoint mid-session with `/take-note`.
 
 ## Configuration
 
@@ -83,6 +84,7 @@ wrap:
 
 ```
 ~/.claude/skills/koji/        # The module (git repo)
+├── kick-off/SKILL.md         # /kick-off skill definition
 ├── wrap/SKILL.md             # /wrap skill definition
 ├── take-note/SKILL.md        # /take-note skill definition
 ├── koji-init/SKILL.md        # /koji-init skill definition
@@ -110,7 +112,7 @@ wrap:
 
 ## The `/wrap` Workflow
 
-When you run `/wrap` at session end, it executes five steps in order:
+When you run `/wrap` at session end, it executes six steps in order:
 
 1. **Lessons** — Scans the session for corrections or discoveries. Appends to `lessons.md` with format: `YYYY-MM-DD — [Agent] — what went wrong → rule to prevent it`
 2. **AI Handoff** — Updates `AI_HANDOFF.md` with completed tasks, new decisions, changed blockers

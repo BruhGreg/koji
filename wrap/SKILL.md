@@ -173,6 +173,9 @@ Generate a **3-5 sentence** starter prompt for the next session:
 
 Output this clearly labeled as **"Starter Prompt for Next Session:"**
 
+Then remind the user:
+> Tip: Next session, run `/kick-off` to auto-load this context — no need to paste.
+
 ---
 
 ## Checklist

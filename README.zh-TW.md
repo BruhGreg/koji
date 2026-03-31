@@ -20,12 +20,13 @@ git clone --depth 1 https://github.com/BruhGreg/koji.git ~/.claude/skills/koji
 cd ~/.claude/skills/koji && ./setup
 ```
 
-完成。三個技能現已在 Claude Code 中可用：
+完成。四個技能現已在 Claude Code 中可用：
 
 | 技能 | 功能 |
 |------|------|
-| `/wrap` | 工作階段結束：更新教訓、交接、日誌、歸檔、提議提交、產生下次啟動提示 |
-| `/take-note` | 工作階段中途：將進度儲存到目前的工作階段條目，不提交 |
+| `/kick-off` | 開始工作階段：載入交接、教訓、上次紀錄——或 `/kick-off 建立新聞頁面` 指定焦點 |
+| `/wrap` | 結束工作階段：更新教訓、交接、日誌、歸檔、提議提交、產生下次啟動提示 |
+| `/take-note` | 工作階段中途：儲存進度——或 `/take-note 完成認證，接下來做測試` 附帶說明 |
 | `/koji-init` | 初始化：在任何專案中建立文件骨架和 `.koji.yaml` |
 
 ## 快速開始
@@ -47,7 +48,7 @@ docs/
 
 另外在專案根目錄產生 `.koji.yaml` 作為設定檔。
 
-每次工作階段結束時執行 `/wrap`。工作階段中途執行 `/take-note`。
+每次工作階段開始時執行 `/kick-off`。結束時執行 `/wrap`。中途檢查點執行 `/take-note`。
 
 ## 設定
 
@@ -83,6 +84,7 @@ wrap:
 
 ```
 ~/.claude/skills/koji/        # 模組（git 倉庫）
+├── kick-off/SKILL.md         # /kick-off 技能定義
 ├── wrap/SKILL.md             # /wrap 技能定義
 ├── take-note/SKILL.md        # /take-note 技能定義
 ├── koji-init/SKILL.md        # /koji-init 技能定義
