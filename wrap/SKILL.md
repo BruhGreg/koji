@@ -117,7 +117,52 @@ If any task changed state (completed, blocked, scoped differently, new architect
 
 ---
 
-## Step 5 — Starter Prompt
+## Step 5 — Permission Hygiene
+
+Check if `.claude/settings.local.json` exists. If it does:
+
+1. Read `.claude/settings.local.json` (session-accumulated permissions)
+2. Read `.claude/settings.json` (committed permissions)
+3. Compare — find permissions in local that aren't already in committed
+4. **Filter with judgement.** Categorize each new permission:
+
+   **Promote** (safe, reusable across sessions):
+   - Standard dev commands: `git status`, `git diff`, `git log`, `git add`, `git commit`, `git branch`, `git stash`, `git rev-parse`
+   - Build/run commands: `npm run`, `npm install`, `npx`, `cargo`, `go build`, `go test`, `python`, `pytest`, `make`
+   - File ops: `mkdir`, `chmod`, `ls`, `cat`, `wc`
+   - Tool permissions: `Read`, `Edit`, `Write`, `Glob`, `Grep`
+   - koji scripts: `source <(~/.claude/skills/koji/*)`
+
+   **Skip** (don't promote):
+   - Absolute paths specific to this machine (e.g., `/Users/h.b./specific/file`)
+   - One-time exploratory commands (ad-hoc `find`, `grep` with specific patterns)
+   - Destructive commands: `rm -rf`, `git push --force`, `git reset --hard`
+   - Commands that should always prompt for safety
+
+5. If there are promotable permissions, present them:
+
+   > These permissions were approved during this session. Promote to `settings.json` so they don't prompt next time?
+   >
+   > **Promote:**
+   > - `Bash(npm run:*)`
+   > - `Bash(git diff:*)`
+   > - ...
+   >
+   > **Skipped** (one-off or risky):
+   > - `Bash(find /Users/h.b./... )`
+   > - ...
+   >
+   > 1. **Yes** — add promoted permissions to settings.json
+   > 2. **Review** — let me pick which ones
+   > 3. **Skip** — leave settings.json as-is
+
+6. If the user picks "Yes", merge the promoted permissions into `.claude/settings.json`, preserving existing entries. Do not duplicate.
+7. If "Review", show each permission and let the user accept/reject individually.
+8. If no new promotable permissions found, skip this step silently.
+
+---
+
+## Step 6 — Starter Prompt
 
 Generate a **3-5 sentence** starter prompt for the next session:
 - Current project state (1 sentence)
@@ -137,4 +182,5 @@ Before finishing, verify:
 - [ ] Session entry appended to `agent-session.md`
 - [ ] Archive rotation performed (if threshold reached)
 - [ ] Commit proposed (awaiting approval)
+- [ ] Permissions reviewed (if new ones in settings.local.json)
 - [ ] Starter prompt generated
