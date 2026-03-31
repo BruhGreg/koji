@@ -124,41 +124,46 @@ Check if `.claude/settings.local.json` exists. If it does:
 1. Read `.claude/settings.local.json` (session-accumulated permissions)
 2. Read `.claude/settings.json` (committed permissions)
 3. Compare — find permissions in local that aren't already in committed
-4. **Filter with judgement.** Categorize each new permission:
+4. **Filter with judgement.** First, check existing `settings.json` permissions — if a new permission is already covered by a broader pattern (e.g., `Bash(git diff:*)` already covers `Bash(git diff --stat)`), skip it entirely. Then categorize the remaining into three buckets:
 
-   **Promote** (safe, reusable across sessions):
+   **Auto-promote** (clearly safe, reusable across sessions — add without asking):
    - Standard dev commands: `git status`, `git diff`, `git log`, `git add`, `git commit`, `git branch`, `git stash`, `git rev-parse`
    - Build/run commands: `npm run`, `npm install`, `npx`, `cargo`, `go build`, `go test`, `python`, `pytest`, `make`
    - File ops: `mkdir`, `chmod`, `ls`, `cat`, `wc`
    - Tool permissions: `Read`, `Edit`, `Write`, `Glob`, `Grep`
    - koji scripts: `source <(~/.claude/skills/koji/*)`
 
-   **Skip** (don't promote):
+   **Auto-skip** (never promote):
    - Absolute paths specific to this machine (e.g., `/Users/h.b./specific/file`)
-   - One-time exploratory commands (ad-hoc `find`, `grep` with specific patterns)
-   - Destructive commands: `rm -rf`, `git push --force`, `git reset --hard`
+   - One-time exploratory commands (ad-hoc `find`, `grep` with very specific patterns)
+   - Destructive commands: `rm -rf`, `git push --force`, `git reset --hard`, `git checkout .`
    - Commands that should always prompt for safety
 
-5. If there are promotable permissions, present them:
+   **Ask user** (grey area — potentially useful but not obviously safe):
+   - Broader `Bash` patterns that aren't standard dev commands (e.g., `Bash(curl:*)`, `Bash(docker:*)`)
+   - Commands that touch external services (e.g., `Bash(gh:*)`, `Bash(ssh:*)`)
+   - Permissions that are project-specific but not machine-specific (e.g., `Bash(./scripts/deploy.sh)`)
+   - Keep this list short — batch similar ones together, max 3-5 items to ask about
 
-   > These permissions were approved during this session. Promote to `settings.json` so they don't prompt next time?
+5. Present the results. Only show what's actionable — don't overwhelm:
+
+   > **Permission hygiene**
    >
-   > **Promote:**
+   > Auto-promoted (safe, reusable):
    > - `Bash(npm run:*)`
    > - `Bash(git diff:*)`
-   > - ...
    >
-   > **Skipped** (one-off or risky):
+   > Skipped (one-off/risky):
    > - `Bash(find /Users/h.b./... )`
-   > - ...
    >
-   > 1. **Yes** — add promoted permissions to settings.json
-   > 2. **Review** — let me pick which ones
-   > 3. **Skip** — leave settings.json as-is
+   > **Your call — keep these?**
+   > 1. `Bash(docker compose:*)` — used 3x this session
+   > 2. `Bash(gh pr:*)` — GitHub CLI commands
+   >
+   > Type the numbers to keep (e.g., "1,2"), "all", or "none".
 
-6. If the user picks "Yes", merge the promoted permissions into `.claude/settings.json`, preserving existing entries. Do not duplicate.
-7. If "Review", show each permission and let the user accept/reject individually.
-8. If no new promotable permissions found, skip this step silently.
+6. Merge auto-promoted + user-approved into `.claude/settings.json`, preserving existing entries. Do not duplicate.
+7. If no new permissions found at all, skip this step silently.
 
 ---
 
