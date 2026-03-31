@@ -40,13 +40,39 @@ Ask the user two questions:
 
 **Template style:**
 > Which session template?
-> 1. **Full** — Summary, Key Achievements, Test Results, Notes (best for complex projects)
-> 2. **Simple** — Done, Key Decisions, Files Changed, Next (best for focused pipelines)
+>
+> **1. Full** — best for complex, multi-feature projects
+> ```
+> ### Summary
+> ### Key Achievements
+> ### Test Results
+> ### Notes for Next Session
+> ```
+>
+> **2. Simple** — best for focused pipelines and scripts
+> ```
+> ### Done
+> ### Key Decisions
+> ### Files Changed
+> ### Next Session
+> ```
 
 **Archive strategy:**
 > How should old sessions be archived?
-> 1. **Numbered** — `sessions/archive-01.md`, `archive-02.md`, etc. (simpler)
-> 2. **Dated** — `sessions/YYYY-MM/DD-slug.md` with INDEX.md (scales better)
+>
+> **1. Numbered** — simple, linear
+> ```
+> sessions/archive-01.md
+> sessions/archive-02.md
+> sessions/archive-03.md
+> ```
+>
+> **2. Dated** — scales better for long-running projects
+> ```
+> sessions/2026-03/31-auth-middleware.md
+> sessions/2026-04/02-api-refactor.md
+> sessions/INDEX.md  ← central lookup
+> ```
 
 ### 3. Create Scaffolding
 
