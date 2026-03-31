@@ -26,12 +26,12 @@ That's it. Three skills are now available in Claude Code:
 |-------|-------------|
 | `/wrap` | End-of-session: update lessons, handoff, session log, archive, propose commit, generate starter prompt |
 | `/take-note` | Mid-session: save progress to current session entry without committing |
-| `/init-koji` | Bootstrap: create docs scaffolding and `.koji.yaml` in any project |
+| `/koji-init` | Bootstrap: create docs scaffolding and `.koji.yaml` in any project |
 
 ## Quick Start
 
 ```
-> /init-koji
+> /koji-init
 ```
 
 koji asks two questions (template style + archive strategy), then creates:
@@ -85,7 +85,7 @@ wrap:
 ~/.claude/skills/koji/        # The module (git repo)
 ├── wrap/SKILL.md             # /wrap skill definition
 ├── take-note/SKILL.md        # /take-note skill definition
-├── init-koji/SKILL.md        # /init-koji skill definition
+├── koji-init/SKILL.md        # /koji-init skill definition
 ├── bin/
 │   ├── koji-config           # Config read/write utility
 │   └── koji-detect           # Project detection + config cascade
@@ -101,7 +101,7 @@ wrap:
 
 <project>/
 ├── .koji.yaml                # Per-project config
-└── docs/                     # Session docs (created by /init-koji)
+└── docs/                     # Session docs (created by /koji-init)
 ```
 
 **Config cascade:** `.koji.yaml` (project) > `~/.config/koji/config.yaml` (global) > built-in defaults. Respects `XDG_CONFIG_HOME` if set.
@@ -120,7 +120,7 @@ When you run `/wrap` at session end, it executes five steps in order:
 
 ## Migration from Project-Local Wrap
 
-If you already have `.agents/workflows/wrap.md` or `.claude/skills/wrap/SKILL.md` in your projects, run `/init-koji` — it detects existing docs and only creates `.koji.yaml`. Then delete the old local files:
+If you already have `.agents/workflows/wrap.md` or `.claude/skills/wrap/SKILL.md` in your projects, run `/koji-init` — it detects existing docs and only creates `.koji.yaml`. Then delete the old local files:
 
 ```bash
 rm -f .agents/workflows/wrap.md
@@ -134,17 +134,17 @@ rm -f .claude/commands/wrap.md
 
 Locally, in each project's `docs/` directory, committed to git. Each project's lessons, handoff, and session history belong with that project. `~/.config/koji/` only stores your global preferences (like default template) — no project data.
 
-### Will `/init-koji` overwrite my existing docs?
+### Will `/koji-init` overwrite my existing docs?
 
 No. If `docs/lessons.md`, `docs/AI_HANDOFF.md`, or `docs/agent-session.md` already exist, koji leaves them untouched. It only creates what's missing and generates `.koji.yaml` to match your existing setup.
 
 ### What about my old `/wrap` workflow files?
 
-`/init-koji` detects old-style wrap files (`.agents/workflows/wrap.md`, `.claude/skills/wrap/SKILL.md`, `.claude/commands/wrap.md`) and offers to remove them. It always asks first — nothing is deleted without your approval.
+`/koji-init` detects old-style wrap files (`.agents/workflows/wrap.md`, `.claude/skills/wrap/SKILL.md`, `.claude/commands/wrap.md`) and offers to remove them. It always asks first — nothing is deleted without your approval.
 
 ### Does it conflict with gstack?
 
-No. gstack has no `wrap`, `take-note`, or `init-koji` skills, so the symlinks don't collide. They coexist in `~/.claude/skills/`.
+No. gstack has no `wrap`, `take-note`, or `koji-init` skills, so the symlinks don't collide. They coexist in `~/.claude/skills/`.
 
 ### What does `~/.config/koji/` contain?
 
@@ -152,7 +152,7 @@ Just `config.yaml` with your global defaults (template preference, archive strat
 
 ### How does the agent know to read handoff/lessons at session start?
 
-`/init-koji` adds a `## Session Management (koji)` section to your project's `CLAUDE.md` with instructions to read `docs/AI_HANDOFF.md` and `docs/lessons.md` on session start. Claude Code reads `CLAUDE.md` automatically at the beginning of every session.
+`/koji-init` adds a `## Session Management (koji)` section to your project's `CLAUDE.md` with instructions to read `docs/AI_HANDOFF.md` and `docs/lessons.md` on session start. Claude Code reads `CLAUDE.md` automatically at the beginning of every session.
 
 ### Can I use different templates per project?
 

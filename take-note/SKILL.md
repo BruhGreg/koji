@@ -23,7 +23,7 @@ echo "Session log: $DOCS_PATH/agent-session.md"
 echo "Has session log: $HAS_SESSION_LOG"
 ```
 
-If `HAS_SESSION_LOG` is `false`, tell the user to run `/init-koji` first and stop.
+If `HAS_SESSION_LOG` is `false`, tell the user to run `/koji-init` first and stop.
 
 ---
 

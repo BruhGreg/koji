@@ -26,12 +26,12 @@ cd ~/.claude/skills/koji && ./setup
 |------|------|
 | `/wrap` | 工作階段結束：更新教訓、交接、日誌、歸檔、提議提交、產生下次啟動提示 |
 | `/take-note` | 工作階段中途：將進度儲存到目前的工作階段條目，不提交 |
-| `/init-koji` | 初始化：在任何專案中建立文件骨架和 `.koji.yaml` |
+| `/koji-init` | 初始化：在任何專案中建立文件骨架和 `.koji.yaml` |
 
 ## 快速開始
 
 ```
-> /init-koji
+> /koji-init
 ```
 
 koji 會問兩個問題（模板樣式 + 歸檔策略），然後建立：
@@ -85,7 +85,7 @@ wrap:
 ~/.claude/skills/koji/        # 模組（git 倉庫）
 ├── wrap/SKILL.md             # /wrap 技能定義
 ├── take-note/SKILL.md        # /take-note 技能定義
-├── init-koji/SKILL.md        # /init-koji 技能定義
+├── koji-init/SKILL.md        # /koji-init 技能定義
 ├── bin/
 │   ├── koji-config           # 設定讀寫工具
 │   └── koji-detect           # 專案偵測 + 設定層疊
@@ -101,7 +101,7 @@ wrap:
 
 <project>/
 ├── .koji.yaml                # 專案設定
-└── docs/                     # 工作階段文件（由 /init-koji 建立）
+└── docs/                     # 工作階段文件（由 /koji-init 建立）
 ```
 
 **設定層疊：** `.koji.yaml`（專案）> `~/.config/koji/config.yaml`（全域）> 內建預設值。支援 `XDG_CONFIG_HOME` 環境變數。
@@ -120,7 +120,7 @@ wrap:
 
 ## 從專案本地 Wrap 遷移
 
-如果你的專案中已有 `.agents/workflows/wrap.md` 或 `.claude/skills/wrap/SKILL.md`，執行 `/init-koji`——它會偵測現有文件，僅建立 `.koji.yaml`。然後刪除舊的本地檔案：
+如果你的專案中已有 `.agents/workflows/wrap.md` 或 `.claude/skills/wrap/SKILL.md`，執行 `/koji-init`——它會偵測現有文件，僅建立 `.koji.yaml`。然後刪除舊的本地檔案：
 
 ```bash
 rm -f .agents/workflows/wrap.md
@@ -133,20 +133,20 @@ rm -f .claude/commands/wrap.md
 **工作階段文件存放在哪裡？**
 在各專案的 `docs/` 目錄中，提交至 git。每個專案的教訓、交接和工作階段歷史都屬於該專案。`~/.config/koji/` 只存放你的全域偏好設定（如預設模板）——不含專案資料。
 
-**`/init-koji` 會覆蓋我現有的文件嗎？**
+**`/koji-init` 會覆蓋我現有的文件嗎？**
 不會。如果 `docs/lessons.md`、`docs/AI_HANDOFF.md` 或 `docs/agent-session.md` 已存在，koji 不會動它們。它只建立缺少的部分，並產生符合現有設定的 `.koji.yaml`。
 
 **我舊的 `/wrap` 工作流程檔案怎麼辦？**
-`/init-koji` 會偵測舊式 wrap 檔案（`.agents/workflows/wrap.md`、`.claude/skills/wrap/SKILL.md`、`.claude/commands/wrap.md`）並提議移除。它一定會先詢問——未經你的同意不會刪除任何東西。
+`/koji-init` 會偵測舊式 wrap 檔案（`.agents/workflows/wrap.md`、`.claude/skills/wrap/SKILL.md`、`.claude/commands/wrap.md`）並提議移除。它一定會先詢問——未經你的同意不會刪除任何東西。
 
 **會和 gstack 衝突嗎？**
-不會。gstack 沒有 `wrap`、`take-note` 或 `init-koji` 技能，所以符號連結不會碰撞。它們在 `~/.claude/skills/` 中共存。
+不會。gstack 沒有 `wrap`、`take-note` 或 `koji-init` 技能，所以符號連結不會碰撞。它們在 `~/.claude/skills/` 中共存。
 
 **`~/.config/koji/` 裡有什麼？**
 只有 `config.yaml`，存放你的全域預設值（模板偏好、歸檔策略）。沒有遙測、沒有分析、沒有專案資料。所有工作階段文件都留在專案倉庫中。支援 `XDG_CONFIG_HOME` 環境變數。
 
 **代理怎麼知道要在工作階段開始時讀取交接/教訓？**
-`/init-koji` 會在專案的 `CLAUDE.md` 中新增 `## Session Management (koji)` 區塊，指示在工作階段開始時讀取 `docs/AI_HANDOFF.md` 和 `docs/lessons.md`。Claude Code 在每次工作階段開始時會自動讀取 `CLAUDE.md`。
+`/koji-init` 會在專案的 `CLAUDE.md` 中新增 `## Session Management (koji)` 區塊，指示在工作階段開始時讀取 `docs/AI_HANDOFF.md` 和 `docs/lessons.md`。Claude Code 在每次工作階段開始時會自動讀取 `CLAUDE.md`。
 
 **可以為不同專案使用不同模板嗎？**
 可以。每個專案的 `.koji.yaml` 可以獨立指定 `template: default` 或 `template: simple`。沒有 `.koji.yaml` 的專案使用 `~/.config/koji/config.yaml` 中的全域預設值。

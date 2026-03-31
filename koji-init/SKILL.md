@@ -154,5 +154,5 @@ CLAUDE.md: session checklist added
 Available commands:
   /wrap       — End-of-session wrap (lessons + handoff + session log + commit)
   /take-note  — Mid-session progress save
-  /init-koji  — Re-run this setup
+  /koji-init  — Re-run this setup
 ```

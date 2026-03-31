@@ -26,7 +26,7 @@ echo "Archive: $ARCHIVE_STRATEGY (threshold=$ARCHIVE_THRESHOLD, keep=$ARCHIVE_KE
 echo "Has docs: $HAS_DOCS | Session log: $HAS_SESSION_LOG | Handoff: $HAS_HANDOFF | Lessons: $HAS_LESSONS"
 ```
 
-If `HAS_DOCS` is `false`, tell the user to run `/init-koji` first and stop.
+If `HAS_DOCS` is `false`, tell the user to run `/koji-init` first and stop.
 
 Execute the following steps **strictly in order**. Do not skip steps. Do not batch steps.
 

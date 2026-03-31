@@ -31,12 +31,12 @@ create_link() {
 echo "Symlinks:"
 create_link "wrap" "wrap"
 create_link "take-note" "take-note"
-create_link "init-koji" "init-koji"
+create_link "koji-init" "koji-init"
 
 # --- Verify ---
 echo ""
 echo "Installed skills:"
-for skill in wrap take-note init-koji; do
+for skill in wrap take-note koji-init; do
   if [ -L "$SKILLS_DIR/$skill" ] && [ -f "$SKILLS_DIR/$skill/SKILL.md" ]; then
     echo "  /$(echo "$skill" | tr '-' '-')  OK"
   else
@@ -45,4 +45,4 @@ for skill in wrap take-note init-koji; do
 done
 
 echo ""
-echo "koji is ready. Run /init-koji in any project to get started."
+echo "koji is ready. Run /koji-init in any project to get started."
