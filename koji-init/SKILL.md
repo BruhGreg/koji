@@ -36,43 +36,34 @@ Check what already exists. If the project already has `docs/agent-session.md`, `
 
 ### 2. Ask Preferences (only for new setups or if .koji.yaml doesn't exist)
 
-Ask the user two questions:
+Ask the user two questions using AskUserQuestion. Use the exact format below — the context paragraph first, then lettered options.
 
-**Template style:**
-> Which session template?
->
-> **1. Full** — best for complex, multi-feature projects
-> ```
-> ### Summary
-> ### Key Achievements
-> ### Test Results
-> ### Notes for Next Session
-> ```
->
-> **2. Simple** — best for focused pipelines and scripts
-> ```
-> ### Done
-> ### Key Decisions
-> ### Files Changed
-> ### Next Session
-> ```
+**Question 1 — Template style:**
 
-**Archive strategy:**
-> How should old sessions be archived?
->
-> **1. Numbered** — simple, linear
-> ```
-> sessions/archive-01.md
-> sessions/archive-02.md
-> sessions/archive-03.md
-> ```
->
-> **2. Dated** — scales better for long-running projects
-> ```
-> sessions/2026-03/31-auth-middleware.md
-> sessions/2026-04/02-api-refactor.md
-> sessions/INDEX.md  ← central lookup
-> ```
+Use AskUserQuestion:
+
+> koji session entries can follow two formats. Full is great for complex projects
+> where you want to track test results and detailed achievements. Simple is leaner —
+> just what got done and what's next. You can always change this later in `.koji.yaml`.
+
+Options:
+- A) Full — Summary, Key Achievements, Test Results, Notes (recommended for most projects)
+- B) Simple — Done, Key Decisions, Files Changed, Next (best for scripts and pipelines)
+
+If A: set template to `default`.
+If B: set template to `simple`.
+
+**Question 2 — Archive strategy:**
+
+Use AskUserQuestion:
+
+> When your session log gets long (5+ entries), koji archives the oldest ones
+> to keep the active file readable. Numbered is simpler. Dated organizes by
+> calendar and adds an INDEX.md for lookup — better if the project runs for months.
+
+Options:
+- A) Numbered — `archive-01.md`, `archive-02.md`, etc. (recommended)
+- B) Dated — `YYYY-MM/DD-slug.md` with INDEX.md lookup table
 
 ### 3. Create Scaffolding
 
