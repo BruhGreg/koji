@@ -36,7 +36,22 @@ Execute the following steps **strictly in order**. Do not skip steps. Do not bat
 
 Review the session for any cases where the user corrected you, or where you discovered a non-obvious pattern or gotcha.
 
-If any corrections or discoveries occurred:
+**Only log lessons that are worth keeping.** Apply this filter:
+
+✅ **Worth adding:**
+- User corrections that would repeat across sessions (e.g., "don't use X library, it breaks Y")
+- Non-obvious project-specific gotchas that cost real time to rediscover (e.g., "the API returns 200 even on auth failure")
+- Patterns not documented anywhere else (CLAUDE.md, codebase, framework docs)
+
+❌ **Not worth adding:**
+- Generic best practices any senior dev already knows ("write tests", "handle errors")
+- One-off mistakes unlikely to recur (typos, wrong flag on a single command)
+- Things already documented in CLAUDE.md or obvious from the codebase
+- Restatements of framework/library documentation
+
+**When in doubt, don't add it.** A short, high-signal lessons file is far more valuable than a long one full of noise.
+
+If any corrections or discoveries pass the filter:
 1. Read `$DOCS_PATH/lessons.md`
 2. Append new entries **at the top** (below the header comment), one per line:
    ```
@@ -44,7 +59,7 @@ If any corrections or discoveries occurred:
    ```
 3. Be specific and tactical — not generic advice. Include the concrete consequence.
 
-If nothing to log, skip this step.
+If nothing passes the filter, skip this step.
 
 ---
 
