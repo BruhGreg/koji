@@ -89,16 +89,24 @@ If any task changed state (completed, blocked, scoped differently, new architect
 
 ## Step 4 — Commit Proposal
 
-1. Run `git status` and `git diff --stat` to capture all changes.
-2. Compose a conventional commit message:
-   ```
-   <type>(<scope>): <short description>
+1. Run `git status` and `git diff --stat` to capture **all** changes (both session work and wrap doc updates).
+2. Determine the commit strategy:
 
-   [optional body]
-   ```
-   Common types: `feat`, `fix`, `refactor`, `test`, `chore`, `docs`
-3. Present the commit message and ask: **"Commit with this message?"**
+   **If there are both code changes AND doc changes (mixed worktree):**
+   - Ask the user: **"Commit all together, or split into work commit + docs commit?"**
+   - **Together**: One conventional commit covering everything.
+   - **Split**: First commit the session's code work, then a separate `docs(koji): update session logs` commit for the wrap files.
+
+   **If there are only doc changes (work was already committed):**
+   - Propose: `docs(koji): update session logs`
+   - This covers lessons.md, AI_HANDOFF.md, agent-session.md, and any archive files.
+
+   **If there are only code changes (no docs were modified):**
+   - Propose a conventional commit for the work.
+
+3. Present the commit message(s) and ask: **"Commit with this message?"**
 4. Do NOT auto-commit. Wait for explicit approval.
+5. **After committing**, run `git status` to verify the worktree is clean. If there are still uncommitted changes, warn the user.
 
 ---
 
