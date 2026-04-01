@@ -9,6 +9,11 @@
 #   KOJI_LEGACY_FILES="file1 file2 ..."  (space-separated list of found legacy files)
 set -euo pipefail
 
+# Source koji-detect if variables aren't already set (e.g., separate Bash invocations)
+if [ -z "${DOCS_DIR:-}" ] || [ -z "${PROJECT_ROOT:-}" ]; then
+  eval "$(~/.claude/skills/koji/bin/koji-detect)"
+fi
+
 # Only check if target is .koji but files live in docs/
 if [ "$DOCS_DIR" = ".koji" ]; then
   LEGACY_FILES=""
