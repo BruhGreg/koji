@@ -192,26 +192,10 @@ Generate a **3-5 sentence** starter prompt for the next session:
 
 Output this clearly labeled as **"Starter Prompt for Next Session:"**
 
-Then check if the current session has a name:
+Then generate a short kebab-case session name suggestion from the session summary (e.g., `auth-middleware-refactor`, `migrate-repo-restructure-agents`). Tell the user:
 
-```bash
-SESSION_NAME=$(python3 -c "
-import json, os, glob
-for f in glob.glob(os.path.expanduser('~/.claude/sessions/*.json')):
-    d = json.load(open(f))
-    if d.get('pid') == os.getppid():
-        print(d.get('name', ''))
-        break
-" 2>/dev/null)
-echo "SESSION_NAME=$SESSION_NAME"
-```
-
-If `SESSION_NAME` is empty, generate a short kebab-case name from the session summary (e.g., `auth-middleware-refactor`, `migrate-repo-restructure-agents`). Then tell the user:
-
-> This session has no name — `/resume` won't find it easily.
-> Next time, start with: `claude -n "<suggested-name>"`
-
-If `SESSION_NAME` is already set, skip — no output.
+> **Suggested session name:** `claude -n "<suggested-name>"`
+> (Skip if you already named this session.)
 
 Finally, remind the user:
 > Tip: Next session, run `/kick-off` to auto-load this context — no need to paste.
