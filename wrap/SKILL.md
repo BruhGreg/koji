@@ -100,11 +100,19 @@ If any task changed state (completed, blocked, scoped differently, new architect
    - Remove archived entries from `agent-session.md`
    - Keep only `$ARCHIVE_KEEP` most recent entries
 
-4. Read the session template:
-   - First check `$DOCS_PATH/SESSION_TEMPLATE.md` (project-local override)
-   - If not found, use `$KOJI_SKILLS/templates/$TEMPLATE/SESSION_TEMPLATE.md`
-5. Append a new session entry at the **bottom** of `agent-session.md`, filling in all fields.
-6. Use `[Claude]` as the agent tag (or the appropriate tag from `$AGENTS`).
+4. Check if the most recent session entry has an `[in progress]` tag (created by `/take-note`):
+
+   **If `[in progress]` entry exists:**
+   - Finalize it in-place: remove the `[in progress]` tag from the title
+   - Update Summary and Key Achievements with the full session's work
+   - Fill in "Notes for Next Session" (this is wrap's responsibility, not take-note's)
+   - Do NOT create a new entry — finalize the existing one
+
+   **If no `[in progress]` entry exists:**
+   - Read the session template (first check `$DOCS_PATH/SESSION_TEMPLATE.md`, then `$KOJI_SKILLS/templates/$TEMPLATE/SESSION_TEMPLATE.md`)
+   - Append a new session entry at the **bottom** of `agent-session.md`, filling in all fields
+
+5. Use `[Claude]` as the agent tag (or the appropriate tag from `$AGENTS`).
 
 ---
 

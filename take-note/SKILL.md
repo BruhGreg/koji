@@ -38,14 +38,15 @@ If the user typed text after `/take-note` (e.g., `/take-note just finished auth 
 1. Read `$DOCS_PATH/agent-session.md`
 2. Find the **most recent** (last) session entry
 3. Update it **in-place**:
-   - Update Summary — append `[in progress]` if the session is ongoing
-   - Update Key Achievements with work completed so far (use user's note if provided)
-   - Update Notes for Next Session with current state and remaining work
-4. If there is no session entry yet, create one using the session template (check `$DOCS_PATH/SESSION_TEMPLATE.md` first, then `$KOJI_SKILLS/templates/$TEMPLATE/SESSION_TEMPLATE.md`)
+   - Add `[in progress]` tag to the session title if not already present
+   - Update Summary and Key Achievements with work completed so far (use user's note if provided)
+   - Do NOT touch "Notes for Next Session" — that section is written by `/wrap` at session end
+4. If there is no session entry yet, create one using the session template (check `$DOCS_PATH/SESSION_TEMPLATE.md` first, then `$KOJI_SKILLS/templates/$TEMPLATE/SESSION_TEMPLATE.md`). Leave "Notes for Next Session" empty or with a placeholder.
 
 **Important:**
 - Do NOT create a new session entry (unless none exists)
 - Do NOT update `AI_HANDOFF.md` — handoff is only updated during `/wrap`
+- Do NOT update "Notes for Next Session" — that is `/wrap`'s responsibility
 - Do NOT commit
 - Do NOT perform archive rotation
 - This is a lightweight save — fast and non-disruptive
