@@ -144,7 +144,7 @@ When you run `/wrap` at session end, it executes six steps in order:
 3. **Session Log** — Appends a new entry to `agent-session.md`. Archives oldest entries if threshold is reached.
 4. **Commit Proposal** — Shows `git diff --stat`, proposes a conventional commit message, waits for approval. Verifies clean worktree after.
 5. **Permission Hygiene** — Promotes safe session permissions to `settings.json`, skips risky ones, asks about grey area (zero prompts most sessions).
-6. **Starter Prompt** — Generates a 3-5 sentence briefing for the next session. Reminds to use `/kick-off`.
+6. **Starter Prompt** — Generates a 3-5 sentence briefing for the next session. If the session has no name (`-n`), suggests one for easier `/resume` lookup.
 
 ## Migration from Project-Local Wrap
 
