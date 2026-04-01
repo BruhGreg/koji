@@ -164,7 +164,7 @@ Locally, in each project's `.koji/` directory (or `docs/` for legacy projects), 
 
 ### Will `/koji-init` overwrite my existing docs?
 
-No. If `docs/lessons.md`, `docs/AI_HANDOFF.md`, or `docs/agent-session.md` already exist, koji leaves them untouched. It only creates what's missing and generates `.koji.yaml` to match your existing setup.
+No. If existing session files are found in `docs/`, koji asks whether you want to relocate them to `.koji/` (the new standard) or keep them in place. Either way, existing content is preserved — nothing is overwritten or deleted.
 
 ### What about my old `/wrap` workflow files?
 

@@ -34,8 +34,39 @@ echo "Has lessons: $HAS_LESSONS"
 
 Check what already exists in two passes:
 
-**Pass 1 — Check `$DOCS_DIR/` for koji-standard files:**
-If the project already has `docs/agent-session.md`, `docs/AI_HANDOFF.md`, and `docs/lessons.md`, this is a **migration** — only generate `.koji.yaml` to match existing setup. Do NOT overwrite existing docs.
+**Pass 1 — Check `docs/` for existing koji session files:**
+Look for `docs/agent-session.md`, `docs/AI_HANDOFF.md`, `docs/lessons.md`, and `docs/SESSION_TEMPLATE.md`. If at least two of the three core files (agent-session, AI_HANDOFF, lessons) exist, this is a **migration**.
+
+**Guard:** Only offer relocation if `HAS_PROJECT_CONFIG` is `false` (first-time init). If `.koji.yaml` already exists, respect whatever `docs_dir` it specifies — skip this step.
+
+**If migration detected**, ask the user using AskUserQuestion:
+
+> Found existing session files in `docs/`:
+> _(list only files that actually exist)_
+> - `docs/agent-session.md`
+> - `docs/AI_HANDOFF.md`
+> - `docs/lessons.md`
+>
+> The koji standard directory is `.koji/`. Would you like to relocate?
+
+Options:
+- A) Relocate to `.koji/` — move session files, update references (recommended)
+- B) Keep in `docs/` — use `docs/` as-is, set `docs_dir: docs`
+
+**If A (Relocate):**
+1. Create `.koji/` directory (and `.koji/sessions/` if `docs/sessions/` exists)
+2. Move **only** koji session files from `docs/` to `.koji/`:
+   - `agent-session.md`, `AI_HANDOFF.md`, `lessons.md`, `SESSION_TEMPLATE.md`
+   - `sessions/` subdirectory (entire directory, if it exists)
+   - Do NOT move other project documentation in `docs/`
+3. Scan the moved files for references to `docs/` session paths (e.g., `docs/lessons.md`, `docs/agent-session.md`, `docs/sessions/`) and update them to `.koji/` equivalents
+4. If `CLAUDE.md` exists, update any `docs/AI_HANDOFF.md`, `docs/lessons.md`, or `docs/agent-session.md` references to `.koji/`
+5. Set `DOCS_DIR` to `.koji` for the remainder of this workflow
+6. Skip Steps 2 and 3 (preferences and scaffolding) — files already exist. Proceed to Step 4.
+
+**If B (Keep in `docs/`):**
+1. Set `DOCS_DIR` to `docs` for the remainder of this workflow
+2. Skip Steps 2 and 3 — files already exist. Proceed to Step 4.
 
 **Pass 2 — Scan for stray session files outside `$DOCS_DIR/`:**
 Search the project root for common session file names that may exist from before koji:
@@ -109,7 +140,7 @@ Write `.koji.yaml` to the project root:
 ```yaml
 # koji — session management for AI agents
 # https://github.com/BruhGreg/koji
-docs_dir: .koji  # or docs for migrations
+docs_dir: .koji
 template: <chosen_template>
 archive:
   strategy: <chosen_strategy>
@@ -121,6 +152,8 @@ agents:
 wrap:
   starter_prompt: true
 ```
+
+Set `docs_dir` to the value determined by the workflow: `.koji` for fresh installs and relocations, `docs` if the user chose to keep files in `docs/`.
 
 ### 5. Wire CLAUDE.md
 
@@ -135,8 +168,8 @@ Check if `CLAUDE.md` exists in the project root.
 ## Session Management (koji)
 
 On session start:
-1. Read `docs/AI_HANDOFF.md` for current project state
-2. Review recent `docs/lessons.md` entries for gotchas
+1. Read `$DOCS_DIR/AI_HANDOFF.md` for current project state
+2. Review recent `$DOCS_DIR/lessons.md` entries for gotchas
 
 On session end: run `/wrap`
 Mid-session checkpoint: run `/take-note`
@@ -151,12 +184,14 @@ Mid-session checkpoint: run `/take-note`
 ## Session Management (koji)
 
 On session start:
-1. Read `docs/AI_HANDOFF.md` for current project state
-2. Review recent `docs/lessons.md` entries for gotchas
+1. Read `$DOCS_DIR/AI_HANDOFF.md` for current project state
+2. Review recent `$DOCS_DIR/lessons.md` entries for gotchas
 
 On session end: run `/wrap`
 Mid-session checkpoint: run `/take-note`
 ```
+
+(Substitute the actual resolved `$DOCS_DIR` value — e.g., `.koji` or `docs` — when writing to CLAUDE.md. Do not write the literal string `$DOCS_DIR`.)
 
 Tell the user: "Added session management instructions to CLAUDE.md — your agent will now automatically read handoff state and lessons at session start."
 

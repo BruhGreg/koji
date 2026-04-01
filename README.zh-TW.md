@@ -164,7 +164,7 @@ rm -f .claude/commands/wrap.md
 
 ### `/koji-init` 會覆蓋我現有的文件嗎？
 
-不會。如果 `docs/lessons.md`、`docs/AI_HANDOFF.md` 或 `docs/agent-session.md` 已存在，koji 不會動它們。它只建立缺少的部分，並產生符合現有設定的 `.koji.yaml`。
+不會。如果在 `docs/` 中找到現有的工作階段檔案，koji 會詢問你要遷移至 `.koji/`（新標準）還是保持原位。無論選擇哪個，現有內容都會保留——不會覆蓋或刪除任何東西。
 
 ### 我舊的 `/wrap` 工作流程檔案怎麼辦？
 
