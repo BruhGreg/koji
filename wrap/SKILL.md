@@ -79,6 +79,7 @@ If any task changed state (completed, blocked, scoped differently, new architect
    - Update "Next Agent's Tasks" or "Immediate Next Steps"
    - Add key architectural decisions if applicable
 3. Do NOT rewrite unchanged sections. Only update what changed.
+4. **Size constraint: keep AI_HANDOFF.md under ~80 lines / ~500 words.** This file is read on every session start — it must be a tight operational snapshot, not a knowledge base. If detail is needed, reference external docs (e.g., architecture assessments, decision logs) rather than inlining.
 
 ---
 
