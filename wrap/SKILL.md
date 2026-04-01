@@ -48,8 +48,13 @@ Review the session for any cases where the user corrected you, or where you disc
 - One-off mistakes unlikely to recur (typos, wrong flag on a single command)
 - Things already documented in CLAUDE.md or obvious from the codebase
 - Restatements of framework/library documentation
+- **Tool or agent knowledge** — how Claude Code hooks work, how koji skills behave, how git flags work. These belong in tool docs, not project lessons.
+- **Decisions already encoded in config** — if you just wrote it into a skill file, `.koji.yaml`, `settings.json`, or `CLAUDE.md`, it's already persisted. Don't duplicate it as a lesson.
+- **Workflow design choices** — "we decided X belongs in kick-off not wrap" is a design decision, not a lesson. It's in the skill file already.
 
-**When in doubt, don't add it.** A short, high-signal lessons file is far more valuable than a long one full of noise.
+**The test:** Would a developer working on *this project's codebase* hit this problem again if they didn't read this lesson? If no — don't add it. Lessons are for project-specific landmines, not general knowledge.
+
+**When in doubt, don't add it.** A short, high-signal lessons file is far more valuable than a long one full of noise. Most sessions should add zero lessons.
 
 If any corrections or discoveries pass the filter:
 1. Read `$DOCS_PATH/lessons.md`
