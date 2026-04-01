@@ -38,7 +38,7 @@ cd ~/.claude/skills/koji && ./setup
 koji 會問兩個問題（模板樣式 + 歸檔策略），然後建立：
 
 ```
-docs/
+.koji/
 ├── agent-session.md       # 工作階段歷史
 ├── AI_HANDOFF.md          # 給下一個代理的專案狀態
 ├── lessons.md             # 修正與發現
@@ -68,7 +68,7 @@ docs/
 
 ```yaml
 # koji — AI 代理的工作階段管理
-docs_dir: docs                # 工作階段文件存放位置
+docs_dir: .koji               # 工作階段文件存放位置（舊版：docs）
 template: default             # "default"（完整）或 "simple"（精簡）
 archive:
   strategy: numbered          # "numbered"（archive-01.md）或 "dated"（YYYY-MM/DD-slug.md）
@@ -102,7 +102,8 @@ wrap:
 ├── koji-init/SKILL.md        # /koji-init 技能定義
 ├── bin/
 │   ├── koji-config           # 設定讀寫工具
-│   └── koji-detect           # 專案偵測 + 設定層疊
+│   ├── koji-detect           # 專案偵測 + 設定層疊
+│   └── koji-migrate-check    # 舊版 docs/ → .koji/ 遷移偵測
 ├── templates/
 │   ├── default/              # 完整模板集
 │   └── simple/               # 精簡模板集
@@ -115,7 +116,7 @@ wrap:
 
 <project>/
 ├── .koji.yaml                # 專案設定
-└── docs/                     # 工作階段文件（由 /koji-init 建立）
+└── .koji/                    # 工作階段文件（由 /koji-init 建立）
 ```
 
 **設定層疊：** `.koji.yaml`（專案）> `~/.config/koji/config.yaml`（全域）> 內建預設值。支援 `XDG_CONFIG_HOME` 環境變數。
@@ -128,10 +129,11 @@ wrap:
 
 當你在工作階段開始時執行 `/kick-off`：
 
-1. **版本檢查** — 比較本地與遠端 VERSION。提供更新 / 跳過 / 總是更新選項。
-2. **載入上下文** — 靜默讀取 AI_HANDOFF.md、lessons.md、上次工作階段條目。
-3. **簡報** — 4-5 行摘要：上次工作階段、下一項任務、注意事項、焦點。
-4. **gstack 建議** — 若偵測到 gstack，分析目前開發階段並建議 2-3 個相關工作流程（例如前端工作建議 `/browse`，準備發布建議 `/qa`）。未偵測到 gstack 則跳過。
+1. **遷移檢查** — 偵測 koji 檔案是否在 `docs/`（舊版）但 `.koji.yaml` 指向 `.koji/`。提供遷移或跳過選項。
+2. **版本檢查** — 比較本地與遠端 VERSION。提供更新 / 跳過 / 總是更新選項。
+3. **載入上下文** — 靜默讀取 AI_HANDOFF.md、lessons.md、上次工作階段條目。
+4. **簡報** — 4-5 行摘要：上次工作階段、下一項任務、注意事項、焦點。
+5. **gstack 建議** — 若偵測到 gstack，分析目前開發階段並建議 2-3 個相關工作流程（例如前端工作建議 `/browse`，準備發布建議 `/qa`）。未偵測到 gstack 則跳過。
 
 ### `/wrap`
 
@@ -158,7 +160,7 @@ rm -f .claude/commands/wrap.md
 
 ### 工作階段文件存放在哪裡？
 
-在各專案的 `docs/` 目錄中，提交至 git。每個專案的教訓、交接和工作階段歷史都屬於該專案。`~/.config/koji/` 只存放你的全域偏好設定（如預設模板）——不含專案資料。
+在各專案的 `.koji/` 目錄中（舊版專案為 `docs/`），提交至 git。每個專案的教訓、交接和工作階段歷史都屬於該專案。`~/.config/koji/` 只存放你的全域偏好設定（如預設模板）——不含專案資料。
 
 ### `/koji-init` 會覆蓋我現有的文件嗎？
 
@@ -178,7 +180,7 @@ rm -f .claude/commands/wrap.md
 
 ### 代理怎麼知道要在工作階段開始時讀取交接/教訓？
 
-`/koji-init` 會在專案的 `CLAUDE.md` 中新增 `## Session Management (koji)` 區塊，指示在工作階段開始時讀取 `docs/AI_HANDOFF.md` 和 `docs/lessons.md`。Claude Code 在每次工作階段開始時會自動讀取 `CLAUDE.md`。
+`/koji-init` 會在專案的 `CLAUDE.md` 中新增 `## Session Management (koji)` 區塊，指示在工作階段開始時執行 `/kick-off`，自動讀取交接狀態和教訓。Claude Code 在每次工作階段開始時會自動讀取 `CLAUDE.md`。
 
 ### 可以為不同專案使用不同模板嗎？
 

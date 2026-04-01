@@ -42,10 +42,10 @@ If the user typed text after `/take-note` (e.g., `/take-note just finished auth 
    - Update Key Achievements with work completed so far (use user's note if provided)
    - Update Notes for Next Session with current state and remaining work
 4. If there is no session entry yet, create one using the session template (check `$DOCS_PATH/SESSION_TEMPLATE.md` first, then `$KOJI_SKILLS/templates/$TEMPLATE/SESSION_TEMPLATE.md`)
-5. Also update `$DOCS_PATH/AI_HANDOFF.md` if roadmap items changed state
 
 **Important:**
 - Do NOT create a new session entry (unless none exists)
+- Do NOT update `AI_HANDOFF.md` — handoff is only updated during `/wrap`
 - Do NOT commit
 - Do NOT perform archive rotation
 - This is a lightweight save — fast and non-disruptive

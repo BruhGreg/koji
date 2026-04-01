@@ -104,31 +104,29 @@ If any task changed state (completed, blocked, scoped differently, new architect
 
 ## Step 4 — Commit Proposal
 
+**Important:** Steps 1-3 above only edit files. No commits happen until this step.
+
 1. Run `git status` and `git diff --stat` to capture **all** changes (both session work and wrap doc updates).
-2. Determine the commit strategy:
+2. Classify every changed file as either **code** (session work) or **docs** (koji files: `$DOCS_PATH/lessons.md`, `$DOCS_PATH/AI_HANDOFF.md`, `$DOCS_PATH/agent-session.md`, `$DOCS_PATH/SESSION_TEMPLATE.md`, `$DOCS_PATH/$ARCHIVE_DIR/**`).
+3. Determine the commit strategy:
+
+   **If there are only doc changes (work was already committed):**
+   - Propose a single commit: `docs(koji): update session logs`
+   - Stage all doc files, present the message, wait for approval, commit.
+
+   **If there are only code changes (no docs were modified — unlikely during wrap):**
+   - Propose a single conventional commit for the work.
+   - Stage all files, present the message, wait for approval, commit.
 
    **If there are both code changes AND doc changes (mixed worktree):**
    - Ask the user: **"Commit all together, or split into work commit + docs commit?"**
-   - **Together**: One conventional commit covering everything.
-   - **Split**: First commit the session's code work, then a separate `docs(koji): update session logs` commit for the wrap files.
+   - **Together**: Stage everything, propose one conventional commit, wait for approval, commit. **Done — one commit total.**
+   - **Split**: Execute exactly two commits in sequence:
+     1. Stage **only code files** (`git add` each by name). Present the work commit message, wait for approval, commit.
+     2. Stage **only doc files** (`git add` each by name). Commit with `docs(koji): update session logs`. This second commit does not need separate approval — it was approved as part of the split decision.
+     **Done — two commits total.**
 
-   **If there are only doc changes (work was already committed):**
-   - Propose: `docs(koji): update session logs`
-   - This covers lessons.md, AI_HANDOFF.md, agent-session.md, and any archive files.
-
-   **If there are only code changes (no docs were modified):**
-   - Propose a conventional commit for the work.
-
-3. Present the commit message(s) and ask: **"Commit with this message?"**
-4. Do NOT auto-commit. Wait for explicit approval.
-5. **After committing**, run `git status` to verify the worktree is clean. If there are still uncommitted changes, present choices:
-
-   > Worktree is not clean. What would you like to do?
-   > 1. **Squash** — amend the last commit to include remaining changes
-   > 2. **New commit** — create a separate commit for the leftover changes
-   > 3. **Skip** — leave as-is (type anything else to discuss)
-
-   Wait for the user's choice. If they type something other than 1/2/3, treat it as a discussion prompt and respond accordingly.
+4. **After committing**, run `git status`. If the worktree is clean, move on. If there are unexpected leftover changes, **report them to the user** but do NOT create additional commits. Let the user decide in the next step or manually.
 
 ---
 

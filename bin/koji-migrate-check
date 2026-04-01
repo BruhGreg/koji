@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# koji-migrate-check — detect if koji files need migration from docs/ to .koji/
+#
+# Usage: source <(~/.claude/skills/koji/bin/koji-migrate-check)
+#
+# Requires koji-detect to have been sourced first (needs $DOCS_DIR, $PROJECT_ROOT).
+# Outputs:
+#   KOJI_NEEDS_MIGRATION=true/false
+#   KOJI_LEGACY_FILES="file1 file2 ..."  (space-separated list of found legacy files)
+set -euo pipefail
+
+# Only check if target is .koji but files live in docs/
+if [ "$DOCS_DIR" = ".koji" ]; then
+  LEGACY_FILES=""
+  for f in agent-session.md AI_HANDOFF.md lessons.md SESSION_TEMPLATE.md; do
+    if [ -f "$PROJECT_ROOT/docs/$f" ] && [ ! -f "$PROJECT_ROOT/.koji/$f" ]; then
+      LEGACY_FILES="$LEGACY_FILES docs/$f"
+    fi
+  done
+
+  # Check for legacy sessions archive
+  if [ -d "$PROJECT_ROOT/docs/sessions" ] && [ ! -d "$PROJECT_ROOT/.koji/sessions" ]; then
+    LEGACY_FILES="$LEGACY_FILES docs/sessions/"
+  fi
+
+  LEGACY_FILES="$(echo "$LEGACY_FILES" | sed 's/^ //')"
+
+  if [ -n "$LEGACY_FILES" ]; then
+    echo "KOJI_NEEDS_MIGRATION=true"
+    echo "KOJI_LEGACY_FILES=\"$LEGACY_FILES\""
+  else
+    echo "KOJI_NEEDS_MIGRATION=false"
+    echo "KOJI_LEGACY_FILES=\"\""
+  fi
+else
+  echo "KOJI_NEEDS_MIGRATION=false"
+  echo "KOJI_LEGACY_FILES=\"\""
+fi

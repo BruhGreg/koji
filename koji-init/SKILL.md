@@ -109,7 +109,7 @@ Write `.koji.yaml` to the project root:
 ```yaml
 # koji — session management for AI agents
 # https://github.com/BruhGreg/koji
-docs_dir: docs
+docs_dir: .koji  # or docs for migrations
 template: <chosen_template>
 archive:
   strategy: <chosen_strategy>
@@ -188,6 +188,7 @@ Archive: $ARCHIVE_STRATEGY
 CLAUDE.md: session checklist added
 
 Available commands:
+  /kick-off   — Start a session (loads last session + handoff context)
   /wrap       — End-of-session wrap (lessons + handoff + session log + commit)
   /take-note  — Mid-session progress save
   /koji-init  — Re-run this setup

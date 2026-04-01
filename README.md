@@ -38,7 +38,7 @@ That's it. Four skills are now available in Claude Code:
 koji asks two questions (template style + archive strategy), then creates:
 
 ```
-docs/
+.koji/
 ├── agent-session.md       # Session history
 ├── AI_HANDOFF.md          # Project state for next agent
 ├── lessons.md             # Corrections and discoveries
@@ -68,7 +68,7 @@ Some skills accept text after the command to override default behavior:
 
 ```yaml
 # koji — session management for AI agents
-docs_dir: docs                # where session docs live
+docs_dir: .koji               # where session docs live (legacy: docs)
 template: default             # "default" (full) or "simple" (minimal)
 archive:
   strategy: numbered          # "numbered" (archive-01.md) or "dated" (YYYY-MM/DD-slug.md)
@@ -102,7 +102,8 @@ wrap:
 ├── koji-init/SKILL.md        # /koji-init skill definition
 ├── bin/
 │   ├── koji-config           # Config read/write utility
-│   └── koji-detect           # Project detection + config cascade
+│   ├── koji-detect           # Project detection + config cascade
+│   └── koji-migrate-check    # Legacy docs/ → .koji/ migration detection
 ├── templates/
 │   ├── default/              # Full template set
 │   └── simple/               # Minimal template set
@@ -115,7 +116,7 @@ wrap:
 
 <project>/
 ├── .koji.yaml                # Per-project config
-└── docs/                     # Session docs (created by /koji-init)
+└── .koji/                    # Session docs (created by /koji-init)
 ```
 
 **Config cascade:** `.koji.yaml` (project) > `~/.config/koji/config.yaml` (global) > built-in defaults. Respects `XDG_CONFIG_HOME` if set.
@@ -128,10 +129,11 @@ wrap:
 
 When you run `/kick-off` at session start:
 
-1. **Version check** — compares local vs remote VERSION. Offers update / skip / always-update.
-2. **Load context** — reads AI_HANDOFF.md, lessons.md, last session entry silently.
-3. **Brief** — 4-5 line summary: last session, next task, gotchas, focus.
-4. **gstack suggestions** — if gstack is installed, detects your dev phase and suggests 2-3 relevant workflows (e.g., `/browse` for frontend, `/qa` for pre-ship). Skipped if gstack not detected.
+1. **Migration check** — detects if koji files are in `docs/` (legacy) but `.koji.yaml` points to `.koji/`. Offers to migrate or skip.
+2. **Version check** — compares local vs remote VERSION. Offers update / skip / always-update.
+3. **Load context** — reads AI_HANDOFF.md, lessons.md, last session entry silently.
+4. **Brief** — 4-5 line summary: last session, next task, gotchas, focus.
+5. **gstack suggestions** — if gstack is installed, detects your dev phase and suggests 2-3 relevant workflows (e.g., `/browse` for frontend, `/qa` for pre-ship). Skipped if gstack not detected.
 
 ### `/wrap`
 
@@ -158,7 +160,7 @@ rm -f .claude/commands/wrap.md
 
 ### Where do session docs live?
 
-Locally, in each project's `docs/` directory, committed to git. Each project's lessons, handoff, and session history belong with that project. `~/.config/koji/` only stores your global preferences (like default template) — no project data.
+Locally, in each project's `.koji/` directory (or `docs/` for legacy projects), committed to git. Each project's lessons, handoff, and session history belong with that project. `~/.config/koji/` only stores your global preferences (like default template) — no project data.
 
 ### Will `/koji-init` overwrite my existing docs?
 
@@ -178,7 +180,7 @@ Just `config.yaml` with your global defaults (template preference, archive strat
 
 ### How does the agent know to read handoff/lessons at session start?
 
-`/koji-init` adds a `## Session Management (koji)` section to your project's `CLAUDE.md` with instructions to read `docs/AI_HANDOFF.md` and `docs/lessons.md` on session start. Claude Code reads `CLAUDE.md` automatically at the beginning of every session.
+`/koji-init` adds a `## Session Management (koji)` section to your project's `CLAUDE.md` with instructions to run `/kick-off` on session start, which reads the handoff and lessons automatically. Claude Code reads `CLAUDE.md` at the beginning of every session.
 
 ### Can I use different templates per project?
 

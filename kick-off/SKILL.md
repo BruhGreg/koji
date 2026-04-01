@@ -53,7 +53,29 @@ If `HAS_SESSION_LOG` is `false` or `HAS_HANDOFF` is `false`, tell the user to ru
 
 ## Workflow
 
-### 0. Version check
+### 0a. Migration check (docs/ → .koji/)
+
+Run the migration detection script:
+
+```bash
+source <(~/.claude/skills/koji/bin/koji-migrate-check)
+echo "Needs migration: $KOJI_NEEDS_MIGRATION"
+echo "Legacy files: $KOJI_LEGACY_FILES"
+```
+
+If `KOJI_NEEDS_MIGRATION` is `true`, tell the user:
+
+> Found koji files in legacy location: $KOJI_LEGACY_FILES
+> Your `.koji.yaml` points to `.koji/`.
+>
+> 1. **Migrate** — move files to `.koji/` and update references
+> 2. **Skip** — keep them in `docs/` (update `.koji.yaml` to match)
+
+If **Migrate**: create `.koji/`, move each file from `docs/` to `.koji/`, move `docs/sessions/` to `.koji/sessions/` if present, update `CLAUDE.md` and agent config references, re-run koji-detect.
+If **Skip**: patch `.koji.yaml` to `docs_dir: docs`, continue normally.
+If `KOJI_NEEDS_MIGRATION` is `false`, skip silently.
+
+### 0b. Version check
 
 If the preamble shows `UPDATE_AVAILABLE`:
 
