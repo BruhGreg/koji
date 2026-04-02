@@ -123,35 +123,7 @@ If any task changed state (completed, blocked, scoped differently, new architect
 
 ---
 
-## Step 4 — Commit Proposal
-
-**Important:** Steps 1-3 above only edit files. No commits happen until this step.
-
-1. Run `git status` and `git diff --stat` to capture **all** changes (both session work and wrap doc updates).
-2. Classify every changed file as either **code** (session work) or **docs** (koji files: `$DOCS_PATH/lessons.md`, `$DOCS_PATH/AI_HANDOFF.md`, `$DOCS_PATH/agent-session.md`, `$DOCS_PATH/SESSION_TEMPLATE.md`, `$DOCS_PATH/$ARCHIVE_DIR/**`).
-3. Determine the commit strategy:
-
-   **If there are only doc changes (work was already committed):**
-   - Propose a single commit: `docs(koji): update session logs`
-   - Stage all doc files, present the message, wait for approval, commit.
-
-   **If there are only code changes (no docs were modified — unlikely during wrap):**
-   - Propose a single conventional commit for the work.
-   - Stage all files, present the message, wait for approval, commit.
-
-   **If there are both code changes AND doc changes (mixed worktree):**
-   - Ask the user: **"Commit all together, or split into work commit + docs commit?"**
-   - **Together**: Stage everything, propose one conventional commit, wait for approval, commit. **Done — one commit total.**
-   - **Split**: Execute exactly two commits in sequence:
-     1. Stage **only code files** (`git add` each by name). Present the work commit message, wait for approval, commit.
-     2. Stage **only doc files** (`git add` each by name). Commit with `docs(koji): update session logs`. This second commit does not need separate approval — it was approved as part of the split decision.
-     **Done — two commits total.**
-
-4. **After committing**, run `git status`. If the worktree is clean, move on. If there are unexpected leftover changes, **report them to the user** but do NOT create additional commits. Let the user decide in the next step or manually.
-
----
-
-## Step 5 — Permission Hygiene
+## Step 4 — Permission Hygiene
 
 Check if `.claude/settings.local.json` exists. If it does:
 
@@ -197,6 +169,34 @@ Check if `.claude/settings.local.json` exists. If it does:
 
 ---
 
+## Step 5 — Commit Proposal
+
+**Important:** Steps 1-4 above only edit files. No commits happen until this step.
+
+1. Run `git status` and `git diff --stat` to capture **all** changes (session work, wrap doc updates, and permission changes).
+2. Classify every changed file as either **code** (session work) or **docs** (koji files: `$DOCS_PATH/lessons.md`, `$DOCS_PATH/AI_HANDOFF.md`, `$DOCS_PATH/agent-session.md`, `$DOCS_PATH/SESSION_TEMPLATE.md`, `$DOCS_PATH/$ARCHIVE_DIR/**`, `.claude/settings.json`).
+3. Determine the commit strategy:
+
+   **If there are only doc changes (work was already committed):**
+   - Propose a single commit: `docs(koji): update session logs`
+   - Stage all doc files, present the message, wait for approval, commit.
+
+   **If there are only code changes (no docs were modified — unlikely during wrap):**
+   - Propose a single conventional commit for the work.
+   - Stage all files, present the message, wait for approval, commit.
+
+   **If there are both code changes AND doc changes (mixed worktree):**
+   - Ask the user: **"Commit all together, or split into work commit + docs commit?"**
+   - **Together**: Stage everything, propose one conventional commit, wait for approval, commit. **Done — one commit total.**
+   - **Split**: Execute exactly two commits in sequence:
+     1. Stage **only code files** (`git add` each by name). Present the work commit message, wait for approval, commit.
+     2. Stage **only doc files** (`git add` each by name). Commit with `docs(koji): update session logs`. This second commit does not need separate approval — it was approved as part of the split decision.
+     **Done — two commits total.**
+
+4. **After committing**, run `git status`. If the worktree is clean, move on. If there are unexpected leftover changes, **report them to the user** but do NOT create additional commits. Let the user decide in the next step or manually.
+
+---
+
 ## Step 6 — Starter Prompt
 
 Generate a **3-5 sentence** starter prompt for the next session:
@@ -224,6 +224,6 @@ Before finishing, verify:
 - [ ] `AI_HANDOFF.md` updated (if task state changed)
 - [ ] Session entry appended to `agent-session.md`
 - [ ] Archive rotation performed (if threshold reached)
-- [ ] Commit proposed (awaiting approval)
 - [ ] Permissions reviewed (if new ones in settings.local.json)
+- [ ] Commit proposed (awaiting approval)
 - [ ] Starter prompt generated
