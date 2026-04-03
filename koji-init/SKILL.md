@@ -131,6 +131,8 @@ $DOCS_DIR/
 
 Copy templates from `~/.claude/skills/koji/templates/$TEMPLATE/` to `$PROJECT_ROOT/$DOCS_DIR/`.
 
+**Note:** `TODO.md` is NOT created here. It gets created automatically by `/wrap` the first time task-related work is done — no empty scaffolding.
+
 Also copy `SESSION_TEMPLATE.md` into `$DOCS_DIR/` so the project has a local reference.
 
 ### 4. Generate `.koji.yaml`
@@ -168,8 +170,9 @@ Check if `CLAUDE.md` exists in the project root.
 ## Session Management (koji)
 
 On session start:
-1. Read `$DOCS_DIR/AI_HANDOFF.md` for current project state
-2. Review recent `$DOCS_DIR/lessons.md` entries for gotchas
+1. Read `$DOCS_DIR/AI_HANDOFF.md` for project state and architecture rules
+2. Read `$DOCS_DIR/TODO.md` for open tasks and next steps
+3. Review recent `$DOCS_DIR/lessons.md` entries for gotchas
 
 On session end: run `/wrap`
 Mid-session checkpoint: run `/take-note`
@@ -184,8 +187,9 @@ Mid-session checkpoint: run `/take-note`
 ## Session Management (koji)
 
 On session start:
-1. Read `$DOCS_DIR/AI_HANDOFF.md` for current project state
-2. Review recent `$DOCS_DIR/lessons.md` entries for gotchas
+1. Read `$DOCS_DIR/AI_HANDOFF.md` for project state and architecture rules
+2. Read `$DOCS_DIR/TODO.md` for open tasks and next steps
+3. Review recent `$DOCS_DIR/lessons.md` entries for gotchas
 
 On session end: run `/wrap`
 Mid-session checkpoint: run `/take-note`

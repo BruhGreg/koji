@@ -35,6 +35,7 @@ fi
 echo "Has session log: $HAS_SESSION_LOG"
 echo "Has handoff: $HAS_HANDOFF"
 echo "Has lessons: $HAS_LESSONS"
+echo "Has TODO: $HAS_TODO"
 
 # --- Detect gstack ---
 if [ -d "$HOME/.claude/skills/gstack" ] && [ -f "$HOME/.claude/skills/gstack/VERSION" ]; then
@@ -75,7 +76,23 @@ If **Migrate**: create `.koji/`, move each file from `docs/` to `.koji/`, move `
 If **Skip**: patch `.koji.yaml` to `docs_dir: docs`, continue normally.
 If `KOJI_NEEDS_MIGRATION` is `false`, skip silently.
 
-### 0b. Version check
+### 0b. TODO migration (docs dir → project root)
+
+If `$TODO_NEEDS_MIGRATION` is `true`, the TODO file is inside the docs dir (e.g., `.koji/TODO.md`) but the canonical location is the project root. Migrate it:
+
+1. Move the file: `$DOCS_PATH/$TODO_FILE` → `$PROJECT_ROOT/$TODO_FILE`
+2. Scan the project for references to the old path and update them:
+   - `CLAUDE.md` — update any `.koji/TODO.md` references to `TODO.md`
+   - `$DOCS_PATH/AI_HANDOFF.md` — update links like `[TODO.md](TODO.md)` to `[TODO.md](../TODO.md)` or absolute
+   - `AGENTS.md` — update `.koji/TODO.md` references
+   - `.koji.yaml` — remove `todo.file` if it was set to the old path
+3. If `COMPLETED_TASKS.md` exists in the docs dir and references `TODO.md`, update those links too.
+4. Tell the user: `Moved $TODO_FILE to project root (koji 0.3.0 convention).`
+5. Re-source koji-detect to update `$TODO_PATH`.
+
+If `$TODO_NEEDS_MIGRATION` is `false`, skip silently.
+
+### 0c. Version check
 
 If the preamble shows `UPDATE_AVAILABLE`:
 
@@ -104,9 +121,10 @@ If no args provided, proceed to step 2.
 
 Read these files and internalize the content — do NOT dump them back to the user:
 
-1. `$DOCS_PATH/AI_HANDOFF.md` — current project state, roadmap, decisions, blockers
-2. `$DOCS_PATH/lessons.md` — recent corrections and gotchas (focus on the top 10 entries)
-3. `$DOCS_PATH/agent-session.md` — read the **last** session entry for continuity (what was done, notes for next session)
+1. `$DOCS_PATH/AI_HANDOFF.md` — project state, architecture rules, gotchas
+2. `$TODO_PATH` — open tasks, tech debt, blockers (if `$HAS_TODO` is `true`)
+3. `$DOCS_PATH/lessons.md` — recent corrections and gotchas (focus on the top 10 entries)
+4. `$DOCS_PATH/agent-session.md` — read the **last** session entry for continuity (what was done, notes for next session)
 
 ### 3. Brief the user
 
@@ -115,7 +133,7 @@ Output a concise briefing (not a wall of text):
 > **Session start — $PROJECT_NAME**
 >
 > Last session: [1-line summary of what was done]
-> Handoff says: [1-line summary of the most important next task]
+> Handoff says: [1-line — highest priority open task from TODO.md if it exists, otherwise from AI_HANDOFF.md]
 > Watching out for: [1-line gotcha from lessons, if relevant — otherwise skip]
 >
 > **Focus:** [user's arg if provided, OR the "Notes for Next Session" from the last entry]

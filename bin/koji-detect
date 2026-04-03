@@ -96,9 +96,47 @@ AGENTS="$(_yaml_list "$PROJECT_CONFIG" "agents")"
 [ -z "$AGENTS" ] && AGENTS="Claude"
 echo "AGENTS=\"$AGENTS\""
 
+# TODO config — resolve file name with auto-detection cascade:
+# 1. Explicit .koji.yaml config (todo.file)
+# 2. Auto-detect: check project root for TODO.md or TODOS.md
+# 3. Auto-detect: check docs dir (legacy location)
+# 4. Default: TODO.md at project root
+TODO_FILE_CFG="$(_resolve "todo.file" "")"
+if [ -n "$TODO_FILE_CFG" ]; then
+  TODO_FILE="$TODO_FILE_CFG"
+elif [ -f "$PROJECT_ROOT/TODO.md" ]; then
+  TODO_FILE="TODO.md"
+elif [ -f "$PROJECT_ROOT/TODOS.md" ]; then
+  TODO_FILE="TODOS.md"
+elif [ -f "$PROJECT_ROOT/$DOCS_DIR/TODO.md" ]; then
+  TODO_FILE="TODO.md"
+elif [ -f "$PROJECT_ROOT/$DOCS_DIR/TODOS.md" ]; then
+  TODO_FILE="TODOS.md"
+else
+  TODO_FILE="TODO.md"
+fi
+TODO_COMPLETED="$(_resolve "todo.completed" "inline")"
+
+# Resolve TODO path — project root is canonical, docs dir is legacy
+if [ -f "$PROJECT_ROOT/$TODO_FILE" ]; then
+  TODO_PATH="$PROJECT_ROOT/$TODO_FILE"
+elif [ -f "$PROJECT_ROOT/$DOCS_DIR/$TODO_FILE" ]; then
+  TODO_PATH="$PROJECT_ROOT/$DOCS_DIR/$TODO_FILE"
+  TODO_NEEDS_MIGRATION=true
+else
+  # Not found yet — default to project root (will be created there by wrap)
+  TODO_PATH="$PROJECT_ROOT/$TODO_FILE"
+fi
+
+echo "TODO_FILE=\"$TODO_FILE\""
+echo "TODO_PATH=\"$TODO_PATH\""
+echo "TODO_COMPLETED=\"$TODO_COMPLETED\""
+echo "TODO_NEEDS_MIGRATION=\"${TODO_NEEDS_MIGRATION:-false}\""
+
 # State checks
 [ -f "$PROJECT_CONFIG" ] && echo "HAS_PROJECT_CONFIG=true" || echo "HAS_PROJECT_CONFIG=false"
 [ -d "$PROJECT_ROOT/$DOCS_DIR" ] && echo "HAS_DOCS=true" || echo "HAS_DOCS=false"
 [ -f "$PROJECT_ROOT/$DOCS_DIR/agent-session.md" ] && echo "HAS_SESSION_LOG=true" || echo "HAS_SESSION_LOG=false"
 [ -f "$PROJECT_ROOT/$DOCS_DIR/AI_HANDOFF.md" ] && echo "HAS_HANDOFF=true" || echo "HAS_HANDOFF=false"
 [ -f "$PROJECT_ROOT/$DOCS_DIR/lessons.md" ] && echo "HAS_LESSONS=true" || echo "HAS_LESSONS=false"
+[ -f "$TODO_PATH" ] && echo "HAS_TODO=true" || echo "HAS_TODO=false"

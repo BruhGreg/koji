@@ -69,15 +69,12 @@ If nothing passes the filter, skip this step.
 
 ---
 
-## Step 2 — AI Handoff
+## Step 2a — AI Handoff
 
-If any task changed state (completed, blocked, scoped differently, new architectural decisions):
+If project state or architecture rules changed (new decisions, gotchas, phase changes):
 
 1. Read `$DOCS_PATH/AI_HANDOFF.md`
-2. Update the relevant sections:
-   - Mark completed tasks
-   - Update "Next Agent's Tasks" or "Immediate Next Steps"
-   - Add key architectural decisions if applicable
+2. Update the relevant sections (state, rules, gotchas). Do NOT put task/roadmap items here — those go in TODO.
 3. Do NOT rewrite unchanged sections. Only update what changed.
 4. **Size constraint: keep AI_HANDOFF.md under ~80 lines / ~500 words.** This file is read on every session start — it must be a tight operational snapshot, not a knowledge base. If detail is needed, reference external docs rather than inlining.
 5. **After writing**, check the file size:
@@ -86,6 +83,31 @@ If any task changed state (completed, blocked, scoped differently, new architect
    echo "AI_HANDOFF.md: $HANDOFF_LINES lines"
    ```
    If over 80 lines, warn: `⚠️ AI_HANDOFF.md is $HANDOFF_LINES lines (cap: ~80). Trim stale/completed items or move detail to external docs.` Then re-edit to bring it under the cap before proceeding.
+
+---
+
+## Step 2b — TODO
+
+Review the session for task-related changes: completed work, new tasks discovered, new tech debt, changed blockers.
+
+**If nothing task-related changed this session**, skip this step entirely.
+
+**If task-related changes exist:**
+
+1. **If `$HAS_TODO` is `true`:** Read `$TODO_PATH` and update it:
+   - Mark completed items
+   - Add new tasks or tech debt discovered during the session
+   - For completed tasks:
+     - **If `$TODO_COMPLETED` is `inline`:** move to `## Completed` section, add `(YYYY-MM-DD)`
+     - **If `$TODO_COMPLETED` is `archive`:** move to `$DOCS_PATH/COMPLETED_TASKS.md` (create if needed, with header: `> Archive of completed work. For active work, see [TODO.md](TODO.md).`), remove from TODO file
+   - Do NOT rewrite unchanged sections.
+
+2. **If `$HAS_TODO` is `false`:** This project doesn't have a TODO file yet. Create one at the **project root** (`$PROJECT_ROOT/$TODO_FILE`):
+   - Copy the template from `$KOJI_SKILLS/templates/$TEMPLATE/$TODO_FILE` to `$PROJECT_ROOT/$TODO_FILE`
+   - Populate it with the tasks from this session (completed items, new items, discovered debt)
+   - If `$DOCS_PATH/AI_HANDOFF.md` contains roadmap items, task lists, or "Blocked On" sections, migrate them into the new TODO file and remove them from the handoff (keeps handoff under ~80 lines)
+   - Update `AI_HANDOFF.md` header to link to the new TODO file
+   - Tell the user: `Created $TODO_FILE at project root — task tracking is now separate from the handoff.`
 
 ---
 
@@ -174,7 +196,7 @@ Check if `.claude/settings.local.json` exists. If it does:
 **Important:** Steps 1-4 above only edit files. No commits happen until this step.
 
 1. Run `git status` and `git diff --stat` to capture **all** changes (session work, wrap doc updates, and permission changes).
-2. Classify every changed file as either **code** (session work) or **docs** (koji files: `$DOCS_PATH/lessons.md`, `$DOCS_PATH/AI_HANDOFF.md`, `$DOCS_PATH/agent-session.md`, `$DOCS_PATH/SESSION_TEMPLATE.md`, `$DOCS_PATH/$ARCHIVE_DIR/**`, `.claude/settings.json`).
+2. Classify every changed file as either **code** (session work) or **docs** (koji files: `$DOCS_PATH/lessons.md`, `$DOCS_PATH/AI_HANDOFF.md`, `$TODO_PATH`, `$DOCS_PATH/COMPLETED_TASKS.md`, `$DOCS_PATH/agent-session.md`, `$DOCS_PATH/SESSION_TEMPLATE.md`, `$DOCS_PATH/$ARCHIVE_DIR/**`, `.claude/settings.json`).
 3. Determine the commit strategy:
 
    **If there are only doc changes (work was already committed):**
@@ -221,7 +243,8 @@ Finally, remind the user:
 
 Before finishing, verify:
 - [ ] `lessons.md` updated (if applicable)
-- [ ] `AI_HANDOFF.md` updated (if task state changed)
+- [ ] `AI_HANDOFF.md` updated (if state/rules changed)
+- [ ] `$TODO_FILE` updated (if task state changed)
 - [ ] Session entry appended to `agent-session.md`
 - [ ] Archive rotation performed (if threshold reached)
 - [ ] Permissions reviewed (if new ones in settings.local.json)

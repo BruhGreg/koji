@@ -1,5 +1,7 @@
 # AI Handoff
 
+> Open tasks: [TODO.md](TODO.md) | Completed archive: see TODO.md § Completed
+
 ## 1. Project Status
 
 [Current project phase, what's built, what's in progress]
@@ -11,18 +13,3 @@
 ## 3. Development Quirks & Gotchas
 
 [Environment-specific oddities, known workarounds]
-
-## 4. Immediate Roadmap
-
-### Completed
-- [x] [Task]
-
-### In Progress
-- [ ] [Task]
-
-### Next Agent's Tasks
-- [ ] [Task]
-
-## 5. Blocked On
-
-[External dependencies, client decisions, etc.]
