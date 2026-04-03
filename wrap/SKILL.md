@@ -208,9 +208,30 @@ Check if `.claude/settings.local.json` exists. If it does:
    - Stage all files, present the message, wait for approval, commit.
 
    **If there are both code changes AND doc changes (mixed worktree):**
-   - Ask the user: **"Commit all together, or split into work commit + docs commit?"**
-   - **Together**: Stage everything, propose one conventional commit, wait for approval, commit. **Done — one commit total.**
-   - **Split**: Execute exactly two commits in sequence:
+
+   First, check `$COMMIT_STRATEGY` for a saved preference:
+
+   **If `$COMMIT_STRATEGY` is `together`:** Use the saved preference — stage everything, propose one commit. Tell the user: `Using saved preference: single commit. (Change with koji-config set commit_strategy split)`
+
+   **If `$COMMIT_STRATEGY` is `split`:** Use the saved preference — split into two commits (code first, docs second). Tell the user: `Using saved preference: split commits. (Change with koji-config set commit_strategy together)`
+
+   **If `$COMMIT_STRATEGY` is empty (no preference yet):** Ask using AskUserQuestion:
+
+   > This wrap has both code and doc changes. How should I commit?
+
+   Options:
+   - A) One commit — everything together (recommended for most workflows)
+   - B) Split — code commit first, then docs commit
+   - C) One commit + remember — save this as my default for future wraps
+
+   If A: stage everything, propose one commit.
+   If B: split into two commits (code first, docs second).
+   If C: run `koji-config set commit_strategy together`, then stage everything, propose one commit.
+
+   **Override:** If the saved preference is `together` but the code and docs changes are clearly unrelated (e.g., code is a bug fix but docs are from a different task), use AskUserQuestion to suggest splitting for this one time. Do NOT change the saved preference.
+
+   **Together**: Stage everything, propose one conventional commit, wait for approval, commit. **Done — one commit total.**
+   **Split**: Execute exactly two commits in sequence:
      1. Stage **only code files** (`git add` each by name). Present the work commit message, wait for approval, commit.
      2. Stage **only doc files** (`git add` each by name). Commit with `docs(koji): update session logs`. This second commit does not need separate approval — it was approved as part of the split decision.
      **Done — two commits total.**
@@ -219,20 +240,22 @@ Check if `.claude/settings.local.json` exists. If it does:
 
 ---
 
-## Step 6 — Starter Prompt
+## Step 6 — Starter Prompt & Session Name
 
-Generate a **3-5 sentence** starter prompt for the next session:
+**Session name** — generate a short kebab-case name that describes **this session's work** (what was done, not what's next). Derive it from the session log entry you just wrote. Examples: `handoff-trim-agent-cleanup`, `auth-middleware-refactor`, `cso-audit-batch-1`.
+
+Tell the user:
+
+> **Session name:** `<suggested-name>`
+> Rename this session: `claude -n "<suggested-name>"`
+
+**Starter prompt** — generate a **3-5 sentence** briefing for the next session:
 - Current project state (1 sentence)
 - What was accomplished this session (1 sentence)
 - The single most important thing to do next (1-2 sentences)
 - Any blockers or things to watch out for (if applicable)
 
 Output this clearly labeled as **"Starter Prompt for Next Session:"**
-
-Then generate a short kebab-case session name suggestion from the session summary (e.g., `auth-middleware-refactor`, `migrate-repo-restructure-agents`). Tell the user:
-
-> **Suggested session name:** `claude -n "<suggested-name>"`
-> (Skip if you already named this session.)
 
 Finally, remind the user:
 > Tip: Next session, run `/kick-off` to auto-load this context — no need to paste.

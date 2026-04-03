@@ -90,6 +90,10 @@ echo "LESSONS_FILE=\"lessons.md\""
 
 echo "WRAP_STARTER=\"$(_resolve "wrap.starter_prompt" "true")\""
 
+# Commit strategy preference (persisted via koji-config)
+COMMIT_STRATEGY="$("$KOJI_SKILLS/bin/koji-config" get commit_strategy 2>/dev/null || true)"
+echo "COMMIT_STRATEGY=\"$COMMIT_STRATEGY\""
+
 # Agents list
 AGENTS="$(_yaml_list "$PROJECT_CONFIG" "agents")"
 [ -z "$AGENTS" ] && AGENTS="$(_yaml_list "$GLOBAL_CONFIG" "agents")"
