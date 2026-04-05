@@ -23,7 +23,7 @@ _yaml_get() {
   local child="${key#*.}"
 
   if [ "$parent" = "$child" ]; then
-    grep -E "^${key}:" "$file" 2>/dev/null | tail -1 | sed 's/^[^:]*:[[:space:]]*//' | sed 's/[[:space:]]*$//' || true
+    grep -E "^${key}:" "$file" 2>/dev/null | tail -1 | sed 's/^[^:]*:[[:space:]]*//' | sed 's/[[:space:]]*$//' | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/" || true
   else
     awk -v parent="$parent" -v child="$child" '
       $0 ~ "^"parent":" { in_block=1; next }
@@ -31,6 +31,9 @@ _yaml_get() {
       in_block && $0 ~ "^[[:space:]]+"child":" {
         sub(/^[[:space:]]+[^:]+:[[:space:]]*/, "")
         sub(/[[:space:]]*$/, "")
+        # Strip surrounding YAML quotes
+        if (substr($0,1,1) == "\"" && substr($0,length($0),1) == "\"") $0 = substr($0,2,length($0)-2)
+        if (substr($0,1,1) == "\047" && substr($0,length($0),1) == "\047") $0 = substr($0,2,length($0)-2)
         print
         exit
       }

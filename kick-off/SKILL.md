@@ -126,15 +126,80 @@ Read these files and internalize the content — do NOT dump them back to the us
 3. `$DOCS_PATH/lessons.md` — recent corrections and gotchas (focus on the top 10 entries)
 4. `$DOCS_PATH/agent-session.md` — read the **last** session entry for continuity (what was done, notes for next session)
 
+### 2b. Gather extended context (tiered)
+
+Three tiers of additional context. No config needed — triggers are automatic.
+
+**Tier 1 — Baseline (always):**
+
+Run:
+
+```bash
+CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "detached")
+UNCOMMITTED=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+ACTIVE_PLANS=$(ls "$PROJECT_ROOT/.claude/plans/" 2>/dev/null | grep -c '\.md$' || echo 0)
+echo "Branch: $CURRENT_BRANCH"
+echo "Uncommitted changes: $UNCOMMITTED"
+echo "Active plans: $ACTIVE_PLANS"
+```
+
+Internalize. Include branch in the brief header. Warn if uncommitted changes > 0. If active plans > 0, list them as available context.
+
+**Tier 2 — Reference-follow (if session note has references):**
+
+If the "Notes for Next Session" from step 2 mentions specific files, directories, plans, or modules:
+
+1. List `$PROJECT_ROOT/.claude/plans/` — read any plan whose filename matches keywords from the note
+2. Grep `$DOCS_PATH/$ARCHIVE_DIR/` for archived sessions matching the focus topic — read the top 2 matches (headers + summary only, not full entries)
+3. If the note mentions specific file paths, read them if they exist and are <200 lines
+
+Internalize all findings — do not dump raw content to user. Add a "Context loaded:" line to the brief.
+
+**Skip** if session note is generic ("continue from where we left off") or absent.
+
+**Tier 3 — Codebase orient (if first session, stale handoff, or no session note):**
+
+Triggers when ANY of:
+- `agent-session.md` has no session entries (just created by `/koji-init`, only header/template content)
+- Last session entry date is >7 days ago (stale)
+- Last session entry has no "Notes for Next Session" content (no direction)
+
+Run:
+
+```bash
+# Tech stack
+for f in package.json go.mod Cargo.toml pyproject.toml Gemfile pom.xml composer.json; do
+  [ -f "$PROJECT_ROOT/$f" ] && echo "STACK_FILE: $f"
+done
+# Structure
+find "$PROJECT_ROOT" -maxdepth 2 -type d \
+  ! -path '*/.git/*' ! -path '*/node_modules/*' ! -path '*/.koji/*' \
+  ! -path '*/__pycache__/*' ! -path '*/dist/*' ! -path '*/build/*' \
+  ! -path '*/vendor/*' ! -path '*/.git' 2>/dev/null | head -30
+# Recent commits
+git log --oneline -5 2>/dev/null
+# Key docs
+for f in ARCHITECTURE.md CONTRIBUTING.md API.md; do
+  [ -f "$PROJECT_ROOT/$f" ] && echo "DOC: $f"
+done
+```
+
+Read detected stack files (just the name/version/framework fields, not the entire file). Read key doc headers (first 10 lines only). Internalize — add 1-2 lines to the brief.
+
+---
+
 ### 3. Brief the user
 
 Output a concise briefing (not a wall of text):
 
-> **Session start — $PROJECT_NAME**
+> **Session start — $PROJECT_NAME** (`$CURRENT_BRANCH`)
 >
 > Last session: [1-line summary of what was done]
 > Handoff says: [1-line — highest priority open task from TODO.md if it exists, otherwise from AI_HANDOFF.md]
 > Watching out for: [1-line gotcha from lessons, if relevant — otherwise skip]
+> [If tier 2: Context loaded: read plan X, 2 related archived sessions]
+> [If tier 3: Codebase: React 18 + Express, 12 source dirs]
+> [If uncommitted > 0: Note: N uncommitted changes from previous session]
 >
 > **Focus:** [user's arg if provided, OR the "Notes for Next Session" from the last entry]
 
