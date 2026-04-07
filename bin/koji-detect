@@ -84,7 +84,7 @@ echo "TEMPLATE=\"$(_resolve "template" "default")\""
 
 echo "ARCHIVE_STRATEGY=\"$(_resolve "archive.strategy" "numbered")\""
 echo "ARCHIVE_THRESHOLD=\"$(_resolve "archive.threshold" "5")\""
-echo "ARCHIVE_KEEP=\"$(_resolve "archive.keep" "3")\""
+echo "ARCHIVE_KEEP=\"$(_resolve "archive.keep" "1")\""
 echo "ARCHIVE_DIR=\"$(_resolve "archive.dir" "sessions")\""
 
 echo "SESSION_FILE=\"agent-session.md\""

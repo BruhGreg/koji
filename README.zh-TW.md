@@ -75,7 +75,7 @@ template: default             # "default"（完整）或 "simple"（精簡）
 archive:
   strategy: numbered          # "numbered"（archive-01.md）或 "dated"（YYYY-MM/DD-slug.md）
   threshold: 5                # 達到此數量時進行歸檔
-  keep: 3                     # 在活動檔案中保留的數量
+  keep: 1                     # 在活動檔案中保留的數量
   dir: sessions               # 歸檔子目錄
 agents:                       # 工作階段條目的標籤
   - Claude

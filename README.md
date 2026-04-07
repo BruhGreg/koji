@@ -75,7 +75,7 @@ template: default             # "default" (full) or "simple" (minimal)
 archive:
   strategy: numbered          # "numbered" (archive-01.md) or "dated" (YYYY-MM/DD-slug.md)
   threshold: 5                # archive when this many sessions exist
-  keep: 3                     # keep this many in the active file
+  keep: 1                     # keep this many in the active file
   dir: sessions               # subdirectory for archives
 agents:                       # tags for session entries
   - Claude

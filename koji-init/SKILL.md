@@ -147,7 +147,7 @@ template: <chosen_template>
 archive:
   strategy: <chosen_strategy>
   threshold: 5
-  keep: 3
+  keep: 1
   dir: sessions
 agents:
   - Claude
