@@ -6,9 +6,17 @@ KOJI_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_DIR="$(dirname "$KOJI_DIR")"
 STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/koji"
 
+is_windows() {
+  case "${OSTYPE:-}${OS:-}" in
+    msys*|cygwin*|mingw*|*Windows_NT*) return 0 ;;
+  esac
+  return 1
+}
+
 echo "=== koji setup ==="
 echo "Source: $KOJI_DIR"
 echo "Skills: $SKILLS_DIR"
+is_windows && echo "Platform: Windows (using directory junctions)"
 
 # --- Create state directory ---
 mkdir -p "$STATE_DIR"
@@ -18,17 +26,42 @@ echo "State dir: $STATE_DIR"
 chmod +x "$KOJI_DIR/bin/"*
 echo "Scripts: chmod +x"
 
-# --- Create symlinks ---
+# --- Link skills ---
+# Removes an existing symlink, junction, or directory copy at $1 without
+# following into the target (important for junctions/symlinks).
+remove_existing() {
+  local path="$1"
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  if [ -L "$path" ]; then
+    rm -f "$path"
+    return
+  fi
+  if is_windows && [ -d "$path" ]; then
+    # rmdir (no /S) unlinks a junction or removes an empty dir;
+    # it never recurses into a junction target.
+    if cmd //c rmdir "$(cygpath -w "$path")" >/dev/null 2>&1; then
+      return
+    fi
+  fi
+  rm -rf "$path"
+}
+
 create_link() {
   local name="$1" target="$2"
-  if [ -L "$SKILLS_DIR/$name" ]; then
-    rm "$SKILLS_DIR/$name"
+  local link_path="$SKILLS_DIR/$name"
+  local target_abs="$KOJI_DIR/$target"
+
+  remove_existing "$link_path"
+
+  if is_windows; then
+    cmd //c mklink //J "$(cygpath -w "$link_path")" "$(cygpath -w "$target_abs")" >/dev/null
+  else
+    ln -s "koji/$target" "$link_path"
   fi
-  ln -sf "koji/$target" "$SKILLS_DIR/$name"
   echo "  $name -> koji/$target"
 }
 
-echo "Symlinks:"
+echo "Links:"
 create_link "wrap" "wrap"
 create_link "take-note" "take-note"
 create_link "kick-off" "kick-off"
@@ -38,8 +71,8 @@ create_link "koji-init" "koji-init"
 echo ""
 echo "Installed skills:"
 for skill in wrap take-note kick-off koji-init; do
-  if [ -L "$SKILLS_DIR/$skill" ] && [ -f "$SKILLS_DIR/$skill/SKILL.md" ]; then
-    echo "  /$(echo "$skill" | tr '-' '-')  OK"
+  if [ -f "$SKILLS_DIR/$skill/SKILL.md" ]; then
+    echo "  /$skill  OK"
   else
     echo "  /$skill  FAILED" >&2
   fi
