@@ -121,32 +121,19 @@ Bullets accept markdown-link form or plain-path form. At kick-off, koji parses t
 
 ### Optional: drift awareness via coverage tags
 
-Any doc can declare which code paths it describes. When a tagged doc is in Load on Kick-Off and its covered paths have drifted past `docs.stale_threshold` commits since the doc was last edited, kick-off loads it *with a warning*. Two declaration forms are supported:
-
-**Form A — YAML frontmatter (canonical):**
+Any doc can declare which code paths it describes via YAML frontmatter. When a tagged doc is in Load on Kick-Off and its covered paths have drifted past `docs.stale_threshold` commits since the doc was last edited, kick-off loads it *with a warning*.
 
 ```markdown
 ---
-koji:
-  covers:
-    - src/auth/
-    - server/routes/auth/
+covers:
+  - src/auth/
+  - server/routes/auth/
 ---
 
 # AUTH_FLOW.md
 ```
 
-Frontmatter aligns with the wider AI-agent-markdown ecosystem (Cursor rules, Continue.dev, Astro, MkDocs, Hugo all parse it). Mix `koji.covers` alongside other frontmatter keys freely.
-
-**Form B — HTML comment (shorthand):**
-
-```markdown
-<!-- koji:covers src/auth/ server/routes/auth/ -->
-
-# AUTH_FLOW.md
-```
-
-One-line, parses the same. Use this when you don't already have frontmatter and one line is enough. `/inspect-doc-drift` will offer to upgrade Form B docs to Form A on demand.
+Top-level `covers` key. Frontmatter aligns with the wider AI-agent-markdown ecosystem (Cursor rules, Continue.dev, Astro, MkDocs, Hugo, Jekyll all parse it). Mix `covers` alongside other frontmatter keys freely.
 
 ### Config
 
@@ -167,7 +154,7 @@ When a session's git diff overlaps with tagged docs' covers paths, `/wrap` asks 
 
 ### `/inspect-doc-drift`
 
-Scans all tagged docs repo-wide, reports drift (fresh / stale / orphan), offers to upgrade HTML-comment docs to frontmatter, and walks you through remediation (open / re-tag / untag / delete / skip). Run with no args for the dashboard, or `/inspect-doc-drift <path>` to drill into one doc read-only.
+Scans all tagged docs repo-wide, reports drift (fresh / stale / orphan), surfaces docs in `## Load on Kick-Off` that have no `covers` declaration (loaded without drift signal — offered for interactive tagging), and walks you through remediation for stale/orphan docs (open / re-tag / untag / delete / skip). Run with no args for the dashboard, or `/inspect-doc-drift <path>` to drill into one doc read-only.
 
 ### Design notes
 

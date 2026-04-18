@@ -1,5 +1,5 @@
 ---
-description: "Inspect drift between tagged docs and the code they describe. Shows a drift report for all docs with a koji-covers declaration (YAML frontmatter or HTML comment), then prompts to fix stale and orphan docs."
+description: "Inspect drift between tagged docs and the code they describe. Shows a drift report for all docs with a covers declaration in YAML frontmatter, then prompts to fix stale and orphan docs. Also surfaces docs in ## Load on Kick-Off that have no coverage declaration and offers to tag them."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools:
@@ -13,24 +13,17 @@ allowed-tools:
 
 # Inspect Doc Drift
 
-Find docs that have drifted out of sync with the code they describe, and help fix them. Operates on docs that declare coverage via either:
+Find docs that have drifted out of sync with the code they describe, and help fix them. Operates on docs that declare coverage via YAML frontmatter:
 
-**YAML frontmatter (canonical)**:
 ```markdown
 ---
-koji:
-  covers:
-    - src/auth/
-    - server/routes/auth/
+covers:
+  - src/auth/
+  - server/routes/auth/
 ---
 ```
 
-**HTML comment (shorthand)**:
-```markdown
-<!-- koji:covers src/auth/ server/routes/auth/ -->
-```
-
-Docs without either declaration are not in scope (use regular handoff curation for untagged docs).
+The skill also surfaces **untagged docs listed in `## Load on Kick-Off`** and offers to tag them — because loaded-without-coverage means loaded-without-drift-signal.
 
 ## Preamble
 
@@ -51,38 +44,40 @@ Parse the argument:
 
 ## Dashboard + fix-prompt mode (no args)
 
-### 1. Discover tagged docs
+### 1. Discover tagged docs AND docs loaded-but-untagged
 
-Scan for docs that declare coverage in either form, using `git grep` for cross-platform consistency:
+**Part A — tagged docs**. Use `git grep` for cross-platform consistency:
 
 ```bash
 cd "$PROJECT_ROOT"
-# Union of HTML-comment form and YAML-frontmatter form
-{
-  git grep -l '<!-- koji:covers' -- '*.md' 2>/dev/null
-  git grep -l -E '^\s*koji:' -- '*.md' 2>/dev/null
-} | sort -u
+git grep -l -E '^\s*covers\s*:' -- '*.md' 2>/dev/null | sort -u
 ```
 
-For each match, read the first ~50 lines of the doc and determine whether a real `koji:covers` declaration is present (see parsing below). Files that matched `koji:` but don't have a proper `koji.covers` list under frontmatter are ignored.
+For each match, read the first ~50 lines to verify a valid frontmatter `covers` list actually exists (see parsing below). Files matching `covers:` but lacking a proper list are ignored.
 
-If no tagged docs found, tell the user:
+**Part B — Load on Kick-Off entries** (so we can compare). Read `$DOCS_PATH/AI_HANDOFF.md`, locate the `## Load on Kick-Off` H2 section, extract each bullet's `.md` path. Call this the **loaded set**.
 
-> No docs declare coverage yet. Tagging is optional — add either form to a doc you want drift-tracked.
+Compute:
+- `TAGGED` = docs with a valid `covers` declaration (Part A)
+- `LOADED` = docs in Load on Kick-Off (Part B)
+- `UNTAGGED_LOADED` = `LOADED - TAGGED` — docs that kick-off loads but have no drift signal
+
+If `TAGGED` is empty AND `UNTAGGED_LOADED` is empty, tell the user:
+
+> No docs declare coverage and no docs are listed in `## Load on Kick-Off`.
+> Tagging is optional — add frontmatter to a doc you want drift-tracked:
 >
-> Canonical (YAML frontmatter):
 >   ```
 >   ---
->   koji:
->     covers:
->       - src/auth/
+>   covers:
+>     - src/auth/
 >   ---
 >   ```
->
-> Shorthand (HTML comment):
->   `<!-- koji:covers src/auth/ -->`
 
 Stop.
+
+If `TAGGED` is non-empty, continue to step 2 for the drift compute on tagged docs.
+If `UNTAGGED_LOADED` is non-empty, step 3b will surface them at the end.
 
 ### 2. Parse coverage declaration + compute status
 
@@ -90,19 +85,14 @@ Read `.koji.yaml` for `docs.stale_threshold` (default `10` if absent or non-nume
 
 For each tagged doc:
 
-1. **Parse the `covers` list.** Read the first 50 lines. Try Form A first:
-
-   **Form A — YAML frontmatter.** If the first non-empty line is `---`, find the closing `---`, parse YAML between. Look for `koji.covers` as a YAML list of strings. Example:
+1. **Parse the `covers` list.** Read the first 50 lines. If the first non-empty line is `---`, find the closing `---`, parse YAML between. Look for top-level `covers` as a YAML list of strings. Example:
    ```yaml
-   koji:
-     covers:
-       - src/auth/
-       - server/routes/auth/
+   covers:
+     - src/auth/
+     - server/routes/auth/
    ```
 
-   **Form B — HTML comment** (only if Form A didn't produce a `koji.covers` list). Grep the first 50 lines for `<!-- koji:covers <paths> -->` and extract space-separated paths between `koji:covers` and `-->`.
-
-   If neither form yields a list, skip the doc (treat as untagged — shouldn't happen since discovery matched on one of the forms, but guard anyway).
+   If no frontmatter or no `covers` list, skip the doc (treat as untagged — shouldn't happen since discovery matched on the key, but guard anyway).
 
 2. **Orphan check.** For each covered path, check existence with `[ -e "$PROJECT_ROOT/$path" ]`. If ANY path does not exist → doc is **orphan**. (Orphan takes precedence over fresh/stale.)
 
@@ -143,48 +133,69 @@ Summary line below:
 
 > <fresh_count> fresh, <stale_count> stale, <orphan_count> orphan.
 
-### 3b. Suggest frontmatter upgrade for shorthand docs
+### 3a. Surface untagged-but-loaded docs
 
-During step 2 parsing, track which form each doc uses (Form A frontmatter, Form B HTML comment). After the dashboard, if any docs use Form B only:
+If `UNTAGGED_LOADED` from step 1 is non-empty, print this after the dashboard:
 
-Print:
-
-> <N> doc(s) use the HTML-comment shorthand. YAML frontmatter is the canonical form and aligns with the wider ecosystem (Cursor, Continue.dev, Astro, MkDocs parse frontmatter).
+> <N> doc(s) are loaded at kick-off but have no `covers` frontmatter. Without one, drift is invisible — code can change beneath the doc and no one will know.
 >
-> Using shorthand:
+> Loaded but untagged:
 >   - docs/X.md
 >   - docs/Y.md
 
 Use `AskUserQuestion`:
 
-> Upgrade these to YAML frontmatter?
+> Add `covers` frontmatter to each? I'll suggest code paths based on each doc's name + content; you can accept, edit, or skip per doc.
 
 Options:
-- **A) Upgrade all**
-- **B) Select some** — pick which to migrate
-- **C) Skip** — keep the shorthand form
+- **A) Tag all (with suggestions)** — walk each doc, show suggested paths, accept/edit/skip per doc
+- **B) Select some** — pick which to tag
+- **C) Skip** — leave them untagged (kick-off still loads them)
 
-For each chosen doc:
+**For each chosen doc, infer path suggestions (heuristic, intentionally cheap):**
 
-1. Read the doc
-2. Extract `<paths>` from the existing `<!-- koji:covers <paths> -->` line
-3. Build the frontmatter block:
+1. **Extract the doc's slug**: lowercase the filename without extension (`AUTH_FLOW.md` → `auth_flow`). Drop any `_flow`, `_guide`, `_setup`, `_routing`, etc. noise suffix, split by `_` and `-`. Call the resulting tokens the **keyword set** (e.g., `{auth}` or `{split, tunnel, routing}`).
+
+2. **Scan candidate dirs** for path matches. Candidate dirs are the project's top-level source locations — detect them by checking which of these exist: `src/`, `backend/`, `server/`, `app/`, `lib/`, `pkg/`, `cmd/`, `internal/`, `api/`, `client/`, `clients/`, `frontend/`, `web/`, `website/`, `ui/`, `core/`, `shared/`. For each candidate dir, look for subdirectories whose names overlap with the keyword set:
+   ```bash
+   # Example: find dirs under src/ containing "auth"
+   find "$PROJECT_ROOT/src" -maxdepth 3 -type d -iname "*auth*" 2>/dev/null | head -5
    ```
-   ---
-   koji:
-     covers:
-       - <path1>
-       - <path2>
-   ---
-   ```
-4. **If the doc already has a frontmatter block** (starts with `---`): parse the existing YAML, inject the `koji.covers` key, write back. Preserve all other frontmatter keys.
-5. **If the doc has no frontmatter**: prepend the new frontmatter block, then a blank line, then the original content.
-6. Remove the original `<!-- koji:covers -->` line from the body.
-7. Report: `Upgraded <path> to frontmatter.`
 
-After migration, continue to step 4.
+3. **Scan the doc body** for code-path-like strings. Grep for patterns that look like paths: matches to `[a-zA-Z_][a-zA-Z0-9_/-]*\.(go|py|ts|tsx|js|jsx|dart|rs|java|rb|md)` or `[a-zA-Z_][a-zA-Z0-9_-]*/` occurring in backticks or markdown links. Take the directory part of each match. Deduplicate. Exclude paths that clearly aren't code (`docs/`, `README`, `LICENSE`, URLs).
 
-If all tagged docs already use frontmatter, skip this step silently.
+4. **Merge + rank**: union of dir-match results and body-mention results. Deduplicate. Limit to top 5. Sort by: (a) directory names that contain a keyword, then (b) paths referenced in body.
+
+5. **Present via `AskUserQuestion`**:
+
+   > **docs/AUTH_FLOW.md** (1 of N untagged)
+   >
+   > Suggested `covers` paths based on the doc's name and content:
+   >   - backend/auth/
+   >   - clients/lib/providers/auth_provider.dart
+   >   - server/routes/auth/
+   >
+   > What would you like to do?
+
+   Options:
+   - **A) Accept these paths** — write the frontmatter as suggested
+   - **B) Edit** — I'll reshow the suggestions as a comma-separated draft you can paste back modified
+   - **C) Empty** — write an empty `covers: []` list for now (you can fill it later; kick-off will still load the doc)
+   - **D) Skip** — leave this doc untagged for now
+   - **E) Quit** — stop the walkthrough; keep tags from docs you've already processed
+
+6. **If the user chose A**: build the frontmatter block with top-level `covers` and the suggested paths; inject or prepend as before; report `Tagged <doc> with N covers path(s) (auto-suggested).`
+
+7. **If the user chose B**: prompt the user with the suggested paths pre-filled (as "here's your starting point, type the final list, space-separated"). Parse the user's input. Write frontmatter.
+
+8. **If the user chose C**: write `covers: []` — a tagged doc with no coverage is fine (drift check is a no-op, status will be `fresh` trivially until the user fills in paths).
+
+9. **If no suggestions were found** (keyword set empty, no candidate dirs matched, no body references): fall back to asking the user directly, unfiltered:
+   > `<doc>` — no obvious paths to suggest. Which paths does this doc describe? (space-separated, relative to repo root. Leave blank to skip.)
+
+After walking all chosen docs, the newly-tagged docs have their drift computed (run step 2 for just these) so step 4 can include them.
+
+If `UNTAGGED_LOADED` is empty, skip this step silently.
 
 ### 4. If there are problem docs, offer to fix
 
@@ -243,9 +254,8 @@ Then `AskUserQuestion`. Menu options depend on status:
 - **D) Skip** — revisit later.
 
 **Tag edit mechanics** (for "Re-tag covers" and "Remove tag"):
-- If the doc has frontmatter: edit the YAML `koji.covers` list in-place (or remove the `koji:` block entirely for untag).
-- If the doc uses the HTML-comment shorthand: replace or remove the `<!-- koji:covers ... -->` line.
-- If the doc has both forms for some reason: edit the frontmatter (canonical wins), then remove the HTML comment.
+- Edit the frontmatter `covers` list in-place. For "Re-tag covers": prompt for new paths, replace the list.
+- For "Remove tag": delete the `covers:` key from frontmatter. If `covers` was the only key, delete the entire `---...---` block plus the following blank line.
 
 Execute the chosen action, then continue to the next problem doc.
 
@@ -259,15 +269,14 @@ After walking all selected docs, print a summary:
 
 Resolve the given path. Accept either the doc's full path or a unique substring match against tagged docs.
 
-Read the doc and parse the coverage declaration (Form A frontmatter or Form B HTML comment). If neither is present:
+Read the doc and parse the YAML frontmatter `covers` list. If there's no frontmatter or no `covers`:
 
-> <path> has no koji coverage declaration. No drift to inspect.
+> <path> has no coverage declaration. No drift to inspect.
 
 Otherwise print a detail view:
 
 ```
 <path>
-  Declaration: <frontmatter | html-comment>
   Covers: <space-separated paths>
   Doc last edit: <YYYY-MM-DD> (commit <short-hash>)
   Path existence: <all present | missing: path/X, path/Y>
@@ -287,12 +296,9 @@ Read-only. To remediate, re-run `/inspect-doc-drift` without args.
 ## Edge cases
 
 - **Doc has no git history (new/untracked)**: DRIFT = 0. Still apply orphan check — if covered path missing, doc is orphan; otherwise fresh.
-- **Covered path doesn't exist in repo**: doc is **orphan** (this replaces the older warn-and-ignore behavior). Remediation menu surfaces appropriate options.
-- **Both frontmatter AND HTML comment present**: frontmatter wins (canonical). Ignore the HTML comment.
-- **Multiple `<!-- koji:covers -->` lines**: only the first is read. Ignore the rest.
-- **Malformed frontmatter YAML**: skip with `warn: malformed koji frontmatter in <path>`; fall back to HTML comment form if present.
-- **Malformed HTML comment (missing closing `-->`)**: skip that doc with `warn: malformed koji:covers comment in <path>`.
-- **Frontmatter `koji` key exists but `covers` is not a list** (e.g., a string, or missing): treat as no declaration. `warn: koji.covers must be a list in <path>`.
+- **Covered path doesn't exist in repo**: doc is **orphan**. Remediation menu surfaces appropriate options.
+- **Malformed frontmatter YAML**: skip with `warn: malformed frontmatter in <path>`.
+- **Frontmatter exists but `covers` is not a list** (e.g., a string, or missing): treat as no declaration. `warn: covers must be a list in <path>`.
 - **Detached HEAD**: `git log HEAD` still works. No special handling needed.
 - **User is in a subdirectory**: always use `$PROJECT_ROOT` from the preamble for all git commands.
 - **Deleting a doc on option D/C**: use `git rm <path>`. Stage only — do not commit. User's next commit cleans up.
@@ -304,7 +310,7 @@ Read-only. To remediate, re-run `/inspect-doc-drift` without args.
 - `git grep`, `git log`, `git rm` — identical on Windows/macOS/Linux.
 - No date arithmetic (BSD vs GNU `date` differs) — drift is commit-count-based.
 - Forward slashes in all paths; Git Bash translates on Windows.
-- Frontmatter is a widely-parseable YAML-in-markdown convention (same shape used by Cursor, Continue.dev, Astro, MkDocs, Hugo). HTML comment shorthand is markdown-dialect-agnostic.
+- Frontmatter is a widely-parseable YAML-in-markdown convention (same shape parsed by Cursor, Continue.dev, Astro, MkDocs, Hugo, Jekyll).
 
 ---
 

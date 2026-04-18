@@ -220,26 +220,19 @@ The section is optional. If it's absent, skip this entire step silently.
 
 1. If the file doesn't exist → log a 1-line warning `warn: Load on Kick-Off references <path> (missing)` and skip
 2. Read the file using the `Read` tool, internalize its content
-3. **Drift check** — parse the doc for a koji-covers declaration. Two forms are supported; check in order:
+3. **Drift check** — parse the doc's YAML frontmatter for a `covers` declaration:
 
-   **Form A (canonical) — YAML frontmatter:**
    ```markdown
    ---
-   koji:
-     covers:
-       - src/auth/
-       - server/routes/auth/
+   covers:
+     - src/auth/
+     - server/routes/auth/
    ---
    ```
-   If the doc's first non-empty line is `---`, parse YAML up to the next `---`. Look for `koji.covers` as a list of paths.
 
-   **Form B (shorthand) — HTML comment:**
-   ```markdown
-   <!-- koji:covers src/auth/ server/routes/auth/ -->
-   ```
-   Only checked if Form A didn't yield a `koji.covers` list. Search the first 50 lines for the pattern.
+   If the doc's first non-empty line is `---`, parse YAML up to the next `---`. Look for top-level `covers` as a list of paths.
 
-   If neither form is present, no drift check — doc just loads.
+   If the doc has no frontmatter or no `covers` list, no drift check runs. The doc still loads. `/inspect-doc-drift` will surface it as a candidate for tagging.
 
 4. **If a `covers` list was parsed**:
    - Read `.koji.yaml` for `docs.stale_threshold` (default `10`)
@@ -262,11 +255,18 @@ STALE_ACTION=$(grep -E '^\s*stale_action\s*:' "$PROJECT_ROOT/.koji.yaml" 2>/dev/
 
 **In the brief** (step 3 below), append one line summarizing the doc-load pass:
 
-> Docs: <loaded> loaded, <stale> stale, <orphan> orphan, <missing> missing
+> Docs: <loaded> loaded, <stale> stale, <orphan> orphan, <untagged> untagged, <missing> missing
 
-If `stale > 0` or `orphan > 0`, also list the names on the next line for visibility:
+Counts:
+- `loaded` = docs that made it into context (including tagged-fresh + untagged — untagged docs still load)
+- `stale` = tagged docs with drift > threshold
+- `orphan` = tagged docs whose covered paths no longer exist
+- `untagged` = loaded docs with no `covers` frontmatter (no drift signal)
+- `missing` = bullet paths that didn't resolve to a file
 
-> Attention: orphan docs/A.md, stale docs/B.md (12). Run `/inspect-doc-drift` to fix.
+If `stale > 0`, `orphan > 0`, or `untagged > 0`, also list specifics on the next line:
+
+> Attention: orphan docs/A.md, stale docs/B.md (12), untagged docs/C.md docs/D.md. Run `/inspect-doc-drift` to fix.
 
 **Fail-safe**: if any part of this step errors (config parse fails, regex glitch, unreadable `.koji.yaml`), degrade silently to "no Load on Kick-Off section processed" — never block kick-off on doc-loading issues.
 

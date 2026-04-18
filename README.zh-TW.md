@@ -121,32 +121,19 @@ todo:
 
 ### 選用：透過覆蓋標籤感知漂移
 
-任何文件都可以宣告它所描述的程式碼路徑。當已標籤的文件在 Load on Kick-Off 中且其覆蓋路徑自文件上次編輯後超過 `docs.stale_threshold` 個提交時，`/kick-off` 會載入並附上警告。支援兩種宣告形式：
-
-**形式 A — YAML frontmatter（標準形式）：**
+任何文件都可以透過 YAML frontmatter 宣告它所描述的程式碼路徑。當已標籤的文件在 Load on Kick-Off 中且其覆蓋路徑自文件上次編輯後超過 `docs.stale_threshold` 個提交時，`/kick-off` 會載入並附上警告。
 
 ```markdown
 ---
-koji:
-  covers:
-    - src/auth/
-    - server/routes/auth/
+covers:
+  - src/auth/
+  - server/routes/auth/
 ---
 
 # AUTH_FLOW.md
 ```
 
-Frontmatter 與更廣的 AI-agent-markdown 生態一致（Cursor rules、Continue.dev、Astro、MkDocs、Hugo 都能解析）。可以自由與其他 frontmatter 鍵混用。
-
-**形式 B — HTML 註解（簡短形式）：**
-
-```markdown
-<!-- koji:covers src/auth/ server/routes/auth/ -->
-
-# AUTH_FLOW.md
-```
-
-單行，解析結果相同。適合尚未使用 frontmatter 且一行就夠用的情況。`/inspect-doc-drift` 會在需要時提議將形式 B 升級到形式 A。
+頂層 `covers` 鍵。Frontmatter 與更廣的 AI-agent-markdown 生態一致（Cursor rules、Continue.dev、Astro、MkDocs、Hugo、Jekyll 都能解析）。可以自由與其他 frontmatter 鍵混用。
 
 ### 設定
 
@@ -167,7 +154,7 @@ docs:
 
 ### `/inspect-doc-drift`
 
-掃描整個倉庫中所有已標籤的文件，回報漂移（fresh / stale / orphan），提議將 HTML 註解形式升級到 frontmatter，並引導你修復（開啟 / 重新標籤 / 移除標籤 / 刪除 / 跳過）。不帶參數執行取得儀表板，或用 `/inspect-doc-drift <path>` 唯讀鑽入某個文件。
+掃描整個倉庫中所有已標籤的文件，回報漂移（fresh / stale / orphan），標出 `## Load on Kick-Off` 中沒有 `covers` 宣告的文件（啟動時會載入但沒有漂移訊號——互動式提議為它們加上標籤），並引導你修復 stale/orphan 文件（開啟 / 重新標籤 / 移除標籤 / 刪除 / 跳過）。不帶參數執行取得儀表板，或用 `/inspect-doc-drift <path>` 唯讀鑽入某個文件。
 
 ### 設計註記
 
