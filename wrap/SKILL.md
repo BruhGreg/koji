@@ -111,6 +111,61 @@ Review the session for task-related changes: completed work, new tasks discovere
 
 ---
 
+## Step 2c — Suggest Load on Kick-Off additions (tag-driven, optional)
+
+This step runs ONLY if both conditions hold:
+
+1. The repo has at least one doc with a `<!-- koji:covers <paths> -->` header (check via `git grep -l '<!-- koji:covers' -- '*.md'` — if empty, skip this step silently)
+2. The session's git diff overlaps with any tagged doc's covered paths
+
+**Compute the session's touched paths:**
+
+```bash
+TOUCHED=$(git diff --name-only HEAD 2>/dev/null; git log --name-only --format= HEAD@{1}..HEAD 2>/dev/null | sort -u)
+```
+
+Fallback to `git diff --name-only` against any available base if `HEAD@{1}` isn't usable (e.g., fresh repo, detached HEAD). If nothing touched, skip.
+
+**For each tagged doc:**
+
+1. Parse its first `<!-- koji:covers <space-separated-paths> -->` header
+2. Check if any touched path matches any covered path prefix
+3. If yes, check whether the doc is ALREADY in the `## Load on Kick-Off` section of `AI_HANDOFF.md` (by path match). If already listed, skip. If not listed, the doc is a suggestion candidate.
+
+**If there are suggestion candidates, ask once** (not per-doc):
+
+Use `AskUserQuestion`:
+
+> Tagged docs covering touched paths in this session aren't in Load on Kick-Off:
+>   - docs/AUTH_FLOW.md (covers backend/auth/ — 3 files changed)
+>   - docs/AD_MONETIZATION.md (covers clients/lib/ads/ — 1 file changed)
+>
+> Add them to the Load on Kick-Off section in AI_HANDOFF.md?
+
+Options:
+- **A) Add all** — append each candidate as a bullet under `## Load on Kick-Off`
+- **B) Select some** — pick which to add
+- **C) Skip** — don't add any
+
+**If A or B, update `AI_HANDOFF.md`:**
+
+1. Check if a `## Load on Kick-Off` H2 section exists
+2. If not, create it at the bottom of the file (before any trailing content, or append):
+   ```markdown
+
+   ## Load on Kick-Off
+
+   ```
+3. Append the chosen docs as bullets in path-form:
+   ```markdown
+   - docs/AUTH_FLOW.md
+   ```
+4. Report the change: `Added <N> doc(s) to Load on Kick-Off.`
+
+If there are no candidates (no overlaps, or all overlapping docs already listed), skip this step silently — no prompt, no output.
+
+---
+
 ## Step 3 — Session Log
 
 1. Read `$DOCS_PATH/agent-session.md`

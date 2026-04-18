@@ -21,7 +21,7 @@ git clone --depth 1 https://github.com/BruhGreg/koji.git ~/.claude/skills/koji
 cd ~/.claude/skills/koji && ./setup
 ```
 
-That's it. Four skills are now available in Claude Code:
+That's it. Five skills are now available in Claude Code:
 
 | Skill | What it does |
 |-------|-------------|
@@ -29,6 +29,7 @@ That's it. Four skills are now available in Claude Code:
 | `/wrap` | End session: update lessons, handoff, session log, archive, propose commit, generate starter prompt |
 | `/take-note` | Mid-session: save progress — or `/take-note finished auth, moving to tests` with inline note |
 | `/koji-init` | Bootstrap: create docs scaffolding and `.koji.yaml` in any project |
+| `/inspect-doc-drift` | Scan docs tagged with `<!-- koji:covers -->`, show drift vs their covered code, offer to fix stale ones |
 
 ## Quick Start
 
@@ -101,6 +102,77 @@ Global config (`~/.config/koji/config.yaml`) also stores persistent preferences:
 - **`numbered`** — Archives go to `sessions/archive-01.md`, `archive-02.md`, etc. Simple, linear.
 - **`dated`** — Archives go to `sessions/YYYY-MM/DD-slug.md` with an `INDEX.md` lookup table. Scales better for long-running projects.
 
+## Doc Loading at Kick-Off (v0.4.0)
+
+By default `/kick-off` reads four mandatory files (handoff, TODO, lessons, last session entry). Anything else — `docs/*.md`, `DESIGN.md`, architecture notes — is invisible to the agent at session start.
+
+**Opt specific docs into kick-off context** by adding a section to `AI_HANDOFF.md`:
+
+```markdown
+## Load on Kick-Off
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [API Reference](docs/API.md)
+- docs/DEPLOYMENT.md
+- /DESIGN.md
+```
+
+Bullets accept markdown-link form or plain-path form. At kick-off, koji parses this section, loads each `.md` path into context, and reports: `Docs: 4 loaded`.
+
+### Optional: drift awareness via coverage tags
+
+Any doc can declare which code paths it describes. When a tagged doc is in Load on Kick-Off and its covered paths have drifted past `docs.stale_threshold` commits since the doc was last edited, kick-off loads it *with a warning*. Two declaration forms are supported:
+
+**Form A — YAML frontmatter (canonical):**
+
+```markdown
+---
+koji:
+  covers:
+    - src/auth/
+    - server/routes/auth/
+---
+
+# AUTH_FLOW.md
+```
+
+Frontmatter aligns with the wider AI-agent-markdown ecosystem (Cursor rules, Continue.dev, Astro, MkDocs, Hugo all parse it). Mix `koji.covers` alongside other frontmatter keys freely.
+
+**Form B — HTML comment (shorthand):**
+
+```markdown
+<!-- koji:covers src/auth/ server/routes/auth/ -->
+
+# AUTH_FLOW.md
+```
+
+One-line, parses the same. Use this when you don't already have frontmatter and one line is enough. `/inspect-doc-drift` will offer to upgrade Form B docs to Form A on demand.
+
+### Config
+
+```yaml
+# .koji.yaml
+docs:
+  stale_threshold: 10       # commits in covered paths since doc's last edit (default 10)
+  stale_action: warn        # "warn" (load + warn) or "skip" (default warn)
+```
+
+### Orphan detection
+
+If any covered path no longer exists in the working tree (code deleted, moved, or refactored away), the doc is flagged **orphan** — a separate state from stale. Kick-off still loads it but with a stronger warning; `/inspect-doc-drift` sorts orphans first and offers remediation paths that make sense for deleted code (re-tag, untag, or delete the doc).
+
+### `/wrap` suggests additions
+
+When a session's git diff overlaps with tagged docs' covers paths, `/wrap` asks once whether to add them to the `## Load on Kick-Off` section. One consolidated prompt, not per-doc.
+
+### `/inspect-doc-drift`
+
+Scans all tagged docs repo-wide, reports drift (fresh / stale / orphan), offers to upgrade HTML-comment docs to frontmatter, and walks you through remediation (open / re-tag / untag / delete / skip). Run with no args for the dashboard, or `/inspect-doc-drift <path>` to drill into one doc read-only.
+
+### Design notes
+
+No inference. No graph walk. No auto-discovery. Kick-off reads only what you've explicitly listed in the handoff. Projects that don't add the `Load on Kick-Off` section behave exactly as in v0.3.x — zero change. The tag convention lands in a crowded space (Semcheck, Driftcheck, DocSync all solve adjacent problems with LLM calls); koji's angle is the git-commit-count staleness heuristic, which is deterministic, cheap, and doesn't need a model at all.
+
 ## How It Works
 
 ```
@@ -109,6 +181,7 @@ Global config (`~/.config/koji/config.yaml`) also stores persistent preferences:
 ├── wrap/SKILL.md             # /wrap skill definition
 ├── take-note/SKILL.md        # /take-note skill definition
 ├── koji-init/SKILL.md        # /koji-init skill definition
+├── inspect-doc-drift/SKILL.md  # /inspect-doc-drift skill definition (v0.4.0)
 ├── bin/
 │   ├── koji-config           # Config read/write utility
 │   ├── koji-detect           # Project detection + config cascade

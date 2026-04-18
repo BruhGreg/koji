@@ -21,7 +21,7 @@ git clone --depth 1 https://github.com/BruhGreg/koji.git ~/.claude/skills/koji
 cd ~/.claude/skills/koji && ./setup
 ```
 
-完成。四個技能現已在 Claude Code 中可用：
+完成。五個技能現已在 Claude Code 中可用：
 
 | 技能 | 功能 |
 |------|------|
@@ -29,6 +29,7 @@ cd ~/.claude/skills/koji && ./setup
 | `/wrap` | 結束工作階段：更新教訓、交接、日誌、歸檔、提議提交、產生下次啟動提示 |
 | `/take-note` | 工作階段中途：儲存進度——或 `/take-note 完成認證，接下來做測試` 附帶說明 |
 | `/koji-init` | 初始化：在任何專案中建立文件骨架和 `.koji.yaml` |
+| `/inspect-doc-drift` | 掃描帶有 `<!-- koji:covers -->` 標籤的文件，顯示文件與其所覆蓋程式碼的漂移狀況，並協助修復已過期的文件 |
 
 ## 快速開始
 
@@ -101,6 +102,77 @@ todo:
 - **`numbered`** — 歸檔至 `sessions/archive-01.md`、`archive-02.md` 等。簡單、線性。
 - **`dated`** — 歸檔至 `sessions/YYYY-MM/DD-slug.md`，附帶 `INDEX.md` 查詢表。更適合長期執行的專案。
 
+## 啟動時載入文件（v0.4.0）
+
+預設情況下，`/kick-off` 讀取四個必要檔案（交接文件、TODO、教訓、上次工作階段條目）。其他所有東西——`docs/*.md`、`DESIGN.md`、架構筆記——在工作階段開始時對代理是隱形的。
+
+**將特定文件加入啟動上下文**：在 `AI_HANDOFF.md` 加一個區段：
+
+```markdown
+## Load on Kick-Off
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [API Reference](docs/API.md)
+- docs/DEPLOYMENT.md
+- /DESIGN.md
+```
+
+項目支援 markdown 連結格式或純路徑格式。`/kick-off` 會解析此區段，將每個 `.md` 路徑載入上下文，並回報：`Docs: 4 loaded`。
+
+### 選用：透過覆蓋標籤感知漂移
+
+任何文件都可以宣告它所描述的程式碼路徑。當已標籤的文件在 Load on Kick-Off 中且其覆蓋路徑自文件上次編輯後超過 `docs.stale_threshold` 個提交時，`/kick-off` 會載入並附上警告。支援兩種宣告形式：
+
+**形式 A — YAML frontmatter（標準形式）：**
+
+```markdown
+---
+koji:
+  covers:
+    - src/auth/
+    - server/routes/auth/
+---
+
+# AUTH_FLOW.md
+```
+
+Frontmatter 與更廣的 AI-agent-markdown 生態一致（Cursor rules、Continue.dev、Astro、MkDocs、Hugo 都能解析）。可以自由與其他 frontmatter 鍵混用。
+
+**形式 B — HTML 註解（簡短形式）：**
+
+```markdown
+<!-- koji:covers src/auth/ server/routes/auth/ -->
+
+# AUTH_FLOW.md
+```
+
+單行，解析結果相同。適合尚未使用 frontmatter 且一行就夠用的情況。`/inspect-doc-drift` 會在需要時提議將形式 B 升級到形式 A。
+
+### 設定
+
+```yaml
+# .koji.yaml
+docs:
+  stale_threshold: 10       # 覆蓋路徑中的提交數（預設 10）
+  stale_action: warn        # "warn"（載入並警告）或 "skip"（預設為 warn）
+```
+
+### 孤兒文件偵測
+
+若任何覆蓋路徑已從工作目錄中移除（程式碼已刪除、搬移或重構），文件會被標記為 **orphan**——與 stale 分開的狀態。`/kick-off` 仍會載入但警告更強烈；`/inspect-doc-drift` 將孤兒排在最前，並提供對已刪除程式碼合理的修復路徑（重新標籤、移除標籤、或刪除文件）。
+
+### `/wrap` 建議新增
+
+當一個工作階段的 git diff 與已標籤文件的覆蓋路徑重疊時，`/wrap` 會問一次是否將它們加入 `## Load on Kick-Off` 區段。單一整合提示，非逐個文件。
+
+### `/inspect-doc-drift`
+
+掃描整個倉庫中所有已標籤的文件，回報漂移（fresh / stale / orphan），提議將 HTML 註解形式升級到 frontmatter，並引導你修復（開啟 / 重新標籤 / 移除標籤 / 刪除 / 跳過）。不帶參數執行取得儀表板，或用 `/inspect-doc-drift <path>` 唯讀鑽入某個文件。
+
+### 設計註記
+
+無推論。無圖形遍歷。無自動發現。`/kick-off` 只讀取你在交接中明確列出的內容。未加入 `Load on Kick-Off` 區段的專案行為與 v0.3.x 完全相同——零變化。標籤約定落在一個已有相關工具的領域（Semcheck、Driftcheck、DocSync 都以 LLM 呼叫解決相近問題）；koji 的切入點是 git 提交計數漂移啟發法，這是確定性的、便宜的，完全不需要模型。
+
 ## 運作方式
 
 ```
@@ -109,6 +181,7 @@ todo:
 ├── wrap/SKILL.md             # /wrap 技能定義
 ├── take-note/SKILL.md        # /take-note 技能定義
 ├── koji-init/SKILL.md        # /koji-init 技能定義
+├── inspect-doc-drift/SKILL.md  # /inspect-doc-drift 技能定義（v0.4.0）
 ├── bin/
 │   ├── koji-config           # 設定讀寫工具
 │   ├── koji-detect           # 專案偵測 + 設定層疊

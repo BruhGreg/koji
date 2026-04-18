@@ -7,3 +7,10 @@
 
 ## Constraints
 [Platform limits, deployment rules, blockers]
+
+## Load on Kick-Off
+
+<!-- Optional. Bullets here are auto-loaded by /kick-off.
+     - docs/X.md
+     - [Y](docs/Y.md) -->
+

@@ -186,6 +186,90 @@ done
 
 Read detected stack files (just the name/version/framework fields, not the entire file). Read key doc headers (first 10 lines only). Internalize — add 1-2 lines to the brief.
 
+### 2c. Load user-curated docs (opt-in via `## Load on Kick-Off` section)
+
+Projects can opt specific docs into kick-off context by adding a section to `AI_HANDOFF.md`:
+
+```markdown
+## Load on Kick-Off
+
+- [SPLIT_TUNNEL_ROUTING](docs/SPLIT_TUNNEL_ROUTING.md)
+- [ENDPOINT_RESOLUTION](docs/ENDPOINT_RESOLUTION.md)
+- docs/AUTH_FLOW.md
+- /DESIGN.md
+```
+
+The section is optional. If it's absent, skip this entire step silently.
+
+**Parse the section:**
+
+1. Read `$DOCS_PATH/AI_HANDOFF.md` (already in context from step 2)
+2. Locate the heading line matching `^## Load on Kick-Off\s*$` (exact H2, case-sensitive, allows trailing whitespace)
+3. If not found → skip this step silently
+4. Between that heading and the next `^## ` heading (or EOF), collect each bullet line matching `^\s*[-*]\s+(.+)$`
+5. For each bullet:
+   - Extract the `.md` path — accept either:
+     - Markdown link form: `[text](path.md)` — extract the `path.md` portion
+     - Plain path form: just the `.md` path as text
+   - Skip if the "path" is an external URL (`http://`, `https://`, `mailto:`)
+   - Skip if the path doesn't end in `.md`
+   - Resolve relative paths against `$PROJECT_ROOT` (not against `AI_HANDOFF.md`'s directory — bullets reference project-rooted paths)
+   - Paths starting with `/` are treated as project-rooted too (strip the leading `/`)
+
+**For each valid path:**
+
+1. If the file doesn't exist → log a 1-line warning `warn: Load on Kick-Off references <path> (missing)` and skip
+2. Read the file using the `Read` tool, internalize its content
+3. **Drift check** — parse the doc for a koji-covers declaration. Two forms are supported; check in order:
+
+   **Form A (canonical) — YAML frontmatter:**
+   ```markdown
+   ---
+   koji:
+     covers:
+       - src/auth/
+       - server/routes/auth/
+   ---
+   ```
+   If the doc's first non-empty line is `---`, parse YAML up to the next `---`. Look for `koji.covers` as a list of paths.
+
+   **Form B (shorthand) — HTML comment:**
+   ```markdown
+   <!-- koji:covers src/auth/ server/routes/auth/ -->
+   ```
+   Only checked if Form A didn't yield a `koji.covers` list. Search the first 50 lines for the pattern.
+
+   If neither form is present, no drift check — doc just loads.
+
+4. **If a `covers` list was parsed**:
+   - Read `.koji.yaml` for `docs.stale_threshold` (default `10`)
+   - Read `.koji.yaml` for `docs.stale_action` (default `warn`; options: `warn` = load but warn, `skip` = don't load)
+   - **Orphan check**: for each covered path, verify it exists in the working tree (`[ -e "$PROJECT_ROOT/$path" ]`). If ANY covered path is missing → doc is **orphan**.
+   - **Drift compute**: count commits in covered paths since doc's last-modified commit.
+   - **Decision**:
+     - Orphan → always load + print stronger warning: `⚠ <doc>: covered path '<missing>' no longer exists. Doc may describe removed code.`
+     - Drift > threshold (not orphan) → behave per `docs.stale_action` (`warn` loads with `⚠ <doc>: <N> commits behind`; `skip` drops the load with `skipped: <doc> (<N> behind)`)
+     - Drift ≤ threshold → load silently
+
+5. Track per-doc outcome (loaded / loaded-warn / skipped / orphan / missing) for the brief summary.
+
+**Config extraction from `.koji.yaml`** (reuse the existing lightweight parse pattern):
+
+```bash
+STALE_THRESHOLD=$(grep -E '^\s*stale_threshold\s*:' "$PROJECT_ROOT/.koji.yaml" 2>/dev/null | head -1 | sed -E 's/.*:\s*([0-9]+).*/\1/' | grep -E '^[0-9]+$' || echo 10)
+STALE_ACTION=$(grep -E '^\s*stale_action\s*:' "$PROJECT_ROOT/.koji.yaml" 2>/dev/null | head -1 | sed -E 's/.*:\s*([a-z_]+).*/\1/' || echo warn)
+```
+
+**In the brief** (step 3 below), append one line summarizing the doc-load pass:
+
+> Docs: <loaded> loaded, <stale> stale, <orphan> orphan, <missing> missing
+
+If `stale > 0` or `orphan > 0`, also list the names on the next line for visibility:
+
+> Attention: orphan docs/A.md, stale docs/B.md (12). Run `/inspect-doc-drift` to fix.
+
+**Fail-safe**: if any part of this step errors (config parse fails, regex glitch, unreadable `.koji.yaml`), degrade silently to "no Load on Kick-Off section processed" — never block kick-off on doc-loading issues.
+
 ---
 
 ### 3. Brief the user
