@@ -44,7 +44,7 @@ Parse the argument:
 
 ## Dashboard + fix-prompt mode (no args)
 
-### 1. Discover tagged docs AND docs loaded-but-untagged
+### 1. Discover tagged docs AND untagged candidates across the whole repo
 
 **Part A — tagged docs**. Use `git grep` for cross-platform consistency:
 
@@ -55,16 +55,38 @@ git grep -l -E '^\s*covers\s*:' -- '*.md' 2>/dev/null | sort -u
 
 For each match, read the first ~50 lines to verify a valid frontmatter `covers` list actually exists (see parsing below). Files matching `covers:` but lacking a proper list are ignored.
 
-**Part B — Load on Kick-Off entries** (so we can compare). Read `$DOCS_PATH/AI_HANDOFF.md`, locate the `## Load on Kick-Off` H2 section, extract each bullet's `.md` path. Call this the **loaded set**.
+**Part B — all tracked `.md` files** (for the untagged scan). Use `git ls-files` (respects `.gitignore`, so vendored trees like `node_modules/`, `Pods/`, `vendor/` are excluded if gitignored):
 
-Compute:
+```bash
+git ls-files '*.md' | sort -u
+```
+
+**Part C — Load on Kick-Off entries**. Read `$DOCS_PATH/AI_HANDOFF.md`, locate the `## Load on Kick-Off` H2 section, extract each bullet's `.md` path.
+
+**Compute the sets:**
+
 - `TAGGED` = docs with a valid `covers` declaration (Part A)
-- `LOADED` = docs in Load on Kick-Off (Part B)
-- `UNTAGGED_LOADED` = `LOADED - TAGGED` — docs that kick-off loads but have no drift signal
+- `ALL_MD` = all tracked `.md` files (Part B)
+- `LOADED` = docs in `## Load on Kick-Off` (Part C)
+- `META` = meta-files that should never be considered for code-coverage tagging. Exclude by basename:
+  `README.md`, `LICENSE*.md`, `CHANGELOG*.md`, `CODE_OF_CONDUCT*.md`, `SECURITY.md`, `CONTRIBUTING.md`,
+  `CLAUDE.md`, `AGENTS.md`, `AI_HANDOFF.md`, `agent-session.md`, `lessons.md`, `TODO.md`,
+  `COMPLETED_TASKS.md`, `SESSION_TEMPLATE.md`.
+  Also exclude anything under `$ARCHIVE_DIR/` (session archives).
+- `UNTAGGED_ALL` = `ALL_MD - TAGGED - META`
+- `UNTAGGED_LOADED` = `UNTAGGED_ALL ∩ LOADED` (high-priority subset)
+- `UNTAGGED_OTHER` = `UNTAGGED_ALL - UNTAGGED_LOADED`
 
-If `TAGGED` is empty AND `UNTAGGED_LOADED` is empty, tell the user:
+**Bucket `UNTAGGED_OTHER` further** for display priority:
 
-> No docs declare coverage and no docs are listed in `## Load on Kick-Off`.
+- **Under `docs/`** — usually narrative code docs
+- **Nested `DESIGN.md` files** (any depth) — design-system docs
+- **Root-level docs** (`ARCHITECTURE.md`, `SPEC.md`, etc. — any `.md` at repo root not in META)
+- **Other** — everything else (rare; e.g., inline `NOTES.md` in subdirs)
+
+If `TAGGED` is empty AND `UNTAGGED_ALL` is empty, tell the user:
+
+> No tracked `.md` files found (excluding meta-files like README, LICENSE, handoff).
 > Tagging is optional — add frontmatter to a doc you want drift-tracked:
 >
 >   ```
@@ -77,7 +99,7 @@ If `TAGGED` is empty AND `UNTAGGED_LOADED` is empty, tell the user:
 Stop.
 
 If `TAGGED` is non-empty, continue to step 2 for the drift compute on tagged docs.
-If `UNTAGGED_LOADED` is non-empty, step 3b will surface them at the end.
+Step 3a will surface `UNTAGGED_ALL` bucketed by priority at the end.
 
 ### 2. Parse coverage declaration + compute status
 
@@ -133,24 +155,45 @@ Summary line below:
 
 > <fresh_count> fresh, <stale_count> stale, <orphan_count> orphan.
 
-### 3a. Surface untagged-but-loaded docs
+### 3a. Surface untagged candidates across the repo
 
-If `UNTAGGED_LOADED` from step 1 is non-empty, print this after the dashboard:
+If `UNTAGGED_ALL` from step 1 is empty, skip this step silently (no unindexed docs to tag).
 
-> <N> doc(s) are loaded at kick-off but have no `covers` frontmatter. Without one, drift is invisible — code can change beneath the doc and no one will know.
+Otherwise, print a bucketed report. The two interesting priorities:
+
+> **Untagged docs — consider tagging so drift can be detected:**
 >
-> Loaded but untagged:
->   - docs/X.md
->   - docs/Y.md
+> **Loaded at kick-off (HIGH — loaded without drift signal):**
+>   - docs/PEER_MANAGEMENT.md
+>   - docs/OPERATION_QUEUE.md
+>   - docs/SPLIT_TUNNEL_ROUTING.md
+>   - .koji/E2E_REVIEW.md
+>
+> **Under `docs/` (MEDIUM):**
+>   - docs/ENDPOINT_RESOLUTION.md
+>   - docs/AD_MONETIZATION.md
+>   - ... (N more)
+>
+> **Nested `DESIGN.md` files (MEDIUM):**
+>   - clients/DESIGN.md
+>   - tools/DESIGN.md
+>   - website/DESIGN.md
+>
+> **Other (LOW):**
+>   - ... (N more)
 
 Use `AskUserQuestion`:
 
-> Add `covers` frontmatter to each? I'll suggest code paths based on each doc's name + content; you can accept, edit, or skip per doc.
+> What would you like to tag?
 
-Options:
-- **A) Tag all (with suggestions)** — walk each doc, show suggested paths, accept/edit/skip per doc
-- **B) Select some** — pick which to tag
-- **C) Skip** — leave them untagged (kick-off still loads them)
+Options (dynamic based on non-empty buckets):
+- **A) Walk HIGH only** — tag untagged-but-loaded docs (most important)
+- **B) Walk HIGH + MEDIUM** — also tag docs under `docs/` and nested `DESIGN.md` files
+- **C) Walk everything** — include LOW bucket too
+- **D) Pick individual docs** — show a numbered list across all buckets, user selects
+- **E) Skip all** — leave them untagged
+
+If only HIGH bucket is non-empty, collapse options A-C into just "Tag these".
 
 **For each chosen doc, infer path suggestions (heuristic, intentionally cheap):**
 
@@ -194,8 +237,6 @@ Options:
    > `<doc>` — no obvious paths to suggest. Which paths does this doc describe? (space-separated, relative to repo root. Leave blank to skip.)
 
 After walking all chosen docs, the newly-tagged docs have their drift computed (run step 2 for just these) so step 4 can include them.
-
-If `UNTAGGED_LOADED` is empty, skip this step silently.
 
 ### 4. If there are problem docs, offer to fix
 

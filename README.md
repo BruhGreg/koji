@@ -154,7 +154,16 @@ When a session's git diff overlaps with tagged docs' covers paths, `/wrap` asks 
 
 ### `/inspect-doc-drift`
 
-Scans all tagged docs repo-wide, reports drift (fresh / stale / orphan), surfaces docs in `## Load on Kick-Off` that have no `covers` declaration (loaded without drift signal — offered for interactive tagging), and walks you through remediation for stale/orphan docs (open / re-tag / untag / delete / skip). Run with no args for the dashboard, or `/inspect-doc-drift <path>` to drill into one doc read-only.
+Audits the whole codebase for doc-code drift and untagged docs.
+
+- **Tagged docs** → reports drift (fresh / stale / orphan) and walks remediation for problem docs (open / re-tag / untag / delete / skip).
+- **Untagged `.md` files across the repo** → bucketed by priority:
+  - **HIGH** — untagged docs listed in `## Load on Kick-Off` (loaded without drift signal)
+  - **MEDIUM** — docs under `docs/` and nested `DESIGN.md` files
+  - **LOW** — other tracked `.md` files
+  Meta-files are excluded (README, LICENSE, CHANGELOG, CLAUDE.md, AGENTS.md, handoff, session logs, TODO, etc). You pick which bucket(s) to walk; per-doc prompts suggest covers paths via cheap heuristic (filename keywords + body references).
+
+Run with no args for the dashboard + prompts, or `/inspect-doc-drift <path>` to drill into one doc read-only.
 
 ### Design notes
 

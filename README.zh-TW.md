@@ -154,7 +154,16 @@ docs:
 
 ### `/inspect-doc-drift`
 
-掃描整個倉庫中所有已標籤的文件，回報漂移（fresh / stale / orphan），標出 `## Load on Kick-Off` 中沒有 `covers` 宣告的文件（啟動時會載入但沒有漂移訊號——互動式提議為它們加上標籤），並引導你修復 stale/orphan 文件（開啟 / 重新標籤 / 移除標籤 / 刪除 / 跳過）。不帶參數執行取得儀表板，或用 `/inspect-doc-drift <path>` 唯讀鑽入某個文件。
+整個倉庫層級的文件—程式碼漂移與未標籤文件稽核。
+
+- **已標籤文件** → 回報漂移狀態（fresh / stale / orphan），並引導問題文件的修復（開啟 / 重新標籤 / 移除標籤 / 刪除 / 跳過）。
+- **倉庫中所有未標籤的 `.md`** → 依優先度分桶：
+  - **HIGH**——列在 `## Load on Kick-Off` 中但未標籤的文件（載入但無漂移訊號）
+  - **MEDIUM**——`docs/` 下的文件與巢狀 `DESIGN.md` 檔案
+  - **LOW**——其他已追蹤的 `.md` 檔案
+  中繼檔案會被排除（README、LICENSE、CHANGELOG、CLAUDE.md、AGENTS.md、handoff、工作階段日誌、TODO 等）。你可以選擇要走過哪個桶；每個文件的提示會透過啟發式（檔名關鍵字 + 內文引用）建議 covers 路徑。
+
+不帶參數執行取得儀表板與提示，或用 `/inspect-doc-drift <path>` 唯讀鑽入某個文件。
 
 ### 設計註記
 
