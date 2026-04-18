@@ -61,7 +61,7 @@ For each match, read the first ~50 lines to verify a valid frontmatter `covers` 
 git ls-files '*.md' | sort -u
 ```
 
-**Part C — Load on Kick-Off entries**. Read `$DOCS_PATH/AI_HANDOFF.md`, locate the `## Load on Kick-Off` H2 section, extract each bullet's `.md` path.
+**Part C — Load on Kick-Off entries**. Read `$DOCS_PATH/agent-session.md`, locate the `## Load on Kick-Off` H2 section (lives above the first `## Session:` entry), extract each bullet's `.md` path.
 
 **Compute the sets:**
 
@@ -357,5 +357,5 @@ Read-only. To remediate, re-run `/inspect-doc-drift` without args.
 
 ## Related skills
 
-- `/kick-off` — parses the `## Load on Kick-Off` section of `AI_HANDOFF.md` to decide which docs to load. Tagged docs that are stale still load at kick-off (with a warning) — skipping is a user decision via `/inspect-doc-drift`.
+- `/kick-off` — parses the `## Load on Kick-Off` section of `agent-session.md` to decide which docs to load. Tagged docs that are stale still load at kick-off (with a warning) — skipping is a user decision via `/inspect-doc-drift`.
 - `/wrap` — suggests tagged docs to add to the Load on Kick-Off section based on the session's git diff. Complements this skill: wrap decides what to track, `/inspect-doc-drift` decides what to fix.

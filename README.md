@@ -106,7 +106,7 @@ Global config (`~/.config/koji/config.yaml`) also stores persistent preferences:
 
 By default `/kick-off` reads four mandatory files (handoff, TODO, lessons, last session entry). Anything else — `docs/*.md`, `DESIGN.md`, architecture notes — is invisible to the agent at session start.
 
-**Opt specific docs into kick-off context** by adding a section to `AI_HANDOFF.md`:
+**Opt specific docs into kick-off context** by adding a section to `agent-session.md` (above the first `## Session:` entry — colocated with per-session `Notes for Next Session` since both are kick-off inputs):
 
 ```markdown
 ## Load on Kick-Off
@@ -150,7 +150,7 @@ If any covered path no longer exists in the working tree (code deleted, moved, o
 
 ### `/wrap` suggests additions
 
-When a session's git diff overlaps with tagged docs' covers paths, `/wrap` asks once whether to add them to the `## Load on Kick-Off` section. One consolidated prompt, not per-doc.
+When a session's git diff overlaps with tagged docs' covers paths, `/wrap` asks once whether to add them to the `## Load on Kick-Off` section of `agent-session.md`. One consolidated prompt, not per-doc.
 
 ### `/inspect-doc-drift`
 

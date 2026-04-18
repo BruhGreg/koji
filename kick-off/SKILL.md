@@ -111,6 +111,20 @@ If B: continue without updating.
 
 If `koji-config get auto_update` returns `true` and an update is available, update silently without asking — just show: `koji updated: v{old} → v{new}`.
 
+### 0d. Load-on-Kick-Off migration (v0.4.3)
+
+Run the one-shot migrator:
+
+```bash
+source <(~/.claude/skills/koji/bin/koji-migrate-load-on-kickoff)
+```
+
+It moves any `## Load on Kick-Off` section from `AI_HANDOFF.md` into `agent-session.md` (above the first `## Session:` entry). Idempotent — no-op after first successful run.
+
+- If `KOJI_MIGRATED_LOAD_KO=true`: print `$KOJI_MIGRATION_MSG` once, continue.
+- If `KOJI_MIGRATED_LOAD_KO=cleanup`: print `$KOJI_MIGRATION_MSG` once (stray duplicate stripped), continue.
+- If `KOJI_MIGRATED_LOAD_KO=false`: silent, continue.
+
 ### 1. Check for user-provided focus
 
 If the user typed text after `/kick-off` (e.g., `/kick-off build the news landing page`), use that as the **session focus** — skip reading the last session's starter prompt and use the user's intent instead. Still read handoff and lessons for context.
@@ -188,7 +202,7 @@ Read detected stack files (just the name/version/framework fields, not the entir
 
 ### 2c. Load user-curated docs (opt-in via `## Load on Kick-Off` section)
 
-Projects can opt specific docs into kick-off context by adding a section to `AI_HANDOFF.md`:
+Projects can opt specific docs into kick-off context by adding a section to `agent-session.md` (above the first `## Session:` entry, alongside the rotating session log):
 
 ```markdown
 ## Load on Kick-Off
@@ -203,7 +217,7 @@ The section is optional. If it's absent, skip this entire step silently.
 
 **Parse the section:**
 
-1. Read `$DOCS_PATH/AI_HANDOFF.md` (already in context from step 2)
+1. Read `$DOCS_PATH/agent-session.md` (already in context from step 2)
 2. Locate the heading line matching `^## Load on Kick-Off\s*$` (exact H2, case-sensitive, allows trailing whitespace)
 3. If not found → skip this step silently
 4. Between that heading and the next `^## ` heading (or EOF), collect each bullet line matching `^\s*[-*]\s+(.+)$`
@@ -213,7 +227,7 @@ The section is optional. If it's absent, skip this entire step silently.
      - Plain path form: just the `.md` path as text
    - Skip if the "path" is an external URL (`http://`, `https://`, `mailto:`)
    - Skip if the path doesn't end in `.md`
-   - Resolve relative paths against `$PROJECT_ROOT` (not against `AI_HANDOFF.md`'s directory — bullets reference project-rooted paths)
+   - Resolve relative paths against `$PROJECT_ROOT` (not against `agent-session.md`'s directory — bullets reference project-rooted paths)
    - Paths starting with `/` are treated as project-rooted too (strip the leading `/`)
 
 **For each valid path:**

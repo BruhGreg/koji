@@ -130,7 +130,7 @@ Fallback to `git diff --name-only` against any available base if `HEAD@{1}` isn'
 
 1. Parse its first `<!-- koji:covers <space-separated-paths> -->` header
 2. Check if any touched path matches any covered path prefix
-3. If yes, check whether the doc is ALREADY in the `## Load on Kick-Off` section of `AI_HANDOFF.md` (by path match). If already listed, skip. If not listed, the doc is a suggestion candidate.
+3. If yes, check whether the doc is ALREADY in the `## Load on Kick-Off` section of `agent-session.md` (by path match). If already listed, skip. If not listed, the doc is a suggestion candidate.
 
 **If there are suggestion candidates, ask once** (not per-doc):
 
@@ -140,17 +140,17 @@ Use `AskUserQuestion`:
 >   - docs/AUTH_FLOW.md (covers backend/auth/ — 3 files changed)
 >   - docs/AD_MONETIZATION.md (covers clients/lib/ads/ — 1 file changed)
 >
-> Add them to the Load on Kick-Off section in AI_HANDOFF.md?
+> Add them to the Load on Kick-Off section in agent-session.md?
 
 Options:
 - **A) Add all** — append each candidate as a bullet under `## Load on Kick-Off`
 - **B) Select some** — pick which to add
 - **C) Skip** — don't add any
 
-**If A or B, update `AI_HANDOFF.md`:**
+**If A or B, update `agent-session.md`:**
 
-1. Check if a `## Load on Kick-Off` H2 section exists
-2. If not, create it at the bottom of the file (before any trailing content, or append):
+1. Check if a `## Load on Kick-Off` H2 section exists (should be above the first `## Session:` entry)
+2. If not, create it immediately above the first `## Session:` heading (or at the bottom of the file if no session entries exist):
    ```markdown
 
    ## Load on Kick-Off

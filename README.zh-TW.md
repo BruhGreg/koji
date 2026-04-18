@@ -106,7 +106,7 @@ todo:
 
 預設情況下，`/kick-off` 讀取四個必要檔案（交接文件、TODO、教訓、上次工作階段條目）。其他所有東西——`docs/*.md`、`DESIGN.md`、架構筆記——在工作階段開始時對代理是隱形的。
 
-**將特定文件加入啟動上下文**：在 `AI_HANDOFF.md` 加一個區段：
+**將特定文件加入啟動上下文**：在 `agent-session.md` 加一個區段（放在第一個 `## Session:` 之上——與每個工作階段的 `Notes for Next Session` 同處，因為兩者都是啟動時的輸入）：
 
 ```markdown
 ## Load on Kick-Off
@@ -150,7 +150,7 @@ docs:
 
 ### `/wrap` 建議新增
 
-當一個工作階段的 git diff 與已標籤文件的覆蓋路徑重疊時，`/wrap` 會問一次是否將它們加入 `## Load on Kick-Off` 區段。單一整合提示，非逐個文件。
+當一個工作階段的 git diff 與已標籤文件的覆蓋路徑重疊時，`/wrap` 會問一次是否將它們加入 `agent-session.md` 的 `## Load on Kick-Off` 區段。單一整合提示，非逐個文件。
 
 ### `/inspect-doc-drift`
 

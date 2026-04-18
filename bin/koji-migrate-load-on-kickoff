@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# koji-migrate-load-on-kickoff — one-shot v0.4.3 migration.
+#
+# Moves `## Load on Kick-Off` from AI_HANDOFF.md to agent-session.md
+# (above the first `## Session:` heading, or at EOF if none).
+#
+# Idempotent: safe to run on every kick-off. No-op after first successful run.
+#
+# Usage:    source <(~/.claude/skills/koji/bin/koji-migrate-load-on-kickoff)
+# Emits:    KOJI_MIGRATED_LOAD_KO={true|false|cleanup}
+#           KOJI_MIGRATION_MSG="<human-readable summary if non-false>"
+# Requires: DOCS_PATH, PROJECT_ROOT (set by koji-detect).
+
+set -euo pipefail
+
+if [ -z "${DOCS_PATH:-}" ] || [ -z "${PROJECT_ROOT:-}" ]; then
+  eval "$(~/.claude/skills/koji/bin/koji-detect)"
+fi
+
+HANDOFF="$DOCS_PATH/AI_HANDOFF.md"
+SESSION="$DOCS_PATH/agent-session.md"
+
+[ -f "$HANDOFF" ] || { echo "KOJI_MIGRATED_LOAD_KO=false"; exit 0; }
+[ -f "$SESSION" ] || { echo "KOJI_MIGRATED_LOAD_KO=false"; exit 0; }
+
+# Does the handoff still carry the section?
+START=$(grep -n '^## Load on Kick-Off[[:space:]]*$' "$HANDOFF" 2>/dev/null | head -1 | cut -d: -f1 || true)
+if [ -z "$START" ]; then
+  echo "KOJI_MIGRATED_LOAD_KO=false"
+  exit 0
+fi
+
+# Find the end: the line before the next "## " heading, or EOF.
+TAIL_MATCH=$(tail -n +$((START + 1)) "$HANDOFF" | grep -n '^## ' | head -1 | cut -d: -f1 || true)
+if [ -n "$TAIL_MATCH" ]; then
+  END=$((START + TAIL_MATCH - 1))
+else
+  END=$(wc -l < "$HANDOFF" | tr -d ' ')
+fi
+
+# Extract the block (heading + body).
+BLOCK=$(sed -n "${START},${END}p" "$HANDOFF")
+
+# If the section already exists in agent-session.md, drop the stray copy from handoff.
+if grep -q '^## Load on Kick-Off[[:space:]]*$' "$SESSION" 2>/dev/null; then
+  sed "${START},${END}d" "$HANDOFF" > "$HANDOFF.tmp"
+  # Collapse runs of blank lines down to one.
+  awk 'BEGIN{blank=0} /^$/{blank++; if(blank<=1) print; next} {blank=0; print}' "$HANDOFF.tmp" > "$HANDOFF"
+  rm -f "$HANDOFF.tmp"
+  echo "KOJI_MIGRATED_LOAD_KO=cleanup"
+  echo "KOJI_MIGRATION_MSG=\"Load on Kick-Off already in agent-session.md; removed stray copy from AI_HANDOFF.md\""
+  exit 0
+fi
+
+# Insert above the first `## Session:` heading, or append if none.
+FIRST_SESSION=$(grep -n '^## Session:' "$SESSION" 2>/dev/null | head -1 | cut -d: -f1 || true)
+
+if [ -n "$FIRST_SESSION" ]; then
+  {
+    head -n $((FIRST_SESSION - 1)) "$SESSION"
+    printf '%s\n\n---\n\n' "$BLOCK"
+    tail -n +"$FIRST_SESSION" "$SESSION"
+  } > "$SESSION.tmp" && mv "$SESSION.tmp" "$SESSION"
+else
+  printf '\n%s\n' "$BLOCK" >> "$SESSION"
+fi
+
+# Strip block from handoff and collapse blank-line runs.
+sed "${START},${END}d" "$HANDOFF" > "$HANDOFF.tmp"
+awk 'BEGIN{blank=0} /^$/{blank++; if(blank<=1) print; next} {blank=0; print}' "$HANDOFF.tmp" > "$HANDOFF"
+rm -f "$HANDOFF.tmp"
+
+echo "KOJI_MIGRATED_LOAD_KO=true"
+echo "KOJI_MIGRATION_MSG=\"Moved '## Load on Kick-Off' from AI_HANDOFF.md to agent-session.md (v0.4.3)\""
