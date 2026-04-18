@@ -21,7 +21,7 @@ git clone --depth 1 https://github.com/BruhGreg/koji.git ~/.claude/skills/koji
 cd ~/.claude/skills/koji && ./setup
 ```
 
-That's it. Five skills are now available in Claude Code:
+That's it. Four skills are now available in Claude Code:
 
 | Skill | What it does |
 |-------|-------------|
@@ -29,7 +29,6 @@ That's it. Five skills are now available in Claude Code:
 | `/wrap` | End session: update lessons, handoff, session log, archive, propose commit, generate starter prompt |
 | `/take-note` | Mid-session: save progress — or `/take-note finished auth, moving to tests` with inline note |
 | `/koji-init` | Bootstrap: create docs scaffolding and `.koji.yaml` in any project |
-| `/koji-doc-review` | Inspect docs tagged with `<!-- koji:covers ... -->`: list freshness, load a stale one on demand, or tag a new one |
 
 ## Quick Start
 
@@ -102,38 +101,6 @@ Global config (`~/.config/koji/config.yaml`) also stores persistent preferences:
 - **`numbered`** — Archives go to `sessions/archive-01.md`, `archive-02.md`, etc. Simple, linear.
 - **`dated`** — Archives go to `sessions/YYYY-MM/DD-slug.md` with an `INDEX.md` lookup table. Scales better for long-running projects.
 
-## Doc Drift Awareness (v0.4.0)
-
-Kick-off reads the mandatory files (`AI_HANDOFF.md`, `TODO.md`, `lessons.md`, last session entry). Other project docs stay invisible unless you explicitly tag them. A tagged doc gets auto-loaded into kick-off context — but only if it still looks fresh against the code it describes.
-
-**Tag a doc** by adding one line at the top:
-
-```markdown
-<!-- koji:covers backend/auth/ clients/lib/auth/ -->
-```
-
-Multiple paths space-separated. Relative to repo root.
-
-**At kick-off**, for each tagged doc:
-- Find the commit that last touched the doc.
-- Count commits in the covered paths since then.
-- If the count is over the threshold (default 10, override via `.koji.yaml` → `docs.stale_threshold`), skip the doc with a notice: `Skipping docs/X.md — code moved 12 commits since doc last touched.`
-- Otherwise load it silently.
-
-**Why exclusion instead of verification**: a silently-skipped doc is a recoverable mistake; a confidently-wrong doc in agent context is not. The default is fail-safe.
-
-**Inspect or force-load** with `/koji-doc-review`:
-
-```
-/koji-doc-review              # list all tagged docs + freshness status
-/koji-doc-review <path>       # load a specific doc (even if stale)
-/koji-doc-review add <path>   # interactively add a koji:covers header
-```
-
-No global index file, no YAML sidecar, no wrap-time prompts. The only thing you author is the one-line header per doc you want koji to consider. Opt-in — projects without any tagged docs see zero behavior change.
-
-**Cross-platform**: uses `git grep` and `git log` only. No date math, no platform-specific grep flags. Identical behavior on Windows, macOS, Linux.
-
 ## How It Works
 
 ```
@@ -142,7 +109,6 @@ No global index file, no YAML sidecar, no wrap-time prompts. The only thing you 
 ├── wrap/SKILL.md             # /wrap skill definition
 ├── take-note/SKILL.md        # /take-note skill definition
 ├── koji-init/SKILL.md        # /koji-init skill definition
-├── koji-doc-review/SKILL.md  # /koji-doc-review skill definition (v0.4.0)
 ├── bin/
 │   ├── koji-config           # Config read/write utility
 │   ├── koji-detect           # Project detection + config cascade
@@ -244,8 +210,6 @@ When `/wrap` encounters both code and docs changes, it asks whether to commit ev
 ### How does /kick-off gather context?
 
 Three tiers, zero config. **Baseline** (always): checks git branch, uncommitted changes, active plans. **Reference-follow** (when session notes mention specific files/plans): reads referenced plans and searches archived sessions for related topics. **Codebase orient** (first session, stale handoff >7 days, or no session notes): detects tech stack, project structure, recent commits, key docs. Each tier triggers automatically based on context — no flags to set.
-
-Starting in v0.4.0, kick-off also runs a **doc inclusion pass** — it scans for docs tagged with `<!-- koji:covers ... -->` headers and loads each one into context if the code it describes hasn't drifted far since the doc was last touched. Stale docs are skipped (the default is fail-safe: a missing doc beats a confidently-wrong one). See **Doc Drift Awareness** above.
 
 ### How hard is it to set up?
 

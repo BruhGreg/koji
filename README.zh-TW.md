@@ -21,7 +21,7 @@ git clone --depth 1 https://github.com/BruhGreg/koji.git ~/.claude/skills/koji
 cd ~/.claude/skills/koji && ./setup
 ```
 
-完成。五個技能現已在 Claude Code 中可用：
+完成。四個技能現已在 Claude Code 中可用：
 
 | 技能 | 功能 |
 |------|------|
@@ -29,7 +29,6 @@ cd ~/.claude/skills/koji && ./setup
 | `/wrap` | 結束工作階段：更新教訓、交接、日誌、歸檔、提議提交、產生下次啟動提示 |
 | `/take-note` | 工作階段中途：儲存進度——或 `/take-note 完成認證，接下來做測試` 附帶說明 |
 | `/koji-init` | 初始化：在任何專案中建立文件骨架和 `.koji.yaml` |
-| `/koji-doc-review` | 檢查以 `<!-- koji:covers ... -->` 標記的文件：列出新鮮度、依需要載入已過期文件、或為新文件加上標記 |
 
 ## 快速開始
 
@@ -102,38 +101,6 @@ todo:
 - **`numbered`** — 歸檔至 `sessions/archive-01.md`、`archive-02.md` 等。簡單、線性。
 - **`dated`** — 歸檔至 `sessions/YYYY-MM/DD-slug.md`，附帶 `INDEX.md` 查詢表。更適合長期執行的專案。
 
-## 文件漂移感知（v0.4.0）
-
-`/kick-off` 會讀取必要檔案（`AI_HANDOFF.md`、`TODO.md`、`lessons.md`、上次工作階段條目）。其他專案文件預設隱形——除非你明確為它們加上標記。被標記的文件會在 `/kick-off` 時自動載入上下文，但**只有當它們相對於所描述的程式碼看起來仍然新鮮時**才載入。
-
-**為文件加標記**：在文件最上方加一行：
-
-```markdown
-<!-- koji:covers backend/auth/ clients/lib/auth/ -->
-```
-
-多個路徑以空格分隔。相對於倉庫根目錄。
-
-**在 `/kick-off` 時**，對每個被標記的文件：
-- 找出最後變更該文件的提交。
-- 計算從那之後所覆蓋路徑中發生的提交數量。
-- 若數量超過門檻（預設 10，可透過 `.koji.yaml` 的 `docs.stale_threshold` 覆寫），跳過該文件並顯示提示：`Skipping docs/X.md — code moved 12 commits since doc last touched.`
-- 否則靜默載入。
-
-**為什麼選擇排除而非驗證**：靜默跳過的文件是可恢復的錯誤；自信地將錯誤文件塞入代理上下文則不是。預設是安全優先。
-
-**用 `/koji-doc-review` 檢視或強制載入**：
-
-```
-/koji-doc-review              # 列出所有被標記的文件及其新鮮度狀態
-/koji-doc-review <path>       # 載入特定文件（即使已過期）
-/koji-doc-review add <path>   # 互動式為文件加上 koji:covers 標頭
-```
-
-沒有全域索引檔案、沒有 YAML 附加檔、沒有 `/wrap` 時的提示。你唯一需要撰寫的是每個想讓 koji 考慮的文件頂端的一行標頭。選用式——沒有標記任何文件的專案，行為完全不變。
-
-**跨平台**：僅使用 `git grep` 和 `git log`。無日期運算、無平台專屬的 grep 旗標。在 Windows、macOS、Linux 上行為一致。
-
 ## 運作方式
 
 ```
@@ -142,7 +109,6 @@ todo:
 ├── wrap/SKILL.md             # /wrap 技能定義
 ├── take-note/SKILL.md        # /take-note 技能定義
 ├── koji-init/SKILL.md        # /koji-init 技能定義
-├── koji-doc-review/SKILL.md  # /koji-doc-review 技能定義（v0.4.0）
 ├── bin/
 │   ├── koji-config           # 設定讀寫工具
 │   ├── koji-detect           # 專案偵測 + 設定層疊
@@ -244,8 +210,6 @@ rm -f .claude/commands/wrap.md
 ### /kick-off 如何收集上下文？
 
 三層式，無需設定。**基礎層**（始終執行）：檢查 git 分支、未提交變更、活動計畫。**參照追蹤**（當工作階段備註提及特定檔案/計畫時）：讀取引用的計畫並搜尋歸檔中的相關主題。**程式碼導覽**（首次工作階段、交接超過 7 天或無工作階段備註時）：偵測技術棧、專案結構、近期提交、關鍵文件。每層根據上下文自動觸發——無需設定旗標。
-
-從 v0.4.0 起，`/kick-off` 還會執行**文件包含掃描**——它會尋找以 `<!-- koji:covers ... -->` 標頭標記的文件，並在其所描述的程式碼自該文件上次修改以來尚未大幅漂移時，將每個文件載入上下文。過期的文件會被跳過（預設是安全優先：缺失的文件勝過自信地錯誤的文件）。詳見上方**文件漂移感知**章節。
 
 ### 設定有多難？
 

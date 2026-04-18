@@ -66,12 +66,11 @@ create_link "wrap" "wrap"
 create_link "take-note" "take-note"
 create_link "kick-off" "kick-off"
 create_link "koji-init" "koji-init"
-create_link "koji-doc-review" "koji-doc-review"
 
 # --- Verify ---
 echo ""
 echo "Installed skills:"
-for skill in wrap take-note kick-off koji-init koji-doc-review; do
+for skill in wrap take-note kick-off koji-init; do
   if [ -f "$SKILLS_DIR/$skill/SKILL.md" ]; then
     echo "  /$skill  OK"
   else
