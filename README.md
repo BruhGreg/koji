@@ -29,7 +29,7 @@ That's it. Five skills are now available in Claude Code:
 | `/wrap` | End session: update lessons, handoff, session log, archive, propose commit, generate starter prompt |
 | `/take-note` | Mid-session: save progress — or `/take-note finished auth, moving to tests` with inline note |
 | `/koji-init` | Bootstrap: create docs scaffolding and `.koji.yaml` in any project |
-| `/inspect-doc-drift` | Scan docs tagged with `<!-- koji:covers -->`, show drift vs their covered code, offer to fix stale ones |
+| `/inspect-doc-drift` | Scan docs tagged with a `covers:` frontmatter list, show drift vs their covered code, offer to fix stale ones |
 
 ## Quick Start
 
@@ -135,6 +135,16 @@ covers:
 
 Top-level `covers` key. Frontmatter aligns with the wider AI-agent-markdown ecosystem (Cursor rules, Continue.dev, Astro, MkDocs, Hugo, Jekyll all parse it). Mix `covers` alongside other frontmatter keys freely.
 
+**Intentionally untagged docs** — onboarding, runbooks, glossaries, narrative design docs with no code to track — can opt out with the `covers: none` sentinel:
+
+```markdown
+---
+covers: none
+---
+```
+
+Such docs still load at kick-off (if listed in `## Load on Kick-Off`) but are dropped from drift dashboards and from `/inspect-doc-drift`'s untagged-scan prompts — the sentinel says "I've looked; it legitimately has no code coverage."
+
 ### Config
 
 ```yaml
@@ -142,7 +152,11 @@ Top-level `covers` key. Frontmatter aligns with the wider AI-agent-markdown ecos
 docs:
   stale_threshold: 10       # commits in covered paths since doc's last edit (default 10)
   stale_action: warn        # "warn" (load + warn) or "skip" (default warn)
+  budget_warn_tokens: 15000 # warn at kick-off if Load on Kick-Off exceeds this (~60k chars)
+  budget_silent: false      # set true to skip the budget-warning menu (size still shown in brief)
 ```
+
+**Budget keys are optional** — kick-off uses the defaults (`15000`, `false`) until you hit the warning menu and pick "Raise" or "Silence". No need to add them upfront.
 
 ### Orphan detection
 

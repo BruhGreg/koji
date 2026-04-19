@@ -207,82 +207,150 @@ Projects can opt specific docs into kick-off context by adding a section to `age
 ```markdown
 ## Load on Kick-Off
 
-- [SPLIT_TUNNEL_ROUTING](docs/SPLIT_TUNNEL_ROUTING.md)
-- [ENDPOINT_RESOLUTION](docs/ENDPOINT_RESOLUTION.md)
-- docs/AUTH_FLOW.md
-- /DESIGN.md
+- [<label>](docs/FOO.md)
+- [<label>](docs/BAR.md)
+- docs/BAZ.md
+- /QUX.md
 ```
 
-The section is optional. If it's absent, skip this entire step silently.
+The section is optional. If it's absent, skip this entire step silently. Bullets accept markdown-link form `[label](path.md)` or plain path form; paths starting with `/` are treated as project-rooted.
 
-**Parse the section:**
-
-1. Read `$DOCS_PATH/agent-session.md` (already in context from step 2)
-2. Locate the heading line matching `^## Load on Kick-Off\s*$` (exact H2, case-sensitive, allows trailing whitespace)
-3. If not found → skip this step silently
-4. Between that heading and the next `^## ` heading (or EOF), collect each bullet line matching `^\s*[-*]\s+(.+)$`
-5. For each bullet:
-   - Extract the `.md` path — accept either:
-     - Markdown link form: `[text](path.md)` — extract the `path.md` portion
-     - Plain path form: just the `.md` path as text
-   - Skip if the "path" is an external URL (`http://`, `https://`, `mailto:`)
-   - Skip if the path doesn't end in `.md`
-   - Resolve relative paths against `$PROJECT_ROOT` (not against `agent-session.md`'s directory — bullets reference project-rooted paths)
-   - Paths starting with `/` are treated as project-rooted too (strip the leading `/`)
-
-**For each valid path:**
-
-1. If the file doesn't exist → log a 1-line warning `warn: Load on Kick-Off references <path> (missing)` and skip
-2. Read the file using the `Read` tool, internalize its content
-3. **Drift check** — parse the doc's YAML frontmatter for a `covers` declaration:
-
-   ```markdown
-   ---
-   covers:
-     - src/auth/
-     - server/routes/auth/
-   ---
-   ```
-
-   If the doc's first non-empty line is `---`, parse YAML up to the next `---`. Look for top-level `covers` as a list of paths.
-
-   If the doc has no frontmatter or no `covers` list, no drift check runs. The doc still loads. `/inspect-doc-drift` will surface it as a candidate for tagging.
-
-4. **If a `covers` list was parsed**:
-   - Read `.koji.yaml` for `docs.stale_threshold` (default `10`)
-   - Read `.koji.yaml` for `docs.stale_action` (default `warn`; options: `warn` = load but warn, `skip` = don't load)
-   - **Orphan check**: for each covered path, verify it exists in the working tree (`[ -e "$PROJECT_ROOT/$path" ]`). If ANY covered path is missing → doc is **orphan**.
-   - **Drift compute**: count commits in covered paths since doc's last-modified commit.
-   - **Decision**:
-     - Orphan → always load + print stronger warning: `⚠ <doc>: covered path '<missing>' no longer exists. Doc may describe removed code.`
-     - Drift > threshold (not orphan) → behave per `docs.stale_action` (`warn` loads with `⚠ <doc>: <N> commits behind`; `skip` drops the load with `skipped: <doc> (<N> behind)`)
-     - Drift ≤ threshold → load silently
-
-5. Track per-doc outcome (loaded / loaded-warn / skipped / orphan / missing) for the brief summary.
-
-**Config extraction from `.koji.yaml`** (reuse the existing lightweight parse pattern):
+**Query per-bullet status via the shared helper** (`koji-doc-status`, also used by `/inspect-doc-drift`):
 
 ```bash
-STALE_THRESHOLD=$(grep -E '^\s*stale_threshold\s*:' "$PROJECT_ROOT/.koji.yaml" 2>/dev/null | head -1 | sed -E 's/.*:\s*([0-9]+).*/\1/' | grep -E '^[0-9]+$' || echo 10)
-STALE_ACTION=$(grep -E '^\s*stale_action\s*:' "$PROJECT_ROOT/.koji.yaml" 2>/dev/null | head -1 | sed -E 's/.*:\s*([a-z_]+).*/\1/' || echo warn)
+LOKO_REPORT=$(~/.claude/skills/koji/bin/koji-doc-status --load-on-kickoff 2>/dev/null || true)
+STALE_ACTION=$(grep -E '^[[:space:]]*stale_action[[:space:]]*:' "$PROJECT_ROOT/.koji.yaml" 2>/dev/null | head -1 | sed -E 's/.*:[[:space:]]*([a-z_]+).*/\1/' || true)
+[ -n "${STALE_ACTION:-}" ] || STALE_ACTION=warn
 ```
 
-**In the brief** (step 3 below), append one line summarizing the doc-load pass:
+Each record in `$LOKO_REPORT` is tab-separated:
 
-> Docs: <loaded> loaded, <stale> stale, <orphan> orphan, <untagged> untagged, <missing> missing
+```
+<path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>
+```
+
+with `status ∈ {fresh, stale, orphan, exempt, untagged, missing, malformed}`. The helper already honors `docs.stale_threshold` from `.koji.yaml` (default `10`) when deciding `fresh` vs `stale`. If `$LOKO_REPORT` is empty, the section is absent or has no valid bullets — skip the rest of this step silently.
+
+**For each record — decide load + warning based on `status` and `$STALE_ACTION`:**
+
+- `missing` → emit `warn: Load on Kick-Off references <path> (missing)`; do not load.
+- `malformed` → emit `warn: malformed frontmatter in <path>`; Read the file anyway (count as `untagged`).
+- `orphan` → Read the file; emit `⚠ <path>: covered path '<missing>' no longer exists. Doc may describe removed code.`; count as `orphan`.
+- `stale` → apply `$STALE_ACTION`:
+  - `warn` (default): Read the file; emit `⚠ <path>: <drift> commits behind`; count as `stale`.
+  - `skip`: do not load; emit `skipped: <path> (<drift> behind)`; count as `stale-skipped`.
+- `fresh` → Read the file silently; count as `loaded`.
+- `exempt` → Read the file silently; count as `loaded` (doc declared `covers: none` — intentionally untagged, no drift tracking expected).
+- `untagged` → Read the file silently; count as `untagged` (loaded but no drift signal).
+
+Use the `Read` tool for each file that should load — internalize content, do NOT dump it back to the user.
+
+**Compute the load size** after reading:
+
+```bash
+# Total chars across every successfully-read doc. Iterate each loaded path:
+TOTAL_CHARS=$(cat <loaded_paths> | wc -c | tr -d ' ')
+TOTAL_TOKENS=$((TOTAL_CHARS / 4))   # standard ~4 chars/token approximation
+```
+
+Also build a per-doc size list (path → chars) — keep it sorted by size descending, used if the budget warning fires.
+
+**Read budget config from `.koji.yaml`** (both keys optional, defaults apply if absent). Keys MUST be inside a top-level `docs:` block to be honored — a stray `budget_warn_tokens:` under another block is ignored. Truthy values for `budget_silent` accept the full YAML-conventional set (`true`/`yes`/`on`/`1`, case-insensitive); anything else is treated as false:
+
+```bash
+# Scoped-to-docs: reader — emits the value of a key only if it lives inside `docs:`.
+_koji_read_docs_key() {
+  awk -v key="$1" '
+    /^docs:/ { in_docs=1; next }
+    /^[^[:space:]]/ && !/^docs:/ { in_docs=0 }
+    in_docs && $0 ~ "^[[:space:]]+"key"[[:space:]]*:" {
+      sub(/^[^:]*:[[:space:]]*/, "")
+      sub(/[[:space:]]+#.*$/, "")   # strip trailing comment
+      sub(/[[:space:]]*$/, "")
+      # Strip surrounding quotes
+      if (substr($0,1,1) == "\"" && substr($0,length($0),1) == "\"") $0 = substr($0,2,length($0)-2)
+      if (substr($0,1,1) == "\047" && substr($0,length($0),1) == "\047") $0 = substr($0,2,length($0)-2)
+      print; exit
+    }
+  ' "$PROJECT_ROOT/.koji.yaml" 2>/dev/null
+}
+
+BUDGET_WARN=$(_koji_read_docs_key budget_warn_tokens | grep -E '^[0-9]+$' || true)
+[ -n "${BUDGET_WARN:-}" ] || BUDGET_WARN=15000
+
+_budget_silent_raw=$(_koji_read_docs_key budget_silent || true)
+case "$_budget_silent_raw" in
+  true|TRUE|True|yes|YES|Yes|on|ON|On|1) BUDGET_SILENT=true ;;
+  *) BUDGET_SILENT=false ;;
+esac
+```
+
+**In the brief** (step 3 below), append one line summarizing the doc-load pass — always show size:
+
+> Docs: <loaded> loaded (~<kchars>k chars / ~<ktokens>k tokens), <stale> stale, <orphan> orphan, <untagged> untagged, <missing> missing
 
 Counts:
-- `loaded` = docs that made it into context (including tagged-fresh + untagged — untagged docs still load)
-- `stale` = tagged docs with drift > threshold
+- `loaded` = total successfully-read files (fresh + exempt + untagged + stale-warned + orphan + malformed)
+- `stale` = tagged docs with drift > threshold (loaded unless `stale_action=skip`)
 - `orphan` = tagged docs whose covered paths no longer exist
-- `untagged` = loaded docs with no `covers` frontmatter (no drift signal)
+- `untagged` = loaded docs with no `covers` frontmatter (no drift signal). Docs declaring `covers: none` are NOT counted here — that sentinel means "intentionally untagged".
 - `missing` = bullet paths that didn't resolve to a file
 
 If `stale > 0`, `orphan > 0`, or `untagged > 0`, also list specifics on the next line:
 
-> Attention: orphan docs/A.md, stale docs/B.md (12), untagged docs/C.md docs/D.md. Run `/inspect-doc-drift` to fix.
+> Attention: orphan <path>, stale <path> (<drift>), untagged <path>. Run `/inspect-doc-drift` to fix.
 
-**Fail-safe**: if any part of this step errors (config parse fails, regex glitch, unreadable `.koji.yaml`), degrade silently to "no Load on Kick-Off section processed" — never block kick-off on doc-loading issues.
+### 2c'. Budget warning (only if over threshold)
+
+If `$TOTAL_TOKENS > $BUDGET_WARN` **and** `$BUDGET_SILENT` is `false`, fire a warning with an action menu. Otherwise skip this sub-step silently.
+
+Compute the suggested raise-to value:
+```bash
+RAISE_TO=$(( ((TOTAL_TOKENS * 12 / 10) / 1000 + 1) * 1000 ))   # current × 1.2, rounded up to next 1k
+```
+
+Pick the top 3 heaviest docs from the per-doc size list. Then `AskUserQuestion`:
+
+> ⚠ Load on Kick-Off is consuming ~<ktokens>k tokens (threshold: <BUDGET_WARN/1000>k).
+>
+> Heaviest docs:
+>   - <path> (~<N>k chars)
+>   - <path> (~<N>k chars)
+>   - <path> (~<N>k chars)
+>
+> **What would you like to do?**
+
+Options:
+- **A) Continue** — proceed with kick-off (default). No write. Warning will fire again next kick-off if still over.
+- **B) Trim** — show the full per-doc size list, prompt the user for which bullets to remove from `## Load on Kick-Off` in `agent-session.md`. Edit the file to drop the chosen bullets. Does NOT touch the docs themselves.
+- **C) Raise threshold** — bump `budget_warn_tokens` in `.koji.yaml` to `$RAISE_TO`. Show the user the exact diff first, then apply on confirm.
+- **D) Silence** — set `budget_silent: true` in `.koji.yaml`. Future kick-offs still show size but no menu. Show diff, confirm, apply.
+
+**`.koji.yaml` edit mechanics** (for C and D — done via the `Edit` tool, not sed):
+
+1. Read `.koji.yaml`. Identify whether a top-level `docs:` block exists.
+2. **If a `docs:` block exists**: insert or update the target key (`budget_warn_tokens` or `budget_silent`) as a sibling of existing keys like `stale_threshold` / `stale_action`. Preserve all other keys, comments, and ordering.
+3. **If no `docs:` block exists**: append a new `docs:` block at the end of the file.
+4. **Before writing**, show the user a minimal diff:
+
+   > I'll update `.koji.yaml`:
+   >
+   > ```diff
+   >  docs:
+   >    stale_threshold: 10
+   > +  budget_warn_tokens: 26000
+   > ```
+   >
+   > Proceed? (y/n)
+
+5. On `y`: apply via `Edit`. Confirm: `Raised budget_warn_tokens to 26k.` / `Silenced budget warnings.`
+6. On `n`: no write, warning stays for this session.
+
+**Edge case — no `.koji.yaml` exists at all** (rare; file is normally created by `/koji-init`): omit options C and D from the menu. Show A and B only, plus the hint `Run /koji-init to persist koji config.`
+
+**Fail-safe**: if size computation or yaml parsing errors, skip the warning menu silently and continue. Budget awareness is a nice-to-have, not a blocker.
+
+**Fail-safe**: if the helper errors or returns unparseable output, degrade silently — never block kick-off on doc-loading issues.
 
 ---
 

@@ -113,56 +113,107 @@ Review the session for task-related changes: completed work, new tasks discovere
 
 ## Step 2c — Suggest Load on Kick-Off additions (tag-driven, optional)
 
-This step runs ONLY if both conditions hold:
+The goal: for each tagged doc not yet in `## Load on Kick-Off`, decide whether it's likely useful for the *next* session's context. Combines a deterministic floor (touched paths × `covers:`) with a Claude-judgment pass that uses everything wrap already knows about this session and the next.
 
-1. The repo has at least one doc with a `<!-- koji:covers <paths> -->` header (check via `git grep -l '<!-- koji:covers' -- '*.md'` — if empty, skip this step silently)
-2. The session's git diff overlaps with any tagged doc's covered paths
+**Gate — skip the entire step if no tagged docs exist in the repo:**
 
-**Compute the session's touched paths:**
+```bash
+TAGGED_EXISTS=$(git grep -l -E '^[[:space:]]*covers[[:space:]]*:' -- '*.md' 2>/dev/null | head -1)
+```
+
+If empty AND the repo has any tracked `.md` files, print a one-line nudge (not a prompt):
+
+> Note: no docs are tagged with `covers:` yet. Run `/inspect-doc-drift` to tag docs so `/wrap` can auto-suggest context for future sessions.
+
+Then exit this step. If no `.md` files at all, skip silently.
+
+**Load the doc-status report:**
+
+```bash
+TAGGED_REPORT=$(~/.claude/skills/koji/bin/koji-doc-status --scan-tagged 2>/dev/null || true)
+```
+
+Each record is tab-separated: `<path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>`. **Skip rows with `status ∈ {malformed, exempt}`** — malformed has no usable covers; exempt declared `covers: none` (the user opted out, so re-suggesting would contradict intent).
+
+**Compute session context:**
 
 ```bash
 TOUCHED=$(git diff --name-only HEAD 2>/dev/null; git log --name-only --format= HEAD@{1}..HEAD 2>/dev/null | sort -u)
 ```
 
-Fallback to `git diff --name-only` against any available base if `HEAD@{1}` isn't usable (e.g., fresh repo, detached HEAD). If nothing touched, skip.
+Fall back to `git diff --name-only` against an available base if `HEAD@{1}` isn't usable.
 
-**For each tagged doc:**
+---
 
-1. Parse its first `<!-- koji:covers <space-separated-paths> -->` header
-2. Check if any touched path matches any covered path prefix
-3. If yes, check whether the doc is ALREADY in the `## Load on Kick-Off` section of `agent-session.md` (by path match). If already listed, skip. If not listed, the doc is a suggestion candidate.
+### Pass A — reactive (deterministic floor)
 
-**If there are suggestion candidates, ask once** (not per-doc):
+For each tagged doc:
 
-Use `AskUserQuestion`:
+1. Take its `covers` paths (column 5 of `TAGGED_REPORT`).
+2. Check if any touched file matches any covered path prefix.
+3. If yes AND the doc is NOT already listed in `## Load on Kick-Off`, mark it a **Pass A candidate**.
 
-> Tagged docs covering touched paths in this session aren't in Load on Kick-Off:
->   - docs/AUTH_FLOW.md (covers backend/auth/ — 3 files changed)
->   - docs/AD_MONETIZATION.md (covers clients/lib/ads/ — 1 file changed)
+Label each candidate with the reason: `covers <path> — <N> files changed`.
+
+### Pass B — Claude-judgment (session + next-session themes)
+
+Pass B runs **unless** the session is genuinely empty (no commits this session, no lessons added, no next-session signals, generated starter prompt is placeholder-only). In practice Pass B fires on almost every real `/wrap` invocation — wrap already has session context in Claude's memory by the time this step runs.
+
+**Signals available to Claude for Pass B:**
+
+- **This session's work**: commits made during this session (`git log HEAD@{1}..HEAD` subjects), lessons appended to `lessons.md` this wrap, and Claude's context of what was discussed / attempted / changed (already in Claude's working memory — no re-read needed).
+- **Next-session mission**: the "Notes for Next Session" field wrap is writing (wrap has it in hand), `TODO.md` open items (if the file exists), and the starter prompt wrap is generating (same — in hand).
+
+**Candidate pool for Pass B**: every tagged doc *not* already in `## Load on Kick-Off` and *not* already a Pass A candidate. (No double-suggesting.) For each candidate, gather: path, `covers:` paths, and the first 3 non-empty body lines (to signal the doc's purpose).
+
+**Ask Claude (single batch reasoning pass)**: which of these docs are likely relevant to either (a) the themes of this session's work, or (b) the stated next-session mission? Return the subset as Pass B candidates. Each picked doc should carry a brief "why" tag — e.g., `session theme: invoice logic`, or `next-session TODO: schema migration`.
+
+Err toward *skipping* — suggest only docs with a clear signal, not speculative matches. The user can always add more manually.
+
+**Gate for Pass B to actually run**: check for at least one meaningful signal before invoking the judgment:
+- Current session: at least one commit with a non-trivial subject this session, OR at least one lesson appended this wrap, OR Claude's context has substantive session content.
+- Next session: "Notes for Next Session" is ≥ 20 chars and not a template placeholder, OR `TODO.md` has ≥ 1 incomplete item, OR the starter prompt contains a specific next-step clause.
+
+If *none* of these hold, skip Pass B (cold-start case — usually first `/wrap` on a brand-new koji setup).
+
+---
+
+### Consolidated prompt
+
+Merge Pass A and Pass B candidates. If the combined list is empty, skip silently — no prompt, no output.
+
+Otherwise, one `AskUserQuestion`:
+
+> Docs that look relevant for next session aren't yet in `## Load on Kick-Off`:
 >
-> Add them to the Load on Kick-Off section in agent-session.md?
+>   - docs/<A>.md (touched 3 files in backend/<module>/)
+>   - docs/<B>.md * (session theme: invoice rewrite)
+>   - docs/<C>.md * (next-session TODO: "migrate schema")
+>
+> `*` = suggested by session/next-session theme (not just diff match).
+>
+> Add to `## Load on Kick-Off`?
 
 Options:
-- **A) Add all** — append each candidate as a bullet under `## Load on Kick-Off`
-- **B) Select some** — pick which to add
-- **C) Skip** — don't add any
+- **A) Add all**
+- **B) Select some** — show a numbered list, user picks indices
+- **C) Skip**
 
 **If A or B, update `agent-session.md`:**
 
-1. Check if a `## Load on Kick-Off` H2 section exists (should be above the first `## Session:` entry)
-2. If not, create it immediately above the first `## Session:` heading (or at the bottom of the file if no session entries exist):
+1. Check if a `## Load on Kick-Off` H2 section exists above the first `## Session:` entry.
+2. If not, create it immediately above the first `## Session:` heading (or at EOF if no session entries).
+3. Append chosen docs as bullets in path-form:
    ```markdown
-
-   ## Load on Kick-Off
-
+   - docs/<A>.md
    ```
-3. Append the chosen docs as bullets in path-form:
-   ```markdown
-   - docs/AUTH_FLOW.md
-   ```
-4. Report the change: `Added <N> doc(s) to Load on Kick-Off.`
+4. Report: `Added <N> doc(s) to Load on Kick-Off (<X> reactive, <Y> theme-based).`
 
-If there are no candidates (no overlaps, or all overlapping docs already listed), skip this step silently — no prompt, no output.
+### Cold-start behavior (explicit)
+
+- **Zero tagged docs, zero `.md`**: step skipped silently.
+- **Zero tagged docs, some `.md` exist**: one-line nudge to run `/inspect-doc-drift`. No further action.
+- **Tagged docs but empty session** (first ever wrap, no commits, no lessons, no notes yet): Pass A empty + Pass B gated off → nothing suggested. The step effectively no-ops until there's enough signal to act on. This is intentional — don't pester users with bad suggestions from a blank slate.
 
 ---
 

@@ -18,10 +18,20 @@ Find docs that have drifted out of sync with the code they describe, and help fi
 ```markdown
 ---
 covers:
-  - src/auth/
-  - server/routes/auth/
+  - src/<module-a>/
+  - src/<module-b>/
 ---
 ```
+
+Docs whose content isn't tied to specific code — onboarding guides, runbooks, glossaries, narrative design docs — can opt out of drift tracking with the **`covers: none`** sentinel:
+
+```markdown
+---
+covers: none
+---
+```
+
+These docs still commit normally and still load at kick-off (if listed in `## Load on Kick-Off`); they just drop out of drift reports and untagged-scan prompts.
 
 The skill also surfaces **untagged docs listed in `## Load on Kick-Off`** and offers to tag them — because loaded-without-coverage means loaded-without-drift-signal.
 
@@ -44,30 +54,37 @@ Parse the argument:
 
 ## Dashboard + fix-prompt mode (no args)
 
-### 1. Discover tagged docs AND untagged candidates across the whole repo
+### 1. Discover docs + compute drift
 
-**Part A — tagged docs**. Use `git grep` for cross-platform consistency:
+Three lists drive the dashboard. The shared helper `koji-doc-status` emits tab-separated records: `<path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>` with `status ∈ {fresh, stale, orphan, exempt, untagged, missing, malformed}`.
+
+**A. Tagged docs — per-doc drift status:**
 
 ```bash
 cd "$PROJECT_ROOT"
-git grep -l -E '^\s*covers\s*:' -- '*.md' 2>/dev/null | sort -u
+TAGGED_REPORT=$(~/.claude/skills/koji/bin/koji-doc-status --scan-tagged 2>/dev/null || true)
 ```
 
-For each match, read the first ~50 lines to verify a valid frontmatter `covers` list actually exists (see parsing below). Files matching `covers:` but lacking a proper list are ignored.
+In `--scan-tagged` mode, `status` is `fresh`, `stale`, `orphan`, `exempt`, or `malformed`. The helper honors `docs.stale_threshold` from `.koji.yaml` (default `10`). `exempt` = doc declared `covers: none` (intentionally untagged — narrative/ops/process content with no code to track).
 
-**Part B — all tracked `.md` files** (for the untagged scan). Use `git ls-files` (respects `.gitignore`, so vendored trees like `node_modules/`, `Pods/`, `vendor/` are excluded if gitignored):
+**B. All tracked `.md` files** (for the untagged scan — `git ls-files` respects `.gitignore`, so vendored trees like `node_modules/`, `Pods/`, `vendor/` are excluded):
 
 ```bash
-git ls-files '*.md' | sort -u
+ALL_MD=$(git ls-files '*.md' | sort -u)
 ```
 
-**Part C — Load on Kick-Off entries**. Read `$DOCS_PATH/agent-session.md`, locate the `## Load on Kick-Off` H2 section (lives above the first `## Session:` entry), extract each bullet's `.md` path.
+**C. Load on Kick-Off entries** (for the high-priority untagged bucket):
+
+```bash
+LOKO_REPORT=$(~/.claude/skills/koji/bin/koji-doc-status --load-on-kickoff 2>/dev/null || true)
+```
+
+Column 1 of each record is the bullet's resolved `.md` path.
 
 **Compute the sets:**
 
-- `TAGGED` = docs with a valid `covers` declaration (Part A)
-- `ALL_MD` = all tracked `.md` files (Part B)
-- `LOADED` = docs in `## Load on Kick-Off` (Part C)
+- `TAGGED` = column 1 of `TAGGED_REPORT` rows whose `status` is `fresh|stale|orphan|exempt` (drop `malformed` — surface separately as a warning below). `exempt` docs belong in TAGGED so they're excluded from the untagged scan — their `covers: none` frontmatter is the user's explicit "no coverage" declaration.
+- `LOADED` = column 1 of `LOKO_REPORT`
 - `META` = meta-files that should never be considered for code-coverage tagging. Exclude by basename:
   `README.md`, `LICENSE*.md`, `CHANGELOG*.md`, `CODE_OF_CONDUCT*.md`, `SECURITY.md`, `CONTRIBUTING.md`,
   `CLAUDE.md`, `AGENTS.md`, `AI_HANDOFF.md`, `agent-session.md`, `lessons.md`, `TODO.md`,
@@ -84,7 +101,13 @@ git ls-files '*.md' | sort -u
 - **Root-level docs** (`ARCHITECTURE.md`, `SPEC.md`, etc. — any `.md` at repo root not in META)
 - **Other** — everything else (rare; e.g., inline `NOTES.md` in subdirs)
 
-If `TAGGED` is empty AND `UNTAGGED_ALL` is empty, tell the user:
+**Surface malformed rows** ahead of the dashboard, one line each:
+
+> ⚠ <path>: malformed `covers:` (not a YAML list). Fix the frontmatter to enable drift tracking.
+
+These docs are NOT counted in the dashboard totals and are NOT surfaced as untagged candidates (their problem is frontmatter syntax, not missing tags).
+
+If `TAGGED_REPORT` is empty AND `UNTAGGED_ALL` is empty, tell the user:
 
 > No tracked `.md` files found (excluding meta-files like README, LICENSE, handoff).
 > Tagging is optional — add frontmatter to a doc you want drift-tracked:
@@ -92,70 +115,70 @@ If `TAGGED` is empty AND `UNTAGGED_ALL` is empty, tell the user:
 >   ```
 >   ---
 >   covers:
->     - src/auth/
+>     - src/<module>/
 >   ---
 >   ```
 
 Stop.
 
-If `TAGGED` is non-empty, continue to step 2 for the drift compute on tagged docs.
-Step 3a will surface `UNTAGGED_ALL` bucketed by priority at the end.
+If `TAGGED_REPORT` has any `fresh|stale|orphan` rows, continue to step 2 for the dashboard.
+Step 2a will surface `UNTAGGED_ALL` bucketed by priority at the end.
 
-### 2. Parse coverage declaration + compute status
+### 2. Print the dashboard
 
-Read `.koji.yaml` for `docs.stale_threshold` (default `10` if absent or non-numeric).
-
-For each tagged doc:
-
-1. **Parse the `covers` list.** Read the first 50 lines. If the first non-empty line is `---`, find the closing `---`, parse YAML between. Look for top-level `covers` as a YAML list of strings. Example:
-   ```yaml
-   covers:
-     - src/auth/
-     - server/routes/auth/
-   ```
-
-   If no frontmatter or no `covers` list, skip the doc (treat as untagged — shouldn't happen since discovery matched on the key, but guard anyway).
-
-2. **Orphan check.** For each covered path, check existence with `[ -e "$PROJECT_ROOT/$path" ]`. If ANY path does not exist → doc is **orphan**. (Orphan takes precedence over fresh/stale.)
-
-3. **Determine doc's last-modified commit**:
-   ```bash
-   DOC_LAST_COMMIT=$(git log -1 --format=%H -- "<doc_path>" 2>/dev/null)
-   ```
-
-4. **Count commits in covered paths since that commit**:
-   ```bash
-   if [ -n "$DOC_LAST_COMMIT" ]; then
-     DRIFT=$(git log --oneline "$DOC_LAST_COMMIT..HEAD" -- <covered_paths> 2>/dev/null | wc -l | tr -d ' ')
-   else
-     DRIFT=0  # new/untracked doc — treat as fresh
-   fi
-   ```
-
-5. **Status**:
-   - Any covered path missing → **orphan**
-   - Else `DRIFT > stale_threshold` → **stale**
-   - Else → **fresh**
-
-### 3. Print the dashboard
-
-Compact table. Sort orphan rows first, then stale, then fresh. Keep columns aligned:
+Using the `TAGGED_REPORT` rows (status ∈ {fresh, stale, orphan}), build a compact table. Sort orphan rows first, then stale, then fresh. Keep columns aligned. Threshold comes from `.koji.yaml`'s `docs.stale_threshold` (default `10`):
 
 ```
 Tagged docs — drift report (threshold: <N> commits)
 
 Doc                                     Covers                            Drift   Status
 ---                                     ---                               ---     ---
-docs/LEGACY_API.md                      src/legacy/                        —      orphan (covered path gone)
-docs/ARCHITECTURE.md                    src/core/                         15      stale
-docs/API.md                             src/api/                           3      fresh
+<path>                                  <covers>                           —      orphan (covered path gone)
+<path>                                  <covers>                          15      stale
+<path>                                  <covers>                           3      fresh
 ```
 
-Summary line below:
+**For each stale or orphan row**, append the top 3 commit subjects from covered paths (helps the user triage whether the drift is meaningful or mostly noise). Call the helper:
+
+```bash
+~/.claude/skills/koji/bin/koji-doc-status --commits <path> --limit 3
+```
+
+Indent the commit lines under their row. Example with commits:
+
+```
+docs/ARCHITECTURE.md                    src/core/                         15      stale
+  4cfdbfd feat(api): scaffold v2 endpoints (2d ago)
+  94e3ba7 refactor: split core into submodules (5d ago)
+  8b4c57f fix: init race condition (1w ago)
+
+docs/API.md                             src/api/                          12      stale
+  k1l2m3n feat: add /v2 endpoints (3d ago)
+  n4o5p6q fix: error response handling (5d ago)
+  q7r8s9t refactor: normalize request logging (1w ago)
+```
+
+Default mode is **recent with noise filter** — skips low-signal commits (typo/chore/deps/lint/fmt/bump/style/ci/build/docs/version). If every commit in the drift window is noise, the filter falls back to unfiltered so the row always shows something.
+
+Fresh, exempt, and malformed rows do NOT get commit lines.
+
+**Optional modes** (hint to the user after the dashboard if they want different ranking — don't run by default, just mention):
+
+> Need richer triage? Re-run with:
+>   `/inspect-doc-drift <path>` — full drill-in (10 commits, unfiltered)
+>   or call the helper directly: `koji-doc-status --commits <path> --by-size` (ranks by change size) / `--per-path` (round-robin across covered paths, useful for docs that span multiple modules).
+
+Summary line below the table:
 
 > <fresh_count> fresh, <stale_count> stale, <orphan_count> orphan.
 
-### 3a. Surface untagged candidates across the repo
+If `exempt` rows exist in `TAGGED_REPORT`, add a one-line footnote (do NOT put them in the main table — the dashboard is about drift, and exempt docs have no drift to measure):
+
+> <exempt_count> doc(s) marked `covers: none` (intentionally untagged — not tracked for drift).
+
+**Edge case — no fresh/stale/orphan rows** (e.g., every tagged doc is `exempt`, or the repo has only exempt docs): skip the drift table entirely but still print the exempt footnote AND the untagged-candidates report (step 2a). If BOTH the table and the untagged buckets are empty but exempt rows exist, print the footnote alone with no "All tagged docs are fresh" message (that would be misleading — they're exempt, not fresh).
+
+### 2a. Surface untagged candidates across the repo
 
 If `UNTAGGED_ALL` from step 1 is empty, skip this step silently (no unindexed docs to tag).
 
@@ -164,25 +187,23 @@ Otherwise, print a bucketed report. The two interesting priorities:
 > **Untagged docs — consider tagging so drift can be detected:**
 >
 > **Loaded at kick-off (HIGH — loaded without drift signal):**
->   - docs/PEER_MANAGEMENT.md
->   - docs/OPERATION_QUEUE.md
->   - docs/SPLIT_TUNNEL_ROUTING.md
->   - .koji/E2E_REVIEW.md
+>   - docs/FOO.md
+>   - docs/BAR.md
+>   - .koji/BAZ.md
 >
 > **Under `docs/` (MEDIUM):**
->   - docs/ENDPOINT_RESOLUTION.md
->   - docs/AD_MONETIZATION.md
+>   - docs/QUUX.md
+>   - docs/QUX.md
 >   - ... (N more)
 >
 > **Nested `DESIGN.md` files (MEDIUM):**
->   - clients/DESIGN.md
->   - tools/DESIGN.md
->   - website/DESIGN.md
+>   - <subdir-a>/DESIGN.md
+>   - <subdir-b>/DESIGN.md
 >
 > **Other (LOW):**
 >   - ... (N more)
 
-Use `AskUserQuestion`:
+Use `AskUserQuestion` — **which bucket(s) to process?**
 
 > What would you like to tag?
 
@@ -195,14 +216,104 @@ Options (dynamic based on non-empty buckets):
 
 If only HIGH bucket is non-empty, collapse options A-C into just "Tag these".
 
-**For each chosen doc, infer path suggestions (heuristic, intentionally cheap):**
+Call the resulting list of docs to process `CHOSEN`. If `CHOSEN` is empty, exit.
 
-1. **Extract the doc's slug**: lowercase the filename without extension (`AUTH_FLOW.md` → `auth_flow`). Drop any `_flow`, `_guide`, `_setup`, `_routing`, etc. noise suffix, split by `_` and `-`. Call the resulting tokens the **keyword set** (e.g., `{auth}` or `{split, tunnel, routing}`).
+---
+
+**Then ask how to handle them.** `AskUserQuestion`:
+
+> **<N> untagged docs selected. How would you like to handle them?**
+
+Options:
+- **A) Auto-tag** — analyze each doc, propose a tag per doc (covers list, `covers: none`, or defer), show one review summary, let user approve / edit before writing. Deferred docs fall through to the per-doc walk.
+- **B) Mark all as `covers: none`** — treat the whole set as narrative/ops/process docs with no code to track. One confirm, done.
+- **C) Walk one-by-one** — per-doc prompts (same six-option menu as single-doc mode).
+- **D) Cancel** — write nothing, exit.
+
+### Option A — Auto-tag (bulk classify + review)
+
+This is the default path for most projects. The skill does the classification work so the user only makes one approve/edit decision across all docs.
+
+**For each doc in `CHOSEN`:**
+
+1. **Run the cheap heuristic** (see below) to produce candidate paths.
+2. **Read the doc's first ~80 lines** for context.
+3. **Classify the doc** — decide which action fits best:
+   - `tag` — doc clearly describes specific code. Pick a trusted subset of candidate paths (may prune false positives from the heuristic); can be empty-but-list-shaped if nothing in candidates looks right but some code mapping exists.
+   - `narrative` — doc is ops/onboarding/glossary/FAQ/policy/process with no code mapping. Will write `covers: none`.
+   - `defer` — not confident enough to decide. Will fall through to per-doc walk.
+
+   Use doc title, body content, and candidate paths together. When in doubt, defer — it's cheaper than tagging wrong.
+
+4. Collect the per-doc decisions into a **proposal**.
+
+**Show the proposal** (one `AskUserQuestion` for the whole batch):
+
+> **Proposal for <N> docs:**
+>
+> **<X> will be tagged (code-mapping found):**
+>   - docs/<A>.md → backend/<module>/, server/routes/<module>/
+>   - docs/<B>.md → clients/lib/<module>/
+>   - ...
+>
+> **<Y> will be marked `covers: none` (narrative):**
+>   - docs/<C>.md
+>   - docs/<D>.md
+>   - ...
+>
+> **<Z> deferred — needs your input:**
+>   - docs/<E>.md
+>   - ...
+>
+> Proceed?
+
+Options:
+- **A) Proceed** — write all decided frontmatter, then fall through to the per-doc walk for deferred docs
+- **B) Edit** — show the full proposal as a numbered list; user can flip any decision (tag↔narrative↔defer) or adjust paths before committing
+- **C) Cancel** — write nothing, exit
+
+**On Proceed:**
+- Write frontmatter for every tagged doc (`covers: [...]`) and every narrative doc (`covers: none`). Report `Wrote covers for <X> doc(s); marked <Y> as covers: none.`
+- If any deferred docs remain, drop into the per-doc walk for those only. For each deferred doc, show the standard six-option menu (A-F below). The heuristic's candidate paths still pre-fill the "Accept these paths" suggestion.
+
+**On Edit:**
+- Show a numbered list:
+  > 1. docs/<A>.md — tag → backend/<module>/, server/routes/<module>/
+  > 2. docs/<B>.md — tag → clients/lib/<module>/
+  > 3. docs/<C>.md — narrative (covers: none)
+  > 4. docs/<D>.md — narrative (covers: none)
+  > 5. docs/<E>.md — defer
+- Prompt: "Which items to change? (e.g., '3 tag', '5 narrative', '1 paths=foo/ bar/', or 'none' to proceed as-is)"
+- Parse user input, update the proposal, re-show, loop until user types `none`/`proceed`.
+- Then proceed as above.
+
+### Option B — Mark all as `covers: none`
+
+One confirm prompt showing the list of docs, then write `covers: none` frontmatter to each. No heuristic, no classification.
+
+> **Mark all <N> docs as `covers: none`?**
+>   - docs/<A>.md
+>   - docs/<B>.md
+>   - ...
+
+Options:
+- **A) Yes** — write `covers: none` to all. Report `Marked <N> docs as covers: none.`
+- **B) Cancel** — exit
+
+### Option C — Walk one-by-one
+
+Current per-doc behavior. For each doc in `CHOSEN`, run the heuristic and show the six-option menu below.
+
+---
+
+**For each chosen doc walked one-by-one, infer path suggestions (heuristic, intentionally cheap):**
+
+1. **Extract the doc's slug**: lowercase the filename without extension (`FOO_GUIDE.md` → `foo_guide`). Drop any `_flow`, `_guide`, `_setup`, `_routing`, etc. noise suffix, split by `_` and `-`. Call the resulting tokens the **keyword set** (e.g., `{foo}` or `{foo, bar, baz}`).
 
 2. **Scan candidate dirs** for path matches. Candidate dirs are the project's top-level source locations — detect them by checking which of these exist: `src/`, `backend/`, `server/`, `app/`, `lib/`, `pkg/`, `cmd/`, `internal/`, `api/`, `client/`, `clients/`, `frontend/`, `web/`, `website/`, `ui/`, `core/`, `shared/`. For each candidate dir, look for subdirectories whose names overlap with the keyword set:
    ```bash
-   # Example: find dirs under src/ containing "auth"
-   find "$PROJECT_ROOT/src" -maxdepth 3 -type d -iname "*auth*" 2>/dev/null | head -5
+   # Example: find dirs under src/ containing a keyword
+   find "$PROJECT_ROOT/src" -maxdepth 3 -type d -iname "*<keyword>*" 2>/dev/null | head -5
    ```
 
 3. **Scan the doc body** for code-path-like strings. Grep for patterns that look like paths: matches to `[a-zA-Z_][a-zA-Z0-9_/-]*\.(go|py|ts|tsx|js|jsx|dart|rs|java|rb|md)` or `[a-zA-Z_][a-zA-Z0-9_-]*/` occurring in backticks or markdown links. Take the directory part of each match. Deduplicate. Exclude paths that clearly aren't code (`docs/`, `README`, `LICENSE`, URLs).
@@ -211,12 +322,12 @@ If only HIGH bucket is non-empty, collapse options A-C into just "Tag these".
 
 5. **Present via `AskUserQuestion`**:
 
-   > **docs/AUTH_FLOW.md** (1 of N untagged)
+   > **docs/FOO.md** (1 of N untagged)
    >
    > Suggested `covers` paths based on the doc's name and content:
-   >   - backend/auth/
-   >   - clients/lib/providers/auth_provider.dart
-   >   - server/routes/auth/
+   >   - backend/<module>/
+   >   - clients/lib/providers/<file>.<ext>
+   >   - server/routes/<module>/
    >
    > What would you like to do?
 
@@ -226,6 +337,7 @@ If only HIGH bucket is non-empty, collapse options A-C into just "Tag these".
    - **C) Empty** — write an empty `covers: []` list for now (you can fill it later; kick-off will still load the doc)
    - **D) Skip** — leave this doc untagged for now
    - **E) Quit** — stop the walkthrough; keep tags from docs you've already processed
+   - **F) Mark intentionally untagged** — write `covers: none` (use for narrative/ops/process docs that don't map to code; suppresses this doc from future untagged scans)
 
 6. **If the user chose A**: build the frontmatter block with top-level `covers` and the suggested paths; inject or prepend as before; report `Tagged <doc> with N covers path(s) (auto-suggested).`
 
@@ -233,12 +345,14 @@ If only HIGH bucket is non-empty, collapse options A-C into just "Tag these".
 
 8. **If the user chose C**: write `covers: []` — a tagged doc with no coverage is fine (drift check is a no-op, status will be `fresh` trivially until the user fills in paths).
 
-9. **If no suggestions were found** (keyword set empty, no candidate dirs matched, no body references): fall back to asking the user directly, unfiltered:
-   > `<doc>` — no obvious paths to suggest. Which paths does this doc describe? (space-separated, relative to repo root. Leave blank to skip.)
+9. **If the user chose F**: write `covers: none` frontmatter. Report `Marked <doc> as intentionally untagged (covers: none). It will be silent in future audits.` The doc will show status `exempt` from the helper.
 
-After walking all chosen docs, the newly-tagged docs have their drift computed (run step 2 for just these) so step 4 can include them.
+10. **If no suggestions were found** (keyword set empty, no candidate dirs matched, no body references): fall back to asking the user directly, unfiltered:
+    > `<doc>` — no obvious paths to suggest. Which paths does this doc describe? (space-separated, relative to repo root. Leave blank to skip. Type `none` to mark as intentionally untagged.)
 
-### 4. If there are problem docs, offer to fix
+After walking all chosen docs, re-run `koji-doc-status --scan-tagged` to refresh the drift records for newly-tagged docs so step 3 can include them.
+
+### 3. If there are problem docs, offer to fix
 
 "Problem" = stale OR orphan. Use `AskUserQuestion`:
 
@@ -249,33 +363,37 @@ Options:
 - **B) Select some — pick which to fix**
 - **C) Skip — just show the report, don't fix**
 
-If A or B, proceed to the remediation walkthrough (step 5).
+If A or B, proceed to the remediation walkthrough (step 4).
 If C, exit.
 
 If no stale and no orphan docs, say `All tagged docs are fresh.` and exit.
 
-### 5. Remediation walkthrough
+### 4. Remediation walkthrough
 
-For each problem doc (stale or orphan, in that priority order):
+For each problem doc (stale or orphan, in that priority order), pull its `drift`, `last_commit`, `covers`, and `missing` fields from the `TAGGED_REPORT` record. Fetch recent commits via the helper:
+
+```bash
+~/.claude/skills/koji/bin/koji-doc-status --commits "$path" --limit 5
+```
 
 **For stale docs**, print a per-doc briefing:
 
 ```
-docs/ARCHITECTURE.md — 15 commits behind (stale)
-  Covers: src/core/
+<path> — <drift> commits behind (stale)
+  Covers: <covers>
   Doc last edit: <YYYY-MM-DD>
   Recent commits in covered paths (up to 5):
-    abc1234 refactor: split core into submodules (2d ago)
-    def5678 fix: core init race condition (5d ago)
+    <hash> <subject> (<age>)
+    <hash> <subject> (<age>)
     ...
 ```
 
 **For orphan docs**, the briefing emphasizes the missing path(s):
 
 ```
-docs/LEGACY_API.md — orphan
-  Covers: src/legacy/
-  Missing: src/legacy/ (not in working tree)
+<path> — orphan
+  Covers: <covers>
+  Missing: <missing> (not in working tree)
   Doc last edit: <YYYY-MM-DD>
 ```
 
@@ -283,8 +401,8 @@ Then `AskUserQuestion`. Menu options depend on status:
 
 **Stale menu:**
 - **A) Open the doc for editing** — user manually updates; remind them: *"After you edit + git commit, drift resets automatically. Re-run `/inspect-doc-drift` to verify."*
-- **B) Re-tag covers** — code moved? update the covers paths. Prompt for new paths, replace the frontmatter list or HTML-comment line in-place.
-- **C) Remove tag** — stop tracking drift. Delete the `koji:` frontmatter block or the `<!-- koji:covers -->` line from the doc.
+- **B) Re-tag covers** — code moved? update the covers paths. Prompt for new paths, replace the frontmatter `covers:` list in-place.
+- **C) Remove tag** — stop tracking drift. Delete the `covers:` key from the doc's YAML frontmatter.
 - **D) Delete doc** — doc is obsolete. Confirm: *"Delete `<path>`? This cannot be undone in this session (git retains history)."* If confirmed, `git rm` the file.
 - **E) Skip** — come back to this one later.
 
@@ -310,27 +428,63 @@ After walking all selected docs, print a summary:
 
 Resolve the given path. Accept either the doc's full path or a unique substring match against tagged docs.
 
-Read the doc and parse the YAML frontmatter `covers` list. If there's no frontmatter or no `covers`:
+Fetch the status record via the shared helper:
 
-> <path> has no coverage declaration. No drift to inspect.
+```bash
+RECORD=$(~/.claude/skills/koji/bin/koji-doc-status "$path" 2>/dev/null | head -1)
+```
 
-Otherwise print a detail view:
+Parse tab-separated fields: `<path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>`.
+
+If `status` is `missing`:
+
+> <path> does not exist in the repo. Nothing to inspect.
+
+If `status` is `untagged`: the doc exists but has no `covers:` frontmatter. Instead of dead-ending, run the **single-doc tagging flow** — same heuristic + 6-option menu (Accept / Edit / Empty / Skip / Quit / Mark as none) as the dashboard's per-doc walk in step 2a. Drill-in stops after the menu choice; it does NOT cascade to other docs.
+
+If `status` is `malformed`:
+
+> <path> has a `covers:` key but its value is not a YAML list. Fix the frontmatter to enable drift tracking.
+
+Otherwise print a detail view using the record fields, plus recent commits via the helper:
+
+```bash
+~/.claude/skills/koji/bin/koji-doc-status --commits "$path" --limit 10
+```
+
+Drill-in uses the default (recent + noise filter). If the user wants the unfiltered or size-ranked view, they can re-invoke the helper directly with `--by-size` or `--per-path`.
 
 ```
 <path>
-  Covers: <space-separated paths>
-  Doc last edit: <YYYY-MM-DD> (commit <short-hash>)
-  Path existence: <all present | missing: path/X, path/Y>
-  Drift: <N> commits in covered paths since doc's last edit
+  Covers: <covers>
+  Doc last edit: <YYYY-MM-DD> (commit <last_commit>)
+  Path existence: <all present | missing: <missing>>
+  Drift: <drift> commits in covered paths since doc's last edit
   Threshold: <threshold>
-  Status: <fresh | stale | orphan>
+  Status: <status>
 
-  Recent commits in covered paths (up to 10):
+  Recent commits in covered paths (up to 10, noise-filtered):
     <hash> <subject> (<age>)
     ...
 ```
 
-Read-only. To remediate, re-run `/inspect-doc-drift` without args.
+### Drill-in remediation menu (only when actionable)
+
+After the detail view, decide whether to show a remediation menu based on `status`:
+
+- **`fresh` / `exempt`** → nothing to fix. Print `Read-only view. Nothing to remediate.` and exit.
+- **`stale`** → show the **Stale menu** from step 4 of the dashboard walkthrough (Open / Re-tag / Remove tag / Delete / Exit).
+- **`orphan`** → show the **Orphan menu** from step 4 (Re-tag / Remove tag / Delete / Exit).
+- **`malformed`** → show a focused menu specific to frontmatter issues:
+  - **A) Open the doc for editing** — user fixes the `covers:` key by hand
+  - **B) Rewrite as a list** — prompt for space-separated paths; write `covers: [<path1>, <path2>]` or the indented-list form
+  - **C) Mark intentionally untagged** — write `covers: none`
+  - **D) Remove tag** — delete the `covers:` key (and the frontmatter block if empty)
+  - **E) Exit** — leave it; re-run when ready
+
+Tag-edit mechanics (Re-tag / Remove tag / Mark as none / Delete) are shared with step 4 of the dashboard walkthrough — same code path, single doc.
+
+After the user picks an action (or Exit), print a one-line summary: `<path>: <action taken>` and return. The drill-in does NOT cascade to other problem docs — to fix multiple, re-run `/inspect-doc-drift` without args.
 
 ---
 
@@ -339,7 +493,8 @@ Read-only. To remediate, re-run `/inspect-doc-drift` without args.
 - **Doc has no git history (new/untracked)**: DRIFT = 0. Still apply orphan check — if covered path missing, doc is orphan; otherwise fresh.
 - **Covered path doesn't exist in repo**: doc is **orphan**. Remediation menu surfaces appropriate options.
 - **Malformed frontmatter YAML**: skip with `warn: malformed frontmatter in <path>`.
-- **Frontmatter exists but `covers` is not a list** (e.g., a string, or missing): treat as no declaration. `warn: covers must be a list in <path>`.
+- **Frontmatter exists but `covers` is not a list** (e.g., a scalar other than `none`, or missing): treat as malformed. `warn: covers must be a list or the sentinel 'none' in <path>`.
+- **`covers: none` sentinel** (case-insensitive): doc is intentionally untagged. Status = `exempt`. Dropped from drift dashboard (counted in a footnote) and from the untagged bucket. Use for narrative, ops, or process docs with no code to track.
 - **Detached HEAD**: `git log HEAD` still works. No special handling needed.
 - **User is in a subdirectory**: always use `$PROJECT_ROOT` from the preamble for all git commands.
 - **Deleting a doc on option D/C**: use `git rm <path>`. Stage only — do not commit. User's next commit cleans up.
@@ -359,3 +514,7 @@ Read-only. To remediate, re-run `/inspect-doc-drift` without args.
 
 - `/kick-off` — parses the `## Load on Kick-Off` section of `agent-session.md` to decide which docs to load. Tagged docs that are stale still load at kick-off (with a warning) — skipping is a user decision via `/inspect-doc-drift`.
 - `/wrap` — suggests tagged docs to add to the Load on Kick-Off section based on the session's git diff. Complements this skill: wrap decides what to track, `/inspect-doc-drift` decides what to fix.
+
+**Shared primitive:** both `/kick-off` and `/inspect-doc-drift` read doc drift through `~/.claude/skills/koji/bin/koji-doc-status`. Modes:
+- `--scan-tagged` / `--load-on-kickoff` / explicit paths → per-doc status records: `<path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>` with `status ∈ {fresh, stale, orphan, exempt, untagged, missing, malformed}`. `exempt` = doc declared `covers: none` (intentionally untagged).
+- `--commits <path> [--limit N] [--by-size|--per-path]` → per-line commit view `<short-hash> <subject> (<age>)`. Default picks most-recent N with a noise-prefix filter (typo/chore/deps/lint/fmt/bump/style/ci/build/docs/version). `--by-size` ranks by `files_changed × (insertions + deletions)`. `--per-path` round-robins across covered paths.

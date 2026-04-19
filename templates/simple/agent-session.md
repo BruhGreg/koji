@@ -3,8 +3,8 @@
 ## Load on Kick-Off
 
 <!-- Optional. Bullets here are auto-loaded by /kick-off.
-     - docs/X.md
-     - [Y](docs/Y.md) -->
+     - docs/FOO.md
+     - [<label>](docs/BAR.md) -->
 
 ---
 

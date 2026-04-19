@@ -1,0 +1,433 @@
+#!/usr/bin/env bash
+# koji-doc-status — report drift status for docs tagged with YAML `covers:` frontmatter.
+#
+# Shared helper for /kick-off (step 2c) and /inspect-doc-drift.
+# Parses a doc's frontmatter, checks whether covered paths still exist,
+# and counts commits in those paths since the doc's last edit.
+#
+# Usage:
+#   koji-doc-status --scan-tagged           # all repo docs with a `covers:` key
+#   koji-doc-status --load-on-kickoff       # bullets from ## Load on Kick-Off
+#   koji-doc-status <path> [<path> ...]     # specific docs (repo-root relative or absolute)
+#
+# Output — one tab-separated record per doc:
+#   <path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>
+#
+#     status      : fresh | stale | orphan | exempt | untagged | missing | malformed
+#     drift       : integer commit count in covered paths since the doc's
+#                   last edit, or "-" if N/A
+#     last_commit : short hash of the doc's last edit, or "-"
+#     covers      : space-separated list of covered paths, "none" (sentinel),
+#                   or "-"
+#     missing     : space-separated list of covered paths that no longer
+#                   exist in the working tree, or "-"
+#
+# The `covers: none` sentinel marks a doc as intentionally untagged — i.e.,
+# the doc is narrative/ops/process content that doesn't map to specific code.
+# Such docs are omitted from drift reports and from untagged-tagging prompts.
+#
+# Requires koji-detect to have been sourced (uses $PROJECT_ROOT, $DOCS_PATH).
+# Self-sources if those variables are unset.
+
+set -euo pipefail
+
+if [ -z "${PROJECT_ROOT:-}" ] || [ -z "${DOCS_PATH:-}" ]; then
+  eval "$(~/.claude/skills/koji/bin/koji-detect)"
+fi
+
+KOJI_YAML="$PROJECT_ROOT/.koji.yaml"
+
+STALE_THRESHOLD=$(grep -E '^[[:space:]]*stale_threshold[[:space:]]*:' "$KOJI_YAML" 2>/dev/null \
+  | head -1 \
+  | sed -E 's/.*:[[:space:]]*([0-9]+).*/\1/' \
+  | grep -E '^[0-9]+$' || true)
+[ -n "${STALE_THRESHOLD:-}" ] || STALE_THRESHOLD=10
+
+# --- frontmatter primitives ---
+
+# Does the doc have a top-level `covers:` key in YAML frontmatter?
+has_covers_key() {
+  awk '
+    NR==1 { if ($0 != "---") exit 1; in_fm=1; next }
+    in_fm && /^---[[:space:]]*$/ { exit 1 }
+    in_fm && /^covers[[:space:]]*:/ { found=1; exit 0 }
+    END { if (!found) exit 1 }
+  ' "$1" 2>/dev/null
+}
+
+# Print one path per line from the doc's `covers:` YAML list.
+# Emits nothing for empty (`covers: []`, bare `covers:`) or scalar values.
+parse_covers() {
+  awk '
+    NR==1 { if ($0 != "---") exit 0; in_fm=1; next }
+    in_fm && /^---[[:space:]]*$/ { exit 0 }
+    in_fm && /^covers[[:space:]]*:/ {
+      in_covers=1
+      if (match($0, /^covers[[:space:]]*:[[:space:]]*\[[[:space:]]*\][[:space:]]*$/)) exit 0
+      next
+    }
+    in_fm && in_covers {
+      if (match($0, /^[[:space:]]*-[[:space:]]+/)) {
+        item = substr($0, RLENGTH + 1)
+        sub(/[[:space:]]+#.*$/, "", item)
+        sub(/[[:space:]]*$/, "", item)
+        if (length(item) >= 2) {
+          f = substr(item,1,1); l = substr(item,length(item),1)
+          if (f == "\"" && l == "\"") item = substr(item,2,length(item)-2)
+          else if (f == "\047" && l == "\047") item = substr(item,2,length(item)-2)
+        }
+        if (length(item) > 0) print item
+        next
+      }
+      if (match($0, /^[^[:space:]]/)) in_covers = 0
+    }
+  ' "$1" 2>/dev/null || true
+}
+
+# Is the `covers:` line a legal-but-empty form?
+# Matches: "covers:", "covers: ", "covers: []", "covers: [ ]"
+is_empty_covers_form() {
+  grep -qE '^covers[[:space:]]*:[[:space:]]*(\[[[:space:]]*\])?[[:space:]]*$' "$1" 2>/dev/null
+}
+
+# Is the `covers:` line the intentional-untagged sentinel `covers: none`?
+# Case-insensitive. Accepts quoted (`"none"`, `'none'`) and trailing-comment forms.
+is_covers_none() {
+  grep -qiE '^covers[[:space:]]*:[[:space:]]*("none"|'"'"'none'"'"'|none)[[:space:]]*(#.*)?$' "$1" 2>/dev/null
+}
+
+# --- one-doc status ---
+
+compute_status() {
+  local abs="$1"
+  local rel="${abs#"$PROJECT_ROOT/"}"
+
+  if [ ! -f "$abs" ]; then
+    printf '%s\tmissing\t-\t-\t-\t-\n' "$rel"
+    return 0
+  fi
+
+  if ! has_covers_key "$abs"; then
+    printf '%s\tuntagged\t-\t-\t-\t-\n' "$rel"
+    return 0
+  fi
+
+  if is_covers_none "$abs"; then
+    printf '%s\texempt\t0\t-\tnone\t-\n' "$rel"
+    return 0
+  fi
+
+  local covers_list
+  covers_list=$(parse_covers "$abs")
+
+  if [ -z "$covers_list" ]; then
+    if is_empty_covers_form "$abs"; then
+      printf '%s\tfresh\t0\t-\t-\t-\n' "$rel"
+    else
+      printf '%s\tmalformed\t-\t-\t-\t-\n' "$rel"
+    fi
+    return 0
+  fi
+
+  local covers_field
+  covers_field=$(printf '%s\n' "$covers_list" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+
+  local missing=""
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ ! -e "$PROJECT_ROOT/$p" ]; then
+      missing="${missing:+$missing }$p"
+    fi
+  done <<< "$covers_list"
+
+  local full_hash short_hash
+  full_hash=$(cd "$PROJECT_ROOT" && git log -1 --format=%H -- "$rel" 2>/dev/null || true)
+  short_hash=$(cd "$PROJECT_ROOT" && git log -1 --format=%h -- "$rel" 2>/dev/null || true)
+  [ -n "${short_hash:-}" ] || short_hash="-"
+
+  local drift=0
+  if [ -n "${full_hash:-}" ]; then
+    local covers_args=()
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      covers_args+=("$p")
+    done <<< "$covers_list"
+    if [ ${#covers_args[@]} -gt 0 ]; then
+      drift=$(cd "$PROJECT_ROOT" && git log --oneline "$full_hash..HEAD" -- "${covers_args[@]}" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+  fi
+
+  local status
+  if [ -n "$missing" ]; then
+    status="orphan"
+  elif [ "$drift" -gt "$STALE_THRESHOLD" ]; then
+    status="stale"
+  else
+    status="fresh"
+  fi
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$rel" \
+    "$status" \
+    "$drift" \
+    "$short_hash" \
+    "$covers_field" \
+    "${missing:--}"
+}
+
+# --- Load-on-Kick-Off helpers ---
+
+# List bullet bodies (with leading "- "/"* " stripped) from the ## Load on Kick-Off section.
+list_loko_bullets() {
+  local session="$DOCS_PATH/agent-session.md"
+  [ -f "$session" ] || return 0
+  awk '
+    /^## Load on Kick-Off[[:space:]]*$/ { in_section=1; next }
+    in_section && /^## / { exit }
+    in_section && /^[[:space:]]*[-*][[:space:]]+/ {
+      line = $0
+      sub(/^[[:space:]]*[-*][[:space:]]+/, "", line)
+      print line
+    }
+  ' "$session"
+}
+
+# Extract `.md` paths from LOKO bullets on stdin. Skips URLs and non-.md lines.
+# Output is project-root relative (leading "/" stripped).
+# Handles markdown-link anchor/query/title variants: `[doc](foo.md)`,
+# `[doc](foo.md#section)`, `[doc](foo.md?v=1)`, `[doc](foo.md "title")`.
+extract_loko_paths() {
+  while IFS= read -r bullet; do
+    [ -n "$bullet" ] || continue
+    local path=""
+    if printf '%s' "$bullet" | grep -qE '\]\([^)]*\.md'; then
+      # Capture path up to `.md`; outer `[^)]*` consumes any #anchor / ?query / "title".
+      path=$(printf '%s' "$bullet" | sed -nE 's/.*\(([^)#?]*\.md)[^)]*\).*/\1/p' | head -1)
+    else
+      path=$(printf '%s' "$bullet" | awk '{print $1}')
+    fi
+    case "$path" in
+      http://*|https://*|mailto:*) continue ;;
+    esac
+    case "$path" in
+      *.md) ;;
+      *) continue ;;
+    esac
+    printf '%s\n' "${path#/}"
+  done
+}
+
+# --- commit listing helpers ---
+
+# Drop lines whose commit subject matches obvious-noise prefixes.
+# Input/output: lines formatted "<hash> <subject> (<age>)".
+# Matches conventional-commit types considered low-signal for doc drift.
+noise_filter() {
+  grep -ivE '^[a-f0-9]+ (typo|chore|deps|lint|fmt|format|bump|style|ci|build|docs|version)(\(|:|[[:space:]])'
+}
+
+# Compute the git range for drift commits on a doc (doc's last commit..HEAD).
+# Prints the range, or empty if the doc has no git history.
+doc_commit_range() {
+  local rel="$1"
+  local doc_commit
+  doc_commit=$(cd "$PROJECT_ROOT" && git log -1 --format=%H -- "$rel" 2>/dev/null || true)
+  [ -n "$doc_commit" ] || return
+  printf '%s..HEAD' "$doc_commit"
+}
+
+# Mode: most recent N commits touching any covered path, noise-filtered.
+# Falls back to unfiltered if the filter removes everything.
+commits_recent() {
+  local abs="$1" limit="$2"
+  local rel="${abs#"$PROJECT_ROOT/"}"
+  local range
+  range=$(doc_commit_range "$rel")
+  [ -n "$range" ] || return
+
+  local paths_args=()
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    paths_args+=("$p")
+  done <<< "$(parse_covers "$abs")"
+  [ ${#paths_args[@]} -gt 0 ] || return
+
+  local raw filtered
+  raw=$(cd "$PROJECT_ROOT" && git log --format='%h %s (%cr)' "$range" -- "${paths_args[@]}" 2>/dev/null || true)
+  [ -n "$raw" ] || return
+  filtered=$(printf '%s\n' "$raw" | noise_filter || true)
+  [ -n "$filtered" ] || filtered="$raw"
+  printf '%s\n' "$filtered" | head -n "$limit"
+}
+
+# Mode: top N commits ranked by (files_changed * (insertions + deletions)).
+# Favors structural changes over formatting passes. Uses ASCII Unit Separator
+# (\x1f) between fields so commit subjects containing `|` (or any printable
+# character) parse correctly.
+commits_by_size() {
+  local abs="$1" limit="$2"
+  local rel="${abs#"$PROJECT_ROOT/"}"
+  local range
+  range=$(doc_commit_range "$rel")
+  [ -n "$range" ] || return
+
+  local paths_args=()
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    paths_args+=("$p")
+  done <<< "$(parse_covers "$abs")"
+  [ ${#paths_args[@]} -gt 0 ] || return
+
+  cd "$PROJECT_ROOT" && git log --format=$'__C\x1f%h\x1f%s\x1f%cr' --shortstat "$range" -- "${paths_args[@]}" 2>/dev/null |
+    awk -F $'\x1f' '
+      /^__C\x1f/ {
+        if (have) { printf "%d\t%s %s (%s)\n", score, hash, subject, age }
+        hash = $2; subject = $3; age = $4; score = 0; have = 1
+        next
+      }
+      /files? changed/ {
+        files = 0; ins = 0; del = 0
+        if (match($0, /[0-9]+ files? changed/)) {
+          n = substr($0, RSTART, RLENGTH); sub(/ .*/, "", n); files = n + 0
+        }
+        if (match($0, /[0-9]+ insertions?/)) {
+          n = substr($0, RSTART, RLENGTH); sub(/ .*/, "", n); ins = n + 0
+        }
+        if (match($0, /[0-9]+ deletions?/)) {
+          n = substr($0, RSTART, RLENGTH); sub(/ .*/, "", n); del = n + 0
+        }
+        score = files * (ins + del)
+      }
+      END { if (have) printf "%d\t%s %s (%s)\n", score, hash, subject, age }
+    ' | sort -rn | head -n "$limit" | cut -f2-
+}
+
+# Mode: up to N commits total, round-robin across each covered path.
+# Ensures every covered path gets representation even if one is much hotter.
+# Tempfiles are cleaned up via RETURN trap — safe against mid-function failure.
+commits_per_path() {
+  local abs="$1" limit="$2"
+  local rel="${abs#"$PROJECT_ROOT/"}"
+  local range
+  range=$(doc_commit_range "$rel")
+  [ -n "$range" ] || return
+
+  local tmpfiles=()
+  trap 'if [ ${#tmpfiles[@]} -gt 0 ]; then rm -f "${tmpfiles[@]}"; fi; trap - RETURN' RETURN
+
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    local tf
+    tf=$(mktemp)
+    (cd "$PROJECT_ROOT" && git log --format='%h %s (%cr)' "$range" -- "$p" 2>/dev/null) > "$tf" || true
+    tmpfiles+=("$tf")
+  done <<< "$(parse_covers "$abs")"
+  [ ${#tmpfiles[@]} -gt 0 ] || return
+
+  local emitted=0 round=1 any line
+  while [ "$emitted" -lt "$limit" ]; do
+    any=0
+    for tf in "${tmpfiles[@]}"; do
+      line=$(sed -n "${round}p" "$tf")
+      if [ -n "$line" ]; then
+        printf '%s\n' "$line"
+        emitted=$((emitted + 1))
+        any=1
+        [ "$emitted" -ge "$limit" ] && break
+      fi
+    done
+    [ "$any" -eq 0 ] && break
+    round=$((round + 1))
+  done
+}
+
+# --- dispatch ---
+
+case "${1:-}" in
+  --scan-tagged)
+    cd "$PROJECT_ROOT"
+    DOCS=$(git grep -l -E '^[[:space:]]*covers[[:space:]]*:' -- '*.md' 2>/dev/null | sort -u || true)
+    if [ -n "$DOCS" ]; then
+      while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        if has_covers_key "$PROJECT_ROOT/$rel"; then
+          compute_status "$PROJECT_ROOT/$rel"
+        fi
+      done <<< "$DOCS"
+    fi
+    ;;
+  --load-on-kickoff|--loko)
+    (list_loko_bullets | extract_loko_paths || true) | while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      compute_status "$PROJECT_ROOT/$rel"
+    done
+    ;;
+  --commits)
+    shift
+    commits_mode=recent
+    commits_limit=3
+    commits_path=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --limit)
+          if [ $# -ge 2 ]; then
+            commits_limit="$2"
+            shift 2
+          else
+            shift
+          fi
+          ;;
+        --by-size)  commits_mode=by-size; shift ;;
+        --per-path) commits_mode=per-path; shift ;;
+        --*)        shift ;;
+        *)          commits_path="$1"; shift ;;
+      esac
+    done
+    [ -n "$commits_path" ] || exit 1
+    case "$commits_path" in
+      /*) commits_abs="$commits_path" ;;
+      *)  commits_abs="$PROJECT_ROOT/$commits_path" ;;
+    esac
+    [ -f "$commits_abs" ] || exit 0
+    case "$commits_mode" in
+      recent)   commits_recent   "$commits_abs" "$commits_limit" ;;
+      by-size)  commits_by_size  "$commits_abs" "$commits_limit" ;;
+      per-path) commits_per_path "$commits_abs" "$commits_limit" ;;
+    esac
+    ;;
+  --help|-h|"")
+    cat <<'USAGE'
+koji-doc-status — drift status for docs tagged with YAML `covers:` frontmatter.
+
+Usage:
+  koji-doc-status --scan-tagged          # all repo docs with a `covers:` key
+  koji-doc-status --load-on-kickoff      # bullets from ## Load on Kick-Off
+  koji-doc-status <path> [<path> ...]    # specific doc paths
+
+  koji-doc-status --commits <path> [--limit N] [--by-size|--per-path]
+                                         # list commits in covered paths since
+                                         # the doc's last edit
+    --limit N    max commits to emit (default 3)
+    --by-size    rank by files_changed × (insertions+deletions)
+    --per-path   round-robin across each covered path
+    (default)    most recent, with noise-prefix filter
+
+Output (tab-separated, one record per doc — status modes):
+  <path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>
+  status: fresh | stale | orphan | exempt | untagged | missing | malformed
+
+  `exempt` means the doc declared `covers: none` — intentionally untagged.
+
+Output (commit mode):
+  <short-hash> <subject> (<relative-age>)
+USAGE
+    ;;
+  *)
+    for p in "$@"; do
+      case "$p" in
+        /*) compute_status "$p" ;;
+        *) compute_status "$PROJECT_ROOT/$p" ;;
+      esac
+    done
+    ;;
+esac

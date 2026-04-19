@@ -29,7 +29,7 @@ cd ~/.claude/skills/koji && ./setup
 | `/wrap` | 結束工作階段：更新教訓、交接、日誌、歸檔、提議提交、產生下次啟動提示 |
 | `/take-note` | 工作階段中途：儲存進度——或 `/take-note 完成認證，接下來做測試` 附帶說明 |
 | `/koji-init` | 初始化：在任何專案中建立文件骨架和 `.koji.yaml` |
-| `/inspect-doc-drift` | 掃描帶有 `<!-- koji:covers -->` 標籤的文件，顯示文件與其所覆蓋程式碼的漂移狀況，並協助修復已過期的文件 |
+| `/inspect-doc-drift` | 掃描帶有 `covers:` frontmatter 清單的文件，顯示文件與其所覆蓋程式碼的漂移狀況，並協助修復已過期的文件 |
 
 ## 快速開始
 
