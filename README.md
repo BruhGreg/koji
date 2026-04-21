@@ -153,10 +153,10 @@ docs:
   stale_threshold: 10       # commits in covered paths since doc's last edit (default 10)
   stale_action: warn        # "warn" (load + warn) or "skip" (default warn)
   budget_warn_tokens: 15000 # warn at kick-off if Load on Kick-Off exceeds this (~60k chars)
-  budget_silent: false      # set true to skip the budget-warning menu (size still shown in brief)
+  budget_silent: false      # set true to skip the budget warning entirely (size still shown in brief)
 ```
 
-**Budget keys are optional** — kick-off uses the defaults (`15000`, `false`) until you hit the warning menu and pick "Raise" or "Silence". No need to add them upfront.
+**Budget keys are optional** — kick-off uses the defaults (`15000`, `false`). In interactive mode the warning fires as an A/B/C/D menu (Continue / Trim / Raise / Silence) that can edit `.koji.yaml` for you. In auto mode (or any non-interactive session) the menu is replaced by a single one-liner pointing you at `agent-session.md` (to trim) and `.koji.yaml` (to raise or silence); next kick-off reflects the edits automatically.
 
 ### Orphan detection
 

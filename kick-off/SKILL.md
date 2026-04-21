@@ -285,7 +285,7 @@ case "$_budget_silent_raw" in
 esac
 ```
 
-**In the brief** (step 3 below), append one line summarizing the doc-load pass — always show size:
+**In the brief** (step 3 below), append one line summarizing the doc-load pass — always show size, and always include all four count buckets even when zero (consistent shape makes drift/untagged growth obvious across sessions):
 
 > Docs: <loaded> loaded (~<kchars>k chars / ~<ktokens>k tokens), <stale> stale, <orphan> orphan, <untagged> untagged, <missing> missing
 
@@ -302,14 +302,16 @@ If `stale > 0`, `orphan > 0`, or `untagged > 0`, also list specifics on the next
 
 ### 2c'. Budget warning (only if over threshold)
 
-If `$TOTAL_TOKENS > $BUDGET_WARN` **and** `$BUDGET_SILENT` is `false`, fire a warning with an action menu. Otherwise skip this sub-step silently.
+If `$TOTAL_TOKENS > $BUDGET_WARN` **and** `$BUDGET_SILENT` is `false`, warn the user. Otherwise skip this sub-step silently.
 
 Compute the suggested raise-to value:
 ```bash
 RAISE_TO=$(( ((TOTAL_TOKENS * 12 / 10) / 1000 + 1) * 1000 ))   # current × 1.2, rounded up to next 1k
 ```
 
-Pick the top 3 heaviest docs from the per-doc size list. Then `AskUserQuestion`:
+Pick the top 3 heaviest docs from the per-doc size list (use the top 2 for the non-interactive one-liner).
+
+**Interactive mode — fire an `AskUserQuestion` menu:**
 
 > ⚠ Load on Kick-Off is consuming ~<ktokens>k tokens (threshold: <BUDGET_WARN/1000>k).
 >
@@ -326,7 +328,13 @@ Options:
 - **C) Raise threshold** — bump `budget_warn_tokens` in `.koji.yaml` to `$RAISE_TO`. Show the user the exact diff first, then apply on confirm.
 - **D) Silence** — set `budget_silent: true` in `.koji.yaml`. Future kick-offs still show size but no menu. Show diff, confirm, apply.
 
-**`.koji.yaml` edit mechanics** (for C and D — done via the `Edit` tool, not sed):
+**Non-interactive fallback — auto mode, or any reason `AskUserQuestion` should not fire:**
+
+Skip the menu. Emit a single actionable line alongside the brief, then continue with kick-off. The next kick-off will naturally reflect any edits — do NOT suggest re-running `/kick-off`, and do NOT describe the menu options (they're unreachable in this mode):
+
+> ⚠ Load on Kick-Off: ~<ktokens>k tokens (threshold: <BUDGET_WARN/1000>k). Heaviest: <path1> (~<N>k), <path2> (~<N>k). To trim, edit `## Load on Kick-Off` in `agent-session.md`. To raise or silence, set `budget_warn_tokens` or `budget_silent` under `docs:` in `.koji.yaml`.
+
+**`.koji.yaml` edit mechanics** (for interactive C and D — done via the `Edit` tool, not sed):
 
 1. Read `.koji.yaml`. Identify whether a top-level `docs:` block exists.
 2. **If a `docs:` block exists**: insert or update the target key (`budget_warn_tokens` or `budget_silent`) as a sibling of existing keys like `stale_threshold` / `stale_action`. Preserve all other keys, comments, and ordering.

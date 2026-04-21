@@ -135,6 +135,16 @@ covers:
 
 頂層 `covers` 鍵。Frontmatter 與更廣的 AI-agent-markdown 生態一致（Cursor rules、Continue.dev、Astro、MkDocs、Hugo、Jekyll 都能解析）。可以自由與其他 frontmatter 鍵混用。
 
+**刻意未標籤的文件**——導覽、手冊、詞彙表、無對應程式碼的敘事性設計文件——可以用 `covers: none` 哨兵明示：
+
+```markdown
+---
+covers: none
+---
+```
+
+這類文件若列在 `## Load on Kick-Off` 中仍會載入，但會從漂移儀表板和 `/inspect-doc-drift` 的未標籤掃描提示中排除——這個哨兵表示「我確認過；這份文件合理地沒有程式碼覆蓋對應」。
+
 ### 設定
 
 ```yaml
@@ -142,7 +152,11 @@ covers:
 docs:
   stale_threshold: 10       # 覆蓋路徑中的提交數（預設 10）
   stale_action: warn        # "warn"（載入並警告）或 "skip"（預設為 warn）
+  budget_warn_tokens: 15000 # Load on Kick-Off 超過此值時警告（~60k 字元）
+  budget_silent: false      # 設為 true 可完全跳過預算警告（簡報仍顯示大小）
 ```
+
+**預算鍵為選用**——`/kick-off` 使用預設值（`15000`、`false`）。互動模式下警告會以 A/B/C/D 選單呈現（繼續 / 修剪 / 調高 / 靜音），可代你寫入 `.koji.yaml`。自動模式（或任何非互動工作階段）下，選單會以一行提示取代，指向 `agent-session.md`（修剪用）與 `.koji.yaml`（調高或靜音用）；下次 `/kick-off` 會自動反映編輯結果。
 
 ### 孤兒文件偵測
 
