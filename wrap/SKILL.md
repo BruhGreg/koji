@@ -111,29 +111,40 @@ Review the session for task-related changes: completed work, new tasks discovere
 
 ---
 
-## Step 2c — Suggest Load on Kick-Off additions (tag-driven, optional)
+## Step 2c — Update Load on Kick-Off (tag-driven, optional)
 
-The goal: for each tagged doc not yet in `## Load on Kick-Off`, decide whether it's likely useful for the *next* session's context. Combines a deterministic floor (touched paths × `covers:`) with a Claude-judgment pass that uses everything wrap already knows about this session and the next.
+The goal: keep `## Load on Kick-Off` aligned with where the project is going. Three passes, one consolidated proposal:
 
-**Gate — skip the entire step if no tagged docs exist in the repo:**
+- **Pass A** — deterministic floor: tagged docs whose `covers:` overlaps files touched this session.
+- **Pass B** — Claude-judgment: tagged docs whose theme matches this session's work or the next-session mission.
+- **Pass C** — review existing entries: currently-loaded docs that have stopped being relevant.
+
+A and B propose **adds**. C proposes **removes**. All three feed one prompt — adds and removes flow together so the list doesn't grow unbounded across sessions.
+
+**Gate — skip the whole step if there's nothing to consider:**
 
 ```bash
 TAGGED_EXISTS=$(git grep -l -E '^[[:space:]]*covers[[:space:]]*:' -- '*.md' 2>/dev/null | head -1)
+LOKO_HAS_BULLETS=$(awk '/^## Load on Kick-Off[[:space:]]*$/{f=1;next} f && /^## /{exit} f && /^[[:space:]]*[-*][[:space:]]+/{print;exit}' "$DOCS_PATH/agent-session.md" 2>/dev/null)
 ```
 
-If empty AND the repo has any tracked `.md` files, print a one-line nudge (not a prompt):
+- `TAGGED_EXISTS` empty AND `LOKO_HAS_BULLETS` empty → nothing to add, nothing to review. If the repo has any tracked `.md` files, print the one-line nudge below; otherwise skip silently. Exit.
+- `TAGGED_EXISTS` empty, `LOKO_HAS_BULLETS` non-empty → A+B have no candidate pool; run C only (judging untagged/exempt entries by theme).
+- `TAGGED_EXISTS` non-empty, `LOKO_HAS_BULLETS` empty → run A+B; skip C (nothing to review).
+- Both non-empty → run A+B+C.
+
+The nudge (only fires when no tagged docs exist):
 
 > Note: no docs are tagged with `covers:` yet. Run `/inspect-doc-drift` to tag docs so `/wrap` can auto-suggest context for future sessions.
 
-Then exit this step. If no `.md` files at all, skip silently.
-
-**Load the doc-status report:**
+**Load the doc-status reports:**
 
 ```bash
 TAGGED_REPORT=$(~/.claude/skills/koji/bin/koji-doc-status --scan-tagged 2>/dev/null || true)
+LOKO_REPORT=$(~/.claude/skills/koji/bin/koji-doc-status --load-on-kickoff 2>/dev/null || true)
 ```
 
-Each record is tab-separated: `<path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>`. **Skip rows with `status ∈ {malformed, exempt}`** — malformed has no usable covers; exempt declared `covers: none` (the user opted out, so re-suggesting would contradict intent).
+Each record is tab-separated: `<path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>`. For Pass A/B, **skip rows with `status ∈ {malformed, exempt}`** in `TAGGED_REPORT` — malformed has no usable covers; exempt declared `covers: none` (re-suggesting would contradict intent). Pass C scores everything in `LOKO_REPORT` (including exempt and untagged — those are docs the user opted into).
 
 **Compute session context:**
 
@@ -145,7 +156,7 @@ Fall back to `git diff --name-only` against an available base if `HEAD@{1}` isn'
 
 ---
 
-### Pass A — reactive (deterministic floor)
+### Pass A — reactive adds (deterministic floor)
 
 For each tagged doc:
 
@@ -155,7 +166,7 @@ For each tagged doc:
 
 Label each candidate with the reason: `covers <path> — <N> files changed`.
 
-### Pass B — Claude-judgment (session + next-session themes)
+### Pass B — judgment adds (session + next-session themes)
 
 Pass B runs **unless** the session is genuinely empty (no commits this session, no lessons added, no next-session signals, generated starter prompt is placeholder-only). In practice Pass B fires on almost every real `/wrap` invocation — wrap already has session context in Claude's memory by the time this step runs.
 
@@ -176,44 +187,113 @@ Err toward *skipping* — suggest only docs with a clear signal, not speculative
 
 If *none* of these hold, skip Pass B (cold-start case — usually first `/wrap` on a brand-new koji setup).
 
+### Pass C — review existing entries (removes)
+
+Pass C asks the inverse question: which currently-loaded docs are likely irrelevant for next session? Same dual-track reasoning as A+B, applied to the existing LOKO list.
+
+**Skip Pass C entirely if any of:**
+- `LOKO_REPORT` is empty (no bullets — nothing to review).
+- The LOKO section was just created by this wrap (Pass A/B added the first entries on a previously-empty section — no review needed).
+- This is the first `/wrap` on a fresh koji install. Detect via `agent-session.md` git history: if the file has never been committed, or the only commits are template scaffolding (no `## Session:` entries yet), skip C. Don't surprise users with removal suggestions on session 1.
+
+**Candidate pool for Pass C**: every entry in `LOKO_REPORT` whose `status` is NOT `missing` (missing entries are a different problem — kick-off already warns about those).
+
+**Score each candidate against this-session + next-session signals** (same signals as Pass B):
+
+- **Reactive**: did its `covers:` paths intersect with `TOUCHED` this session? If yes → keep (theme is active).
+- **Theme-based (Claude-judgment)**: does the doc's purpose match the session's work or the next-session mission per `TODO.md` / Notes for Next Session / starter prompt / conversation context? If yes → keep.
+- For untagged or exempt entries (`covers: none` or no `covers:`): default-keep. Only mark for removal if Claude judges the doc clearly off-theme for both this session AND next session — these were manually opted in, so bias hard toward keeping.
+
+**Conservative guards — skip suggesting removal if any hold:**
+
+1. **Just-added this session**: doc path is in Pass A's or Pass B's candidate set (don't add and remove in the same wrap).
+2. **Drift status is `stale` or `orphan`**: user may have it in LOKO specifically because they want to fix it next session. Leave alone.
+3. **Covers next-session mission**: if any of the doc's `covers:` paths fall inside the next-session scope (per starter prompt / Notes / TODO items), keep — Claude judgment.
+
+**Deferred guard (known gap)**: "manually re-added in last 3 sessions". Detecting bouncing-back via `agent-session.md` git history is doable but adds cost; not implemented here. A doc the user keeps re-adding will get re-suggested for removal each wrap until they either pin it some other way or the theme stabilizes. Acceptable for the 80% case — revisit if it bites.
+
+**Pass C candidates that survive the guards** become **remove suggestions**. Tag each removal with whether it's a **deterministic** call (covers paths untouched ≥ N commits, where N defaults to the drift threshold) or a **judgment** call (off-theme per Claude). The auto-mode fallback below treats them differently.
+
+If Pass C produces zero remove candidates after guards, that's fine — proceed with adds-only.
+
 ---
 
-### Consolidated prompt
+### Consolidated proposal
 
-Merge Pass A and Pass B candidates. If the combined list is empty, skip silently — no prompt, no output.
+Merge Pass A + Pass B (adds) and Pass C (removes). If both lists are empty, skip silently — no prompt, no output.
 
-Otherwise, one `AskUserQuestion`:
+**Render the proposal as text first** (visible in any mode):
 
-> Docs that look relevant for next session aren't yet in `## Load on Kick-Off`:
+> **Update `## Load on Kick-Off`?**
 >
+> **Add (<X>):**
 >   - docs/<A>.md (touched 3 files in backend/<module>/)
 >   - docs/<B>.md * (session theme: invoice rewrite)
 >   - docs/<C>.md * (next-session TODO: "migrate schema")
 >
-> `*` = suggested by session/next-session theme (not just diff match).
+> **Remove (<Y>):**
+>   - docs/<P>.md — untouched 12 commits, off-theme for next session
+>   - docs/<Q>.md * — theme: irrelevant to next-session UI work
 >
-> Add to `## Load on Kick-Off`?
+> `*` = Claude-judgment (theme-based). Unmarked = deterministic (diff match or untouched ≥ threshold).
+
+Omit the Add or Remove block if its list is empty.
+
+**Interactive mode — fire `AskUserQuestion`:**
 
 Options:
-- **A) Add all**
-- **B) Select some** — show a numbered list, user picks indices
-- **C) Skip**
+- **A) Apply all** — add and remove as proposed.
+- **B) Adds only** — apply additions, leave existing entries alone.
+- **C) Removes only** — apply removals, skip additions.
+- **D) Select individually** — show a numbered list across both Add and Remove sections; user picks indices to apply.
+- **E) Skip** — leave the section unchanged.
 
-**If A or B, update `agent-session.md`:**
+Omit B if no adds, omit C if no removes, omit A/B/C as redundant if either bucket is empty (collapses to the obvious one-bucket prompt).
 
+**Non-interactive fallback — auto mode, or any reason `AskUserQuestion` should not fire:**
+
+The proposal text already printed. Decide what to apply automatically:
+
+- **Adds**: apply automatically. Pass A is deterministic; Pass B already errs toward skipping. Low downside.
+- **Removes — deterministic** (untouched ≥ threshold, no judgment): apply automatically.
+- **Removes — judgment-only** (no deterministic backing, picked purely by Claude theme call): list as **advisory** and do NOT remove. Auto mode shouldn't yank a doc on a hunch alone.
+
+After applying (or not), emit a one-liner:
+
+> Updated `## Load on Kick-Off`: +<X>, -<Y>. To revert: `git restore "$DOCS_PATH/agent-session.md"`.
+> Advisory removals (not applied): docs/<P>.md, docs/<Q>.md. Edit `## Load on Kick-Off` in `agent-session.md` to drop them.
+
+Skip either line if its bucket is empty. If nothing was applied and nothing is advisory, skip the one-liner entirely.
+
+---
+
+**If the user picks A/B/C/D (or auto mode applies), update `agent-session.md`:**
+
+**Adds**:
 1. Check if a `## Load on Kick-Off` H2 section exists above the first `## Session:` entry.
 2. If not, create it immediately above the first `## Session:` heading (or at EOF if no session entries).
 3. Append chosen docs as bullets in path-form:
    ```markdown
    - docs/<A>.md
    ```
-4. Report: `Added <N> doc(s) to Load on Kick-Off (<X> reactive, <Y> theme-based).`
+
+**Removes**:
+1. Locate the `## Load on Kick-Off` section.
+2. For each chosen doc path, find the bullet line (matching the resolved `.md` path — handles markdown-link form `[label](path.md)` and plain-path form). Delete only that line.
+3. Preserve formatting of unaffected lines: bullet style, links, indentation, comments.
+4. Do NOT delete the H2 itself even if the section ends up empty — leave the heading + any HTML comments. Kick-off treats an empty section as a no-op.
+
+**Report**:
+
+> Updated Load on Kick-Off: added <X> doc(s) (<Xa> reactive, <Xb> theme-based), removed <Y> doc(s).
 
 ### Cold-start behavior (explicit)
 
 - **Zero tagged docs, zero `.md`**: step skipped silently.
 - **Zero tagged docs, some `.md` exist**: one-line nudge to run `/inspect-doc-drift`. No further action.
-- **Tagged docs but empty session** (first ever wrap, no commits, no lessons, no notes yet): Pass A empty + Pass B gated off → nothing suggested. The step effectively no-ops until there's enough signal to act on. This is intentional — don't pester users with bad suggestions from a blank slate.
+- **Tagged docs, empty session** (first ever wrap, no commits, no lessons, no notes yet): A empty + B gated off + C skipped (first wrap) → nothing suggested. The step effectively no-ops until there's enough signal to act on. Don't pester users with bad suggestions from a blank slate.
+- **LOKO empty, tagged docs exist**: A+B run; C skipped (nothing to review).
+- **LOKO has bullets, no tagged docs anywhere**: C runs over the existing entries (untagged/exempt only). A+B have no candidate pool. The default-keep stance for untagged entries means C usually no-ops here too.
 
 ---
 
