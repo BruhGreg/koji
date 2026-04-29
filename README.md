@@ -240,7 +240,7 @@ When you run `/kick-off` at session start:
 
 When you run `/wrap` at session end, it executes six steps in order:
 
-1. **Lessons** — Scans the session for corrections or discoveries. Appends to `lessons.md` with format: `YYYY-MM-DD — [Agent] — what went wrong → rule to prevent it`
+1. **Lessons** — Default action is **skip**. A candidate must clear three gates (rediscovery <5min / common-knowledge / burned-time) AND pass the "would the user write this themselves?" test before being appended to `lessons.md`. Most sessions add zero — that's the success path. Format: `YYYY-MM-DD — [Agent] — what went wrong → rule to prevent it`.
 2. **Handoff & TODO** — Updates `AI_HANDOFF.md` with project state changes. Marks completed tasks and adds new items to `TODO.md` (creates it on first use).
 3. **Session Log** — Appends a new entry to `agent-session.md`. Archives oldest entries if threshold is reached.
 4. **Permission Hygiene** — Promotes safe session permissions to `settings.json`, skips risky ones, asks about grey area (zero prompts most sessions).

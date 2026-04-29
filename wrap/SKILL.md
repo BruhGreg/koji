@@ -34,38 +34,52 @@ Execute the following steps **strictly in order**. Do not skip steps. Do not bat
 
 ## Step 1 — Lessons
 
-Review the session for any cases where the user corrected you, or where you discovered a non-obvious pattern or gotcha.
+**Default action: SKIP.** Most sessions add zero lessons. **Zero is the success path**, not a missed step. A short, high-signal `lessons.md` is far more valuable than a long one full of noise — every weak entry buries the real future-time-savers underneath it.
 
-**Only log lessons that are worth keeping.** Apply this filter:
+Before you even consider an addition, read the most recent 5–10 entries in `$DOCS_PATH/lessons.md`. **That file is the calibration target.** Each existing entry is a rule that would still cost real time to rediscover today, with a concrete consequence and a code/commit reference. If a candidate doesn't sit at that bar, drop it.
 
-✅ **Worth adding:**
-- User corrections that would repeat across sessions (e.g., "don't use X library, it breaks Y")
-- Non-obvious project-specific gotchas that cost real time to rediscover (e.g., "the API returns 200 even on auth failure")
-- Patterns not documented anywhere else (CLAUDE.md, codebase, framework docs)
+### Three gates — a candidate must clear ALL THREE to qualify
 
-❌ **Not worth adding:**
-- Generic best practices any senior dev already knows ("write tests", "handle errors")
-- One-off mistakes unlikely to recur (typos, wrong flag on a single command)
-- Things already documented in CLAUDE.md or obvious from the codebase
-- Restatements of framework/library documentation
-- **Tool or agent knowledge** — how Claude Code hooks work, how koji skills behave, how git flags work. These belong in tool docs, not project lessons.
-- **Decisions already encoded in config** — if you just wrote it into a skill file, `.koji.yaml`, `settings.json`, or `CLAUDE.md`, it's already persisted. Don't duplicate it as a lesson.
-- **Workflow design choices** — "we decided X belongs in kick-off not wrap" is a design decision, not a lesson. It's in the skill file already.
-- **Work done outside this project's workspace** — if you edited koji, gstack, or other external tools while working in this repo, those are not lessons for this project. They belong in those tools' own repos.
+1. **Rediscovery gate.** Could a senior dev rediscover this rule in <5 minutes by reading the code, the error message, the framework docs, or one targeted web search? If yes → SKIP.
+2. **Common-knowledge gate.** Would a senior dev working in this stack already know this from the framework's own behavior? Restating import-collision rules, framework exception messages, or standard-library quirks is documentation theater, not a project lesson. If yes → SKIP.
+3. **Burned-time gate.** Is there a concrete past incident where this rule's absence cost real time, shipped a bug, or required a user correction? "Could theoretically bite future me" does not qualify — only landmines that actually *bit*. If no → SKIP.
 
-**The test:** Would a developer working on *this project's codebase* hit this problem again if they didn't read this lesson? If no — don't add it. Lessons are for project-specific landmines, not general knowledge.
+A candidate that fails any one of the three is noise. There is no "two out of three is close enough" — close-enough entries are exactly the ones that bury real lessons.
 
-**When in doubt, don't add it.** A short, high-signal lessons file is far more valuable than a long one full of noise. Most sessions should add zero lessons.
+### The "would the user write this themselves?" test
 
-If any corrections or discoveries pass the filter:
-1. Read `$DOCS_PATH/lessons.md`
-2. Append new entries **at the top** (below the header comment), one per line:
+The most valuable lesson is one whose absence would force the user to correct the same mistake again. If the user wouldn't bother writing this down unprompted — would just fix it and move on — neither should you.
+
+- **Valuable shape:** "I had to correct Claude on X again — record the rule so the next agent doesn't repeat it."
+- **Noise shape:** "Claude noticed something it had to work around once and is dutifully logging it."
+
+If only Claude would write this entry, it's noise.
+
+### Anti-examples — these LOOK project-specific but aren't
+
+Common near-misses that pass a naive "is it project-touching?" check but fail the gates above. If your candidate matches one of these shapes, **skip it**:
+
+- **Import-resolution / namespace collisions** ("X is exported by both libraries — alias one of them"). Generic language behavior; the analyzer error spells it out.
+- **Framework exceptions restated as project rules** (e.g., "LayoutBuilder can't live inside intrinsic-dimension widgets"). The exception text already says this. Hitting it once teaches you forever.
+- **Single-use design choices** ("we replaced widget A's built-in X with our own because pixel-fit on this one row"). Design taste, not a project landmine. Re-reading the code answers it in 2 minutes.
+- **"We picked X over Y because the user preferred X"** — a preference recorded in code. Not a rule a future agent would walk into blind.
+- **Tool or agent knowledge** — how Claude Code hooks work, how koji skills behave, how a git flag works. Belongs in tool docs, not project lessons.
+- **Decisions already encoded in config or code** — if you just wrote it into `.koji.yaml`, `settings.json`, a `SKILL.md`, `CLAUDE.md`, or source, it's already persisted. Don't duplicate it as a lesson.
+- **Workflow design choices** — "X belongs in kick-off not wrap". The skill file already encodes it.
+- **Work outside this project's workspace** — koji, gstack, or other external-tool changes you happened to make while working in this repo belong in those tools' own repos.
+
+### If — and only if — a candidate clears all three gates AND passes the user-test:
+
+1. Read `$DOCS_PATH/lessons.md`.
+2. Append the new entry **at the top** (below the header comment), one per line:
    ```
    YYYY-MM-DD — [Claude] — what went wrong → rule to prevent it
    ```
-3. Be specific and tactical — not generic advice. Include the concrete consequence.
+3. Be specific and tactical. Include the concrete consequence and a code/commit reference that ties the rule back to the work.
 
-If nothing passes the filter, skip this step.
+### Otherwise
+
+**Print nothing about lessons.** Silent skip is the desired UX — do not announce that you considered lessons and found none. Move directly to Step 2a.
 
 ---
 
