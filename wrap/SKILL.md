@@ -230,21 +230,51 @@ If any marker matches, flag the doc as **self-tagged temp**. For self-tagged tem
 - If the theme check says off-theme → mark for **deterministic** removal (see "Tag each removal" below). Rationale: the marker is a deterministic, author-written signal; treating it as deterministic lets the auto-mode fallback actually apply the removal. Only the LOKO bullet is removed — the doc file itself is untouched and can be re-pinned by the user.
 - If the theme check says still-active → keep. The "when X completes" condition hasn't fired yet.
 
+**Pre-check 2 — session-mention staleness (runs after the temp-doc pre-check, before scoring):**
+
+Load per-bullet history from the helper:
+
+```bash
+LOKO_HISTORY=$(~/.claude/skills/koji/bin/koji-doc-status --loko-history 2>/dev/null || true)
+```
+
+Each row is tab-separated: `<path>\t<presence>\t<mentioned>\t<commits_since_add>` with `presence ∈ {new, recent, established}` and `mentioned ∈ {yes, no}`. The helper scans active-log `## Session:` bodies for the path or basename — archived sessions are not consulted, so the signal weakens with `archive.keep=1`. (Acceptable for the 80% case; revisit if it bites.)
+
+For each LOKO entry where `presence=established` AND `mentioned=no`:
+
+- The bullet has survived ≥ 2 wraps and is absent from every active-log session body. This is the "I added this 3 wraps ago, never used it again" pattern.
+- Mark as **deterministic** removal candidate. **This overrides the reactive keep-on-touch decision below** — if the user hasn't referenced the doc in any active session despite multiple wraps, the doc isn't load-bearing even when its covered code is hot. Code-freshness ≠ doc-freshness; session-mention is the better proxy for whether the doc is actually being used.
+- Treat the same as a self-tagged temp marker for tagging purposes (deterministic, auto-applies in auto mode).
+
+Skip Pre-check 2 if any of:
+
+- The active log has fewer than 2 `## Session:` entries (cold start; no signal yet).
+- The helper returns no rows (LOKO empty or helper errored).
+- The doc was already flagged by the temp-doc pre-check above (no double-tagging).
+
 **Score each candidate against this-session + next-session signals** (same signals as Pass B):
 
-- **Reactive**: did its `covers:` paths intersect with `TOUCHED` this session? If yes → keep (theme is active).
+- **Reactive**: did its `covers:` paths intersect with `TOUCHED` this session? If yes → keep (theme is active). **Exception:** if Pre-check 2 already flagged this doc as `established + unmentioned`, the reactive keep is overridden — the session-mention signal beats the code-touch signal.
 - **Theme-based (Claude-judgment)**: does the doc's purpose match the session's work or the next-session mission per `TODO.md` / Notes for Next Session / starter prompt / conversation context? If yes → keep.
-- For untagged or exempt entries (`covers: none` or no `covers:`) **that are NOT self-tagged temp**: default-keep. Only mark for removal if Claude judges the doc clearly off-theme for both this session AND next session — these were manually opted in, so bias hard toward keeping. (Self-tagged temp docs skip this default-keep bias per the pre-check above.)
+- For untagged or exempt entries (`covers: none` or no `covers:`) **that are NOT self-tagged temp and NOT flagged by Pre-check 2**: default-keep. Only mark for removal if Claude judges the doc clearly off-theme for both this session AND next session — these were manually opted in, so bias hard toward keeping. (Self-tagged temp and session-stale docs skip this default-keep bias per the pre-checks above.)
 
 **Conservative guards — skip suggesting removal if any hold:**
 
 1. **Just-added this session**: doc path is in Pass A's or Pass B's candidate set (don't add and remove in the same wrap).
-2. **Drift status is `stale` or `orphan`**: user may have it in LOKO specifically because they want to fix it next session. Leave alone. (**Exception:** doesn't apply to self-tagged temp docs — the marker is a stronger signal than the "might want to fix" assumption.)
+2. **Drift status is `stale` or `orphan`**: user may have it in LOKO specifically because they want to fix it next session. Leave alone. (**Exception:** doesn't apply to docs flagged by Pre-check 1 (self-tagged temp) or Pre-check 2 (`established + unmentioned`) — both signals are stronger than the "might want to fix" assumption. If two wraps have passed without any session mention, that "might want to fix" signal is stale too.)
 3. **Covers next-session mission**: if any of the doc's `covers:` paths fall inside the next-session scope (per starter prompt / Notes / TODO items), keep — Claude judgment.
 
 **Deferred guard (known gap)**: "manually re-added in last 3 sessions". Detecting bouncing-back via `agent-session.md` git history is doable but adds cost; not implemented here. A doc the user keeps re-adding will get re-suggested for removal each wrap until they either pin it some other way or the theme stabilizes. Acceptable for the 80% case — revisit if it bites.
 
-**Pass C candidates that survive the guards** become **remove suggestions**. Tag each removal with whether it's a **deterministic** call (covers paths untouched ≥ N commits where N defaults to the drift threshold, OR self-tagged temp marker found per the pre-check) or a **judgment** call (off-theme per Claude, no deterministic backing). The auto-mode fallback below treats them differently.
+**Pass C candidates that survive the guards** become **remove suggestions**. Tag each removal with the strongest signal that fires:
+
+- **Deterministic** — any of:
+  - Covers paths untouched ≥ N commits, where N defaults to the drift threshold.
+  - Self-tagged temp marker found (Pre-check 1).
+  - `presence=established` AND `mentioned=no` (Pre-check 2 — session-mention staleness).
+- **Judgment** — off-theme per Claude, no deterministic backing. Carry the doc's `presence` (new/recent/established) into the tag — the auto-mode fallback uses it.
+
+The auto-mode fallback below treats deterministic vs judgment differently, and inside judgment, `presence` decides auto-apply vs advisory.
 
 If Pass C produces zero remove candidates after guards, that's fine — proceed with adds-only.
 
@@ -266,9 +296,11 @@ Merge Pass A + Pass B (adds) and Pass C (removes). If both lists are empty, skip
 > **Remove (<Y>):**
 >   - docs/<P>.md — untouched 12 commits, off-theme for next session
 >   - docs/<R>.md — self-tagged temp ("delete when phase X completes"), off-theme
+>   - docs/<S>.md — 3 wraps in LOKO, no active-log session mention; covers paths active but doc unused
 >   - docs/<Q>.md * — theme: irrelevant to next-session UI work
+>   - docs/<T>.md *! — theme: probably no longer relevant (recent — pin to keep)
 >
-> `*` = Claude-judgment (theme-based). Unmarked = deterministic (diff match, untouched ≥ threshold, or self-tagged temp).
+> `*` = Claude-judgment (theme-based). `!` = recent addition (advisory only in auto mode — pin if you want to keep). Unmarked = deterministic (diff match, untouched ≥ threshold, self-tagged temp, or session-stale).
 
 Omit the Add or Remove block if its list is empty.
 
@@ -288,8 +320,9 @@ Omit B if no adds, omit C if no removes, omit A/B/C as redundant if either bucke
 The proposal text already printed. Decide what to apply automatically:
 
 - **Adds**: apply automatically. Pass A is deterministic; Pass B already errs toward skipping. Low downside.
-- **Removes — deterministic** (untouched ≥ threshold, OR self-tagged temp marker found): apply automatically. The temp marker is an author-written deterministic signal; not auto-applying it would leave docs that explicitly asked to be removed sitting in the list.
-- **Removes — judgment-only** (no deterministic backing, picked purely by Claude theme call): list as **advisory** and do NOT remove. Auto mode shouldn't yank a doc on a hunch alone.
+- **Removes — deterministic** (untouched ≥ threshold, OR self-tagged temp marker found, OR `established + unmentioned`): apply automatically. All three are author/usage-based signals strong enough to act on without confirmation.
+- **Removes — judgment-only** (no deterministic backing, picked purely by Claude theme call): apply automatically **only when `presence=established`** (≥ 2 wraps in LOKO). Two wraps of grace before judgment-removes auto-apply gives the user a cycle to notice and pin a doc they want to keep — without that grace, the asymmetric ratchet (adds via judgment auto-apply, removes via judgment never apply) lets the LOKO list grow unbounded across sessions.
+- **Removes — judgment + `presence=recent` or `presence=new`**: list as **advisory** and do NOT remove. Auto mode shouldn't yank a freshly-added doc on a hunch — let it ride one more wrap so the user can pin if they meant to keep it.
 
 After applying (or not), emit a one-liner:
 

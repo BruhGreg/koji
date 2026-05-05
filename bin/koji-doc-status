@@ -341,6 +341,138 @@ commits_per_path() {
   done
 }
 
+# --- LOKO history (presence + session-mention age) ---
+
+# Extract LOKO bullet bodies from a piece of agent-session.md content piped on stdin.
+list_loko_bullets_from_stdin() {
+  awk '
+    /^## Load on Kick-Off[[:space:]]*$/ { in_section=1; next }
+    in_section && /^## / { exit }
+    in_section && /^[[:space:]]*[-*][[:space:]]+/ {
+      line = $0
+      sub(/^[[:space:]]*[-*][[:space:]]+/, "", line)
+      print line
+    }
+  '
+}
+
+# Extract concatenated bodies of every ## Session: entry from agent-session.md
+# (active log only — archives live in $ARCHIVE_DIR and are not consulted here).
+extract_session_bodies() {
+  local session="$1"
+  [ -f "$session" ] || return 0
+  awk '
+    /^## Session:/ { in_session=1; next }
+    in_session && /^## / && !/^## Session:/ { in_session=0 }
+    in_session { print }
+  ' "$session" 2>/dev/null
+}
+
+# Count current ## Session: entries in the active log.
+count_active_sessions() {
+  local session="$1"
+  [ -f "$session" ] || { echo 0; return; }
+  awk '/^## Session:/{c++} END{print c+0}' "$session" 2>/dev/null
+}
+
+# Emit one row per current LOKO bullet:
+#   <path>\t<presence>\t<mentioned>\t<commits_since_add>
+#
+# presence:
+#   new        = path is in the working-tree LOKO but not in HEAD's committed
+#                version (uncommitted add, e.g. mid-wrap), OR file has no git
+#                history at all.
+#   recent     = present in HEAD; commits_since_add == 1.
+#   established = commits_since_add >= 2.
+#
+# mentioned:
+#   yes = path or basename appears in any ## Session: body in the active log.
+#   no  = absent from every active-log session body.
+#
+# commits_since_add:
+#   integer count of commits to agent-session.md since the bullet was first
+#   introduced. -1 if the bullet appears in no committed version.
+loko_history() {
+  local session_file="$DOCS_PATH/agent-session.md"
+  [ -f "$session_file" ] || return 0
+
+  local loko_paths
+  loko_paths=$(list_loko_bullets | extract_loko_paths | awk '!seen[$0]++')
+  [ -n "$loko_paths" ] || return 0
+
+  local active_bodies
+  active_bodies=$(extract_session_bodies "$session_file")
+
+  # Walk commits oldest-first; for each commit, snapshot LOKO paths.
+  # First time a path appears = its add-commit. Cache the add-commit per path.
+  local commits
+  commits=$(cd "$PROJECT_ROOT" && git log --reverse --format=%H -- "$session_file" 2>/dev/null || true)
+
+  # Use a temp file as a path → first-seen-commit map (bash 3.2 has no assoc arrays).
+  local first_seen_file
+  first_seen_file=$(mktemp)
+  trap 'rm -f "$first_seen_file"' RETURN
+
+  if [ -n "$commits" ]; then
+    while IFS= read -r commit; do
+      [ -n "$commit" ] || continue
+      local snapshot_loko
+      snapshot_loko=$(cd "$PROJECT_ROOT" && git show "$commit:$session_file" 2>/dev/null \
+        | list_loko_bullets_from_stdin \
+        | extract_loko_paths \
+        | awk '!seen[$0]++')
+      [ -n "$snapshot_loko" ] || continue
+      while IFS= read -r snap_p; do
+        [ -n "$snap_p" ] || continue
+        # Escape regex metachars in the path before grepping the tempfile,
+        # so paths containing `.` `[` `*` etc. match literally.
+        if ! grep -qE "^[[:space:]]*$(printf '%s' "$snap_p" | sed 's/[][\\.*^$/]/\\&/g')[[:space:]]" "$first_seen_file" 2>/dev/null; then
+          printf '%s %s\n' "$snap_p" "$commit" >> "$first_seen_file"
+        fi
+      done <<< "$snapshot_loko"
+    done <<< "$commits"
+  fi
+
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+
+    # mentioned: literal path OR basename anywhere in an active session body
+    local mentioned=no
+    local fname
+    fname=$(basename "$p")
+    if [ -n "$active_bodies" ]; then
+      if printf '%s\n' "$active_bodies" | grep -qF "$p"; then
+        mentioned=yes
+      elif printf '%s\n' "$active_bodies" | grep -qF "$fname"; then
+        mentioned=yes
+      fi
+    fi
+
+    # commits_since_add: look up first-seen commit, count commits since
+    local add_commit=""
+    add_commit=$(awk -v p="$p" '$1 == p { print $2; exit }' "$first_seen_file" 2>/dev/null || true)
+
+    local commits_since_add=-1
+    if [ -n "$add_commit" ]; then
+      commits_since_add=$(cd "$PROJECT_ROOT" && git rev-list --count "$add_commit..HEAD" -- "$session_file" 2>/dev/null || echo -1)
+      # rev-list excludes the add-commit itself; bump by 1 so a bullet present
+      # only in HEAD's most recent commit reads as commits_since_add=1 (recent).
+      if [ "$commits_since_add" != "-1" ]; then
+        commits_since_add=$((commits_since_add + 1))
+      fi
+    fi
+
+    local presence
+    case "$commits_since_add" in
+      -1|0) presence=new ;;
+      1)    presence=recent ;;
+      *)    presence=established ;;
+    esac
+
+    printf '%s\t%s\t%s\t%s\n' "$p" "$presence" "$mentioned" "$commits_since_add"
+  done <<< "$loko_paths"
+}
+
 # --- dispatch ---
 
 case "${1:-}" in
@@ -361,6 +493,9 @@ case "${1:-}" in
       [ -n "$rel" ] || continue
       compute_status "$PROJECT_ROOT/$rel"
     done
+    ;;
+  --loko-history)
+    loko_history
     ;;
   --commits)
     shift
@@ -402,6 +537,8 @@ koji-doc-status — drift status for docs tagged with YAML `covers:` frontmatter
 Usage:
   koji-doc-status --scan-tagged          # all repo docs with a `covers:` key
   koji-doc-status --load-on-kickoff      # bullets from ## Load on Kick-Off
+  koji-doc-status --loko-history         # presence + session-mention age per
+                                         # bullet (used by /wrap Pass C)
   koji-doc-status <path> [<path> ...]    # specific doc paths
 
   koji-doc-status --commits <path> [--limit N] [--by-size|--per-path]
@@ -417,6 +554,16 @@ Output (tab-separated, one record per doc — status modes):
   status: fresh | stale | orphan | exempt | untagged | missing | malformed
 
   `exempt` means the doc declared `covers: none` — intentionally untagged.
+
+Output (--loko-history mode, one record per current LOKO bullet):
+  <path>\t<presence>\t<mentioned>\t<commits_since_add>
+  presence:  new | recent | established
+    new        — uncommitted add OR file has no git history
+    recent     — present in HEAD; commits_since_add == 1
+    established — commits_since_add >= 2 (≥ 2 wraps in LOKO)
+  mentioned: yes | no
+    yes — path or basename appears in any active-log ## Session: body
+    no  — absent from every active-log session body
 
 Output (commit mode):
   <short-hash> <subject> (<relative-age>)
