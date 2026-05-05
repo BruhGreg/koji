@@ -167,9 +167,9 @@ If any covered path no longer exists in the working tree (code deleted, moved, o
 `/wrap` keeps `## Load on Kick-Off` aligned with where the project is going. Three passes feed one consolidated proposal:
 
 - **Adds** — tagged docs whose `covers:` overlaps files touched this session, plus tagged docs whose theme matches the next-session mission (per `TODO.md`, "Notes for Next Session", starter prompt, conversation context).
-- **Removes** — currently-loaded docs that have stopped being relevant. Conservative guards skip removal if a doc was just added this wrap, is `stale`/`orphan` (might be there to fix), or covers a next-session path.
+- **Removes** — currently-loaded docs that have stopped being relevant. Conservative guards skip removal if a doc was just added this wrap, is `stale`/`orphan` (might be there to fix), or covers a next-session path. **Self-tagged temp docs** (markers like `temporary working doc`, `delete when …`, `gets archived or deleted` in the doc's first ~20 lines) bypass the exempt/untagged default-keep bias and the stale/orphan guard — the author opted into the temp lifecycle, so the LOKO bullet ages out without manual pruning.
 
-Interactive mode shows one prompt: apply all / adds only / removes only / select individually / skip. Auto mode (where prompts can't fire) auto-applies adds and any deterministic removes (covers paths untouched past threshold), lists pure-judgment removes as advisory only, and prints one line showing what changed plus how to revert (`git restore`). The list stops growing unbounded across sessions.
+Interactive mode shows one prompt: apply all / adds only / removes only / select individually / skip. Auto mode (where prompts can't fire) auto-applies adds and any deterministic removes (covers paths untouched past threshold, OR self-tagged temp marker found), lists pure-judgment removes as advisory only, and prints one line showing what changed plus how to revert (`git restore`). The list stops growing unbounded across sessions.
 
 ### `/inspect-doc-drift`
 

@@ -212,21 +212,39 @@ Pass C asks the inverse question: which currently-loaded docs are likely irrelev
 
 **Candidate pool for Pass C**: every entry in `LOKO_REPORT` whose `status` is NOT `missing` (missing entries are a different problem — kick-off already warns about those).
 
+**Pre-check — self-tagged temp docs (runs before scoring, on every LOKO entry):**
+
+Read the first ~20 lines of each LOKO doc (window covers a typical YAML frontmatter block + the doc's H1 + the opening paragraph — enough to catch a self-declared lifecycle without dragging in body content that may quote other docs). Case-insensitive markers indicating the author opted the doc into a temporary lifecycle. **Match with word-boundary semantics — a substring match against negated phrasing like "non-temporary" or "this is NOT a temp doc" should NOT trigger the flag.** When in doubt (e.g., the marker appears inside a code block, blockquote, or sentence describing some *other* doc's lifecycle), do not flag — the recovery cost of a false negative is one more wrap; the recovery cost of a false positive is the user re-pinning the bullet:
+
+- `temporary working doc` / `temporary doc` / `temp doc`
+- `[TEMP]` or `(TEMP)` in the title or first heading
+- `delete when` / `archive when` / `remove when`
+- `gets archived or deleted` / `gets deleted` / `will be deleted`
+- `rolls into` / `roll into` (koji-style "rolls into X.md when Y completes")
+- An explicit expiry phrase: `remove after <date>`, `expires <date>`, `delete after <date>`
+
+If any marker matches, flag the doc as **self-tagged temp**. For self-tagged temp docs:
+
+- **Bypass the exempt/untagged default-keep bias** below. The author explicitly opted into a temp lifecycle by writing the marker — that's a stronger signal than the "manually opted in" bias was protecting against.
+- Apply the normal theme check (Reactive + Theme-based) to decide if it's still in use.
+- If the theme check says off-theme → mark for **deterministic** removal (see "Tag each removal" below). Rationale: the marker is a deterministic, author-written signal; treating it as deterministic lets the auto-mode fallback actually apply the removal. Only the LOKO bullet is removed — the doc file itself is untouched and can be re-pinned by the user.
+- If the theme check says still-active → keep. The "when X completes" condition hasn't fired yet.
+
 **Score each candidate against this-session + next-session signals** (same signals as Pass B):
 
 - **Reactive**: did its `covers:` paths intersect with `TOUCHED` this session? If yes → keep (theme is active).
 - **Theme-based (Claude-judgment)**: does the doc's purpose match the session's work or the next-session mission per `TODO.md` / Notes for Next Session / starter prompt / conversation context? If yes → keep.
-- For untagged or exempt entries (`covers: none` or no `covers:`): default-keep. Only mark for removal if Claude judges the doc clearly off-theme for both this session AND next session — these were manually opted in, so bias hard toward keeping.
+- For untagged or exempt entries (`covers: none` or no `covers:`) **that are NOT self-tagged temp**: default-keep. Only mark for removal if Claude judges the doc clearly off-theme for both this session AND next session — these were manually opted in, so bias hard toward keeping. (Self-tagged temp docs skip this default-keep bias per the pre-check above.)
 
 **Conservative guards — skip suggesting removal if any hold:**
 
 1. **Just-added this session**: doc path is in Pass A's or Pass B's candidate set (don't add and remove in the same wrap).
-2. **Drift status is `stale` or `orphan`**: user may have it in LOKO specifically because they want to fix it next session. Leave alone.
+2. **Drift status is `stale` or `orphan`**: user may have it in LOKO specifically because they want to fix it next session. Leave alone. (**Exception:** doesn't apply to self-tagged temp docs — the marker is a stronger signal than the "might want to fix" assumption.)
 3. **Covers next-session mission**: if any of the doc's `covers:` paths fall inside the next-session scope (per starter prompt / Notes / TODO items), keep — Claude judgment.
 
 **Deferred guard (known gap)**: "manually re-added in last 3 sessions". Detecting bouncing-back via `agent-session.md` git history is doable but adds cost; not implemented here. A doc the user keeps re-adding will get re-suggested for removal each wrap until they either pin it some other way or the theme stabilizes. Acceptable for the 80% case — revisit if it bites.
 
-**Pass C candidates that survive the guards** become **remove suggestions**. Tag each removal with whether it's a **deterministic** call (covers paths untouched ≥ N commits, where N defaults to the drift threshold) or a **judgment** call (off-theme per Claude). The auto-mode fallback below treats them differently.
+**Pass C candidates that survive the guards** become **remove suggestions**. Tag each removal with whether it's a **deterministic** call (covers paths untouched ≥ N commits where N defaults to the drift threshold, OR self-tagged temp marker found per the pre-check) or a **judgment** call (off-theme per Claude, no deterministic backing). The auto-mode fallback below treats them differently.
 
 If Pass C produces zero remove candidates after guards, that's fine — proceed with adds-only.
 
@@ -247,9 +265,10 @@ Merge Pass A + Pass B (adds) and Pass C (removes). If both lists are empty, skip
 >
 > **Remove (<Y>):**
 >   - docs/<P>.md — untouched 12 commits, off-theme for next session
+>   - docs/<R>.md — self-tagged temp ("delete when phase X completes"), off-theme
 >   - docs/<Q>.md * — theme: irrelevant to next-session UI work
 >
-> `*` = Claude-judgment (theme-based). Unmarked = deterministic (diff match or untouched ≥ threshold).
+> `*` = Claude-judgment (theme-based). Unmarked = deterministic (diff match, untouched ≥ threshold, or self-tagged temp).
 
 Omit the Add or Remove block if its list is empty.
 
@@ -269,7 +288,7 @@ Omit B if no adds, omit C if no removes, omit A/B/C as redundant if either bucke
 The proposal text already printed. Decide what to apply automatically:
 
 - **Adds**: apply automatically. Pass A is deterministic; Pass B already errs toward skipping. Low downside.
-- **Removes — deterministic** (untouched ≥ threshold, no judgment): apply automatically.
+- **Removes — deterministic** (untouched ≥ threshold, OR self-tagged temp marker found): apply automatically. The temp marker is an author-written deterministic signal; not auto-applying it would leave docs that explicitly asked to be removed sitting in the list.
 - **Removes — judgment-only** (no deterministic backing, picked purely by Claude theme call): list as **advisory** and do NOT remove. Auto mode shouldn't yank a doc on a hunch alone.
 
 After applying (or not), emit a one-liner:
