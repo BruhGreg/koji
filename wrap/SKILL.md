@@ -496,12 +496,13 @@ Check if `.claude/settings.local.json` exists. If it does:
 
 4. **After committing**, run `git status`. If the worktree is clean, move on. If there are unexpected leftover changes, **report them to the user** but do NOT create additional commits. Let the user decide in the next step or manually.
 
-5. **Delete the session-start sentinel** so the next `/kick-off` creates a fresh boundary:
+5. **Delete the session-start sentinel and per-session state** so the next `/kick-off` creates a fresh boundary:
    ```bash
    rm -f "$SESSION_START_FILE"
+   [ -n "$SESSION_DIR" ] && rm -f "$SESSION_DIR/duet-rules.json"
    rmdir "$SESSION_DIR" 2>/dev/null || true
    ```
-   Idempotent — no error if already gone. The `rmdir` removes the per-project sessions directory if empty (no-op if other state lives there). Runs unconditionally at end of Step 5 (even if no commit was made). The next session must `/kick-off` to re-establish the boundary; otherwise the next `/wrap` degrades to working-tree-only diff (Pass A weakens, other passes unaffected).
+   Idempotent — no error if already gone. The `[ -n "$SESSION_DIR" ]` guard prevents the cleanup from expanding to `rm -f /duet-rules.json` if the variable is unset (sourcing failure or scope leak). Clears the session-scoped `duet-rules.json` (any `Apply + remember for session` choices from `/duet-review` expire here). The `rmdir` removes the per-project sessions directory if empty (no-op if other state lives there). Sibling skills that write to `$SESSION_DIR` should add their own cleanup line here, or the `rmdir` will leave stale files behind. Runs unconditionally at end of Step 5 (even if no commit was made). The next session must `/kick-off` to re-establish the boundary; otherwise the next `/wrap` degrades to working-tree-only diff (Pass A weakens, other passes unaffected).
 
 ---
 

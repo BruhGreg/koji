@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""koji-duet-synthesize: merge Claude + codex findings into a verdict JSON.
+
+Inputs: two JSON files (one per reviewer), each a list of finding objects
+matching the schema in references/reviewer-prompt.md.
+
+Output: a single verdict JSON written to --out, with the schema in
+references/verdict-format.md.
+
+The exit code matches the verdict's exit_code field (0/1/2). This lets
+callers (e.g., /duet-impl) gate on the process exit directly.
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+SEV_RANK = {"high": 3, "medium": 2, "low": 1}
+
+# Line-fuzzing window: two findings within ±LINE_WINDOW lines of each other,
+# in the same file and category family, are treated as the same finding.
+# Smoke test showed reviewers naturally disagree by 1-2 lines and pick
+# different (but related) categories for the same bug — strict matching
+# missed those consensus cases.
+LINE_WINDOW = 5
+
+# Category family map. Reviewers naturally pick different categories for
+# the same bug (e.g., one calls it "correctness", another "data-loss").
+# Grouping into families lets consensus detection survive that variance
+# without merging genuinely unrelated bugs.
+CATEGORY_FAMILY = {
+    "correctness": "correctness",
+    "data-loss": "correctness",
+    "error-handling": "correctness",
+    "race": "correctness",
+    "security": "security",
+    "perf": "perf",
+    "types": "types",
+    "deps": "deps",
+    "deadcode": "deadcode",
+    "style": "style",
+    "other": "other",
+}
+
+
+def family(cat: str) -> str:
+    return CATEGORY_FAMILY.get(cat, "other")
+
+
+def _line(f: dict) -> int:
+    try:
+        return int(f.get("line", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def find_consensus(claude: list, codex: list) -> tuple:
+    """Greedy match: each Claude finding pairs with nearest unmatched Codex
+    finding (same file, same category family, within LINE_WINDOW lines).
+
+    Returns (consensus_pairs, claude_used_idxs, codex_used_idxs).
+    """
+    consensus_pairs = []
+    claude_used = set()
+    codex_used = set()
+    for ci, cf in enumerate(claude):
+        cf_file = cf.get("file", "")
+        cf_line = _line(cf)
+        cf_fam = family(cf.get("category", ""))
+        best_xi = -1
+        best_dist = LINE_WINDOW + 1
+        for xi, xf in enumerate(codex):
+            if xi in codex_used:
+                continue
+            if xf.get("file", "") != cf_file:
+                continue
+            if family(xf.get("category", "")) != cf_fam:
+                continue
+            dist = abs(_line(xf) - cf_line)
+            if dist <= LINE_WINDOW and dist < best_dist:
+                best_xi = xi
+                best_dist = dist
+        if best_xi >= 0:
+            consensus_pairs.append((cf, codex[best_xi]))
+            claude_used.add(ci)
+            codex_used.add(best_xi)
+    return consensus_pairs, claude_used, codex_used
+
+
+def load_findings(path: str) -> list:
+    """Load a reviewer's findings; return [] on any parse error.
+
+    Errors are logged to stderr but never fatal — a reviewer that emits
+    malformed JSON should not block the whole pass.
+    """
+    try:
+        text = Path(path).read_text()
+    except FileNotFoundError:
+        print(f"WARN: {path} not found, treating as empty", file=sys.stderr)
+        return []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"WARN: {path} not valid JSON ({e}); treating as empty", file=sys.stderr)
+        return []
+    if not isinstance(data, list):
+        print(f"WARN: {path} top-level is not a list; treating as empty", file=sys.stderr)
+        return []
+    out = []
+    for entry in data:
+        if isinstance(entry, dict) and "severity" in entry and "category" in entry:
+            out.append(entry)
+    return out
+
+
+def fingerprint(f: dict) -> str:
+    return f"{f.get('file', '')}:{f.get('line', '')}:{f.get('category', '')}"
+
+
+def merge_pair(c: dict, x: dict) -> dict:
+    """Merge two findings with matching fingerprints. Higher severity wins."""
+    sev_c = c.get("severity", "low")
+    sev_x = x.get("severity", "low")
+    sev = max((sev_c, sev_x), key=lambda s: SEV_RANK.get(s, 0))
+    merged = dict(c)
+    merged["severity"] = sev
+    merged["agreed_by"] = ["claude", "codex"]
+    merged["claude_severity"] = sev_c
+    merged["codex_severity"] = sev_x
+    return merged
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--claude", required=True)
+    ap.add_argument("--codex", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--base", default="")
+    ap.add_argument("--head", default="")
+    args = ap.parse_args()
+
+    claude = load_findings(args.claude)
+    codex = load_findings(args.codex)
+
+    consensus_pairs, claude_used, codex_used = find_consensus(claude, codex)
+
+    high_consensus: list = []
+    high_contested: list = []
+    medium: list = []
+    low: list = []
+
+    for cf, xf in consensus_pairs:
+        merged = merge_pair(cf, xf)
+        bucket = {"high": high_consensus, "medium": medium, "low": low}.get(
+            merged["severity"], low
+        )
+        bucket.append(merged)
+
+    for ci, f in enumerate(claude):
+        if ci in claude_used:
+            continue
+        f = dict(f)
+        f["agreed_by"] = ["claude"]
+        sev = f.get("severity", "low")
+        bucket = {"high": high_contested, "medium": medium, "low": low}.get(sev, low)
+        bucket.append(f)
+
+    for xi, f in enumerate(codex):
+        if xi in codex_used:
+            continue
+        f = dict(f)
+        f["agreed_by"] = ["codex"]
+        sev = f.get("severity", "low")
+        bucket = {"high": high_contested, "medium": medium, "low": low}.get(sev, low)
+        bucket.append(f)
+
+    if high_consensus:
+        verdict, exit_code = "REJECT", 1
+    elif high_contested:
+        verdict, exit_code = "CONTESTED", 2
+    elif medium or low:
+        verdict, exit_code = "PASS-WITH-NOTES", 0
+    else:
+        verdict, exit_code = "PASS", 0
+
+    out = {
+        "verdict": verdict,
+        "base": args.base,
+        "head": args.head,
+        "reviewers": ["claude", "codex"],
+        "totals": {
+            "high_consensus": len(high_consensus),
+            "high_contested": len(high_contested),
+            "medium": len(medium),
+            "low": len(low),
+        },
+        "high_consensus": high_consensus,
+        "high_contested": high_contested,
+        "medium": medium,
+        "low": low,
+        "auto_applied": [],
+        "user_held": [],
+        "reported_only": [],
+        "exit_code": exit_code,
+    }
+
+    Path(args.out).write_text(json.dumps(out, indent=2))
+    print(verdict)
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
