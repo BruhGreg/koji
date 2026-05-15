@@ -231,7 +231,7 @@ When you run `/kick-off` at session start:
 
 1. **Migration check** — detects if koji files are in `docs/` (legacy) but `.koji.yaml` points to `.koji/`. Offers to migrate or skip.
 2. **Version check** — compares local vs remote VERSION. Offers update / skip / always-update.
-3. **Load context** — reads AI_HANDOFF.md, TODO.md, lessons.md, last session entry silently.
+3. **Load context** — reads AI_HANDOFF.md, TODO.md, last session entry, and a **focus-filtered subset of lessons.md** (matches drawn from your `/kick-off` arg, last session's Notes for Next Session, and open TODO items, plus a top-3 recency baseline). Untagged entries fall back to body-text matching. Optionally tag entries `YYYY-MM-DD — [Agent] — [domain1,domain2] — …` to sharpen the matching. Cold start (no focus signals) loads top 10 by recency, matching pre-v0.5 behavior.
 4. **Extended context** — three-tier context gathering, zero config:
    - **Baseline** (always) — git branch, uncommitted changes, active plans
    - **Reference-follow** (if session note mentions specific files/plans) — reads referenced plans, searches archives for related sessions

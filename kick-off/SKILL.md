@@ -239,7 +239,35 @@ Read these files and internalize the content — do NOT dump them back to the us
 
 1. `$DOCS_PATH/AI_HANDOFF.md` — project state, architecture rules, gotchas
 2. `$TODO_PATH` — open tasks, tech debt, blockers (if `$HAS_TODO` is `true`)
-3. `$DOCS_PATH/lessons.md` — recent corrections and gotchas (focus on the top 10 entries)
+3. **Lessons (focus-filtered).** Don't read all of `$DOCS_PATH/lessons.md` — load the relevant subset via the helper. Derive a focus string from (a) the user-provided focus arg if any, (b) the last session's "Notes for Next Session" field (read from `$DOCS_PATH/agent-session.md`), and (c) the first 3 open items in `$TODO_PATH` if `$HAS_TODO`. Concatenate with spaces:
+
+   ```bash
+   FOCUS=""
+   [ -n "${USER_FOCUS:-}" ] && FOCUS="$USER_FOCUS"
+   if [ -f "$DOCS_PATH/agent-session.md" ]; then
+     # Take the LATEST Notes for Next Session — /wrap appends sessions at the
+     # bottom, so the last occurrence in the file is the freshest. Overwrite
+     # the buffer on each new heading; print only at END.
+     NOTES=$(awk '
+       /^### Notes for Next Session[[:space:]]*$/ { capturing=1; buf=""; next }
+       capturing && /^## |^### / { capturing=0 }
+       capturing { buf = buf ORS $0 }
+       END { print buf }
+     ' "$DOCS_PATH/agent-session.md" 2>/dev/null | head -20)
+     FOCUS="$FOCUS $NOTES"
+   fi
+   if [ "$HAS_TODO" = "true" ] && [ -f "$TODO_PATH" ]; then
+     # Pull the top of TODO.md (excluding the Completed section). The template
+     # uses heading-style tasks (`### Foo` + `- **Status**:`), not checkboxes,
+     # so a `grep '^- \[ \]'` filter would miss all default-template content.
+     # Token parser strips stopwords/headings downstream, so dumb is robust.
+     TODOS=$(awk '/^## Completed/{exit} 1' "$TODO_PATH" 2>/dev/null | head -30)
+     FOCUS="$FOCUS $TODOS"
+   fi
+   LESSONS=$(~/.claude/skills/koji/bin/koji-doc-status --lessons-relevant --focus "$FOCUS" --limit 8 2>/dev/null || true)
+   ```
+
+   Internalize `$LESSONS` — these are the lessons most relevant to this session, plus a recent baseline. **If the helper fails or returns empty**, fall back to reading the top of `lessons.md` directly (first 10 entries) so kick-off still works without focus context. Cold-start (no focus signals — fresh session with no args, empty Notes, no TODO) returns top 10 by recency automatically, matching pre-v0.5 behavior.
 4. `$DOCS_PATH/agent-session.md` — read the **last** session entry for continuity (what was done, notes for next session)
 
 ### 2b. Gather extended context (tiered)
