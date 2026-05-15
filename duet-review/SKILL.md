@@ -13,7 +13,7 @@ allowed-tools:
 
 # /duet-review
 
-> Follows the [agent-autonomy principle](references/agent-autonomy.md): agents resolve technical questions together; users see prompts only for policy choices and unresolved deadlocks.
+> Follows the [agent-autonomy principle](../references/agent-autonomy.md): agents resolve technical questions together; users see prompts only for policy choices and unresolved deadlocks.
 
 Two-reviewer adversarial code review. **Reviewer A** is Claude (Agent subagent, fresh context); **Reviewer B** is codex (codex exec, `high` effort by default, `xhigh` on `--xhigh`). Both run in parallel, results are synthesized into a verdict, disagreements trigger a cross-review pass, and high-consensus mechanical fixes prompt the user with four choices (apply / hold / apply+remember-for-repo / apply+remember-for-session).
 
@@ -311,7 +311,7 @@ Then `exit $EXIT_CODE` where exit code comes from `verdict.json`.
 
 ## Related
 
-- Autonomy principle: [references/agent-autonomy.md](references/agent-autonomy.md)
+- Autonomy principle: [../references/agent-autonomy.md](../references/agent-autonomy.md)
 - Verdict JSON spec: [references/verdict-format.md](references/verdict-format.md)
 - Reviewer prompt: [references/reviewer-prompt.md](references/reviewer-prompt.md)
 - Synthesizer: [koji/bin/koji-duet-synthesize](../bin/koji-duet-synthesize)
