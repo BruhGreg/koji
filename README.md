@@ -21,7 +21,9 @@ git clone --depth 1 https://github.com/BruhGreg/koji.git ~/.claude/skills/koji
 cd ~/.claude/skills/koji && ./setup
 ```
 
-That's it. Five skills are now available in Claude Code:
+That's it. Eight skills are now available in Claude Code:
+
+**Session lifecycle**
 
 | Skill | What it does |
 |-------|-------------|
@@ -30,6 +32,16 @@ That's it. Five skills are now available in Claude Code:
 | `/take-note` | Mid-session: save progress — or `/take-note finished auth, moving to tests` with inline note |
 | `/koji-init` | Bootstrap: create docs scaffolding and `.koji.yaml` in any project |
 | `/inspect-doc-drift` | Scan docs tagged with a `covers:` frontmatter list, show drift vs their covered code, offer to fix stale ones |
+
+**Duet workflow** — cross-model agent collaboration. The `duet` keyword is required to invoke; casual "let's plan" or "review this" will not trigger these.
+
+| Skill | What it does |
+|-------|-------------|
+| `/duet-plan` | Multi-round Claude↔codex planning dialogue with consensus detection. Locks the plan to `$DOCS_PATH/plans/<slug>.md` when both agents agree |
+| `/duet-impl` | Walks a locked plan gate-by-gate. Implements each phase, codex single-reviews at each `<!-- gate: NAME -->`, runs `/duet-review` at the end |
+| `/duet-review` | Final-gate adversarial code review. Claude + codex run in parallel, synthesize findings, cross-review on disagreement, prompt to apply high-confidence fixes |
+
+All three duet skills follow the [agent-autonomy principle](references/agent-autonomy.md): agents resolve technical questions together; users are prompted only for unresolved deadlocks and policy choices.
 
 ## Quick Start
 
