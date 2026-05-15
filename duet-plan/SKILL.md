@@ -64,20 +64,28 @@ echo "Run dir: $RUN_DIR"
 echo "Round limit: $ROUND_LIMIT, effort: $EFFORT"
 ```
 
-## Step 2 — Dialogue loop
+## Step 2 — Dialogue loop (both agents run in background)
+
+Each round has two model calls (Claude drafts, then codex critiques). Both run as **background tasks** so the user can keep working on other things while the dialogue progresses. After each launch, briefly tell the user what's running and **return control**. Resume processing only when the harness re-invokes you with a completion notification.
+
+Sequence within a round is fixed (codex needs Claude's draft to critique it), so the two background calls happen back-to-back, not in parallel. But across the round's launches, the user is free.
 
 Implement as a counter starting at 1. Repeat until consensus or round limit.
 
 ### Round 1 (initial)
 
-#### 2a. Claude drafts initial plan (Agent tool, foreground)
+#### 2a. Claude drafts initial plan (Agent tool, background)
 
-Call the `Agent` tool with `subagent_type: general-purpose`. Prompt contains:
-- The "CLAUDE — initial round" template from [references/prompt-templates.md](references/prompt-templates.md)
-- `{topic}` filled in
-- `{project_root}` and `{project_context}` filled in
+Call the `Agent` tool with `run_in_background: true`:
 
-Take the Agent's response, write it to `$RUN_DIR/round-1-claude.md`. The last line should be `VERDICT: AGREE` (or PARTIAL/DISAGREE).
+- `subagent_type`: `general-purpose`
+- `description`: `Duet plan round 1: Claude draft`
+- `prompt`: the "CLAUDE — initial round" template from [references/prompt-templates.md](references/prompt-templates.md), with `{topic}` / `{project_root}` / `{project_context}` filled in
+- `run_in_background`: `true`
+
+Tell the user: *"Round 1: Claude drafting the plan in the background. You can continue with other work."* Then return control.
+
+When the Agent completion notification arrives, the result is in the notification's `<result>` block. Write that to `$RUN_DIR/round-1-claude.md` via the Write tool. Confirm the last line is `VERDICT: AGREE` / `PARTIAL` / `DISAGREE`. If the response is missing the VERDICT marker, the agent should re-invoke the same Agent call once with a reminder to include the marker.
 
 #### 2b. Codex critiques (Bash, background)
 
@@ -106,23 +114,25 @@ $(cat "$CLAUDE_FILE")
 
 End with VERDICT line."
 
-{
-  if [ -n "$TO" ]; then
-    "$TO" "$TIMEOUT" codex exec "$CODEX_PROMPT" \
-      -C "$PROJECT_ROOT" -s read-only \
-      -c "model_reasoning_effort=\"$EFFORT\"" \
-      < /dev/null > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
-  else
-    codex exec "$CODEX_PROMPT" \
-      -C "$PROJECT_ROOT" -s read-only \
-      -c "model_reasoning_effort=\"$EFFORT\"" \
-      < /dev/null > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
-  fi
-  echo $? > "$CODEX_FILE.exit"
-} &
-CODEX_PID=$!
-wait $CODEX_PID
+if [ -n "$TO" ]; then
+  "$TO" "$TIMEOUT" codex exec "$CODEX_PROMPT" \
+    -C "$PROJECT_ROOT" -s read-only \
+    -c "model_reasoning_effort=\"$EFFORT\"" \
+    < /dev/null > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
+else
+  codex exec "$CODEX_PROMPT" \
+    -C "$PROJECT_ROOT" -s read-only \
+    -c "model_reasoning_effort=\"$EFFORT\"" \
+    < /dev/null > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
+fi
+echo $? > "$CODEX_FILE.exit"
+```
 
+Run this Bash block with **`run_in_background: true`**. Tell the user: *"Round $ROUND: codex critiquing in the background."* Then return control.
+
+When the notification arrives:
+
+```bash
 CODEX_EXIT=$(cat "$CODEX_FILE.exit")
 if [ "$CODEX_EXIT" = "124" ]; then
   echo "WARN: codex timed out on round $ROUND. Treating as DISAGREE."
@@ -161,12 +171,14 @@ fi
 
 ### Round N (N > 1, when not yet consensus and ROUND ≤ ROUND_LIMIT)
 
-#### 2d. Claude responds (Agent tool, foreground)
+#### 2d. Claude responds (Agent tool, background)
 
-Call Agent with the "CLAUDE — subsequent rounds" template, filling in:
+Call the `Agent` tool with `run_in_background: true`, using the "CLAUDE — subsequent rounds" template, filling in:
 - `{topic}`
 - `{claude_previous}` = contents of `$RUN_DIR/round-$((ROUND-1))-claude.md`
 - `{codex_critique}` = contents of `$RUN_DIR/round-$((ROUND-1))-codex.md`
+
+Tell the user: *"Round $ROUND: Claude responding to codex's critique in the background."* Then return control.
 
 Write response to `$RUN_DIR/round-$ROUND-claude.md`.
 

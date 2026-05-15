@@ -74,7 +74,9 @@ If `DIFF_LINES > 5000`, confirm with the user via `AskUserQuestion` before proce
 
 ---
 
-## Step 2 — Launch reviewers in parallel
+## Step 2 — Launch reviewers in parallel (both backgrounded)
+
+Both reviewers run as **background tasks**. After launching them, briefly tell the user that the reviewers are running and that they can keep working on other things; you'll resume when both background tasks notify completion. Do NOT block on either reviewer mid-flow.
 
 ### 2a. Start codex (Reviewer B) in background
 
@@ -94,23 +96,21 @@ Now review the diff below. Output STRICT JSON only — no markdown fences, no pr
 DIFF:
 $(cat "$DIFF_FILE")"
 
-{
-  if [ -n "$TO" ]; then
-    "$TO" "$TIMEOUT" codex exec "$CODEX_PROMPT" \
-      -C "$PROJECT_ROOT" -s read-only \
-      -c "model_reasoning_effort=\"$EFFORT\"" \
-      < /dev/null > "$RUN_DIR/codex.raw" 2> "$RUN_DIR/codex.err"
-  else
-    codex exec "$CODEX_PROMPT" \
-      -C "$PROJECT_ROOT" -s read-only \
-      -c "model_reasoning_effort=\"$EFFORT\"" \
-      < /dev/null > "$RUN_DIR/codex.raw" 2> "$RUN_DIR/codex.err"
-  fi
-  echo $? > "$RUN_DIR/codex.exit"
-} &
-CODEX_PID=$!
-echo "Codex started: PID=$CODEX_PID effort=$EFFORT timeout=${TIMEOUT}s"
+if [ -n "$TO" ]; then
+  "$TO" "$TIMEOUT" codex exec "$CODEX_PROMPT" \
+    -C "$PROJECT_ROOT" -s read-only \
+    -c "model_reasoning_effort=\"$EFFORT\"" \
+    < /dev/null > "$RUN_DIR/codex.raw" 2> "$RUN_DIR/codex.err"
+else
+  codex exec "$CODEX_PROMPT" \
+    -C "$PROJECT_ROOT" -s read-only \
+    -c "model_reasoning_effort=\"$EFFORT\"" \
+    < /dev/null > "$RUN_DIR/codex.raw" 2> "$RUN_DIR/codex.err"
+fi
+echo $? > "$RUN_DIR/codex.exit"
 ```
+
+Run this Bash block with **`run_in_background: true`**. The harness returns immediately with a task ID; you (the main agent) will be notified when the command completes. The output file path the harness gives you can also be polled if needed, but the notification is the primary signal.
 
 **Codex hardening (already encoded above):**
 - No `--enable web_search_cached` (confirmed silent-hang trigger)
@@ -119,29 +119,32 @@ echo "Codex started: PID=$CODEX_PID effort=$EFFORT timeout=${TIMEOUT}s"
 - Prompt passed as positional argument (not via `PROMPT=$(cat …)` subshell)
 - `--json` is intentionally **omitted** here — the prompt itself requests JSON; `--json` mode is JSONL streaming which complicates output parsing
 
-### 2b. Run Claude reviewer (Reviewer A) via Agent tool
+### 2b. Run Claude reviewer (Reviewer A) via Agent tool — also backgrounded
 
-Call the `Agent` tool, foreground:
+Call the `Agent` tool with **`run_in_background: true`**:
 
 - `subagent_type`: `general-purpose`
 - `description`: `Duet review: Claude pass`
 - `prompt`: the full reviewer-prompt.md text PLUS the diff, with the closing instruction:
   > *"Output ONLY a JSON array. No markdown fences, no preamble, no closing remarks. If no findings, output `[]`."*
+- `run_in_background`: `true`
 
-The Agent returns its response inline. **The main agent (you) must:**
+The Agent tool returns immediately with an agent ID; you'll be notified when the subagent completes.
 
-1. Extract the JSON array from the response (strip any preamble/postamble).
-2. Write it to `$RUN_DIR/claude.json` using the Write tool.
+### 2c. Tell the user, then go
 
-If the response contains no parseable array, write `[]` to `$RUN_DIR/claude.json` and log a warning to the summary.
+After both reviewers are launched, tell the user something like:
 
-### 2c. Wait for codex, extract its JSON
+> *"duet-review running — codex + Claude reviewer both launched in background. I'll come back with the verdict when both complete; in the meantime you can continue with anything else."*
+
+Then **return control**. Do NOT poll, sleep, or proactively check on progress. The harness will re-invoke you with the notification messages.
+
+### 2d. On notification: collect outputs
+
+When the codex Bash notification arrives, extract its JSON:
 
 ```bash
-wait $CODEX_PID
 CODEX_EXIT=$(cat "$RUN_DIR/codex.exit")
-echo "Codex finished: exit=$CODEX_EXIT"
-
 if [ "$CODEX_EXIT" = "124" ]; then
   echo "WARN: codex timed out at ${TIMEOUT}s. Treating as empty findings."
   echo "[]" > "$RUN_DIR/codex.json"
@@ -149,7 +152,6 @@ elif [ "$CODEX_EXIT" != "0" ]; then
   echo "WARN: codex exit $CODEX_EXIT. See $RUN_DIR/codex.err"
   echo "[]" > "$RUN_DIR/codex.json"
 else
-  # Codex output is plain text; extract first JSON array
   python3 -c "
 import re, json, sys
 raw = open('$RUN_DIR/codex.raw').read()
@@ -165,9 +167,12 @@ sys.stdout.write('[]')
 " > "$RUN_DIR/codex.json"
 fi
 
-echo "claude.json: $(wc -c < "$RUN_DIR/claude.json") bytes"
 echo "codex.json:  $(wc -c < "$RUN_DIR/codex.json") bytes"
 ```
+
+When the Claude reviewer Agent notification arrives, extract the JSON array from its response and write to `$RUN_DIR/claude.json` via the Write tool. If the response contains no parseable array, write `[]` and note it in the summary.
+
+**Proceed to Step 3 only after BOTH notifications have arrived and both `$RUN_DIR/claude.json` and `$RUN_DIR/codex.json` exist.** If one reviewer is still running when you're re-invoked by the other's notification, just confirm collection of the one that finished and return control again — the second notification will re-invoke you.
 
 ---
 

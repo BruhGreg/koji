@@ -93,7 +93,7 @@ Concretely the agent should:
 
 Recommendation: stage changes (`git add -A`) after segment work so diff computation in 2c is deterministic.
 
-### 2c. Codex single-review at this gate
+### 2c. Codex single-review at this gate (background)
 
 ```bash
 SEGMENT_DIFF_FILE="$RUN_DIR/diff-${gate_name}.patch"
@@ -110,20 +110,21 @@ CODEX_PROMPT="$(awk '/^## Reviewer prompt/,/^## Implementer-side/' "$GATE_PROMPT
 TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
 RAW="$RUN_DIR/codex-${gate_name}-attempt-${attempt}.raw"
 
-{
-  if [ -n "$TO" ]; then
-    "$TO" "$TIMEOUT" codex exec "$CODEX_PROMPT" \
-      -C "$PROJECT_ROOT" -s read-only \
-      -c "model_reasoning_effort=\"$EFFORT\"" \
-      < /dev/null > "$RAW" 2> "$RAW.err"
-  else
-    codex exec "$CODEX_PROMPT" -C "$PROJECT_ROOT" -s read-only \
-      -c "model_reasoning_effort=\"$EFFORT\"" < /dev/null > "$RAW" 2> "$RAW.err"
-  fi
-  echo $? > "$RAW.exit"
-} &
-wait $!
+if [ -n "$TO" ]; then
+  "$TO" "$TIMEOUT" codex exec "$CODEX_PROMPT" \
+    -C "$PROJECT_ROOT" -s read-only \
+    -c "model_reasoning_effort=\"$EFFORT\"" \
+    < /dev/null > "$RAW" 2> "$RAW.err"
+else
+  codex exec "$CODEX_PROMPT" -C "$PROJECT_ROOT" -s read-only \
+    -c "model_reasoning_effort=\"$EFFORT\"" < /dev/null > "$RAW" 2> "$RAW.err"
+fi
+echo $? > "$RAW.exit"
+```
 
+Run this Bash block with **`run_in_background: true`**. Tell the user: *"Gate '$gate_name' attempt $((attempt+1)): codex reviewing in the background."* Then return control. When the notification arrives, proceed to JSON extraction:
+
+```bash
 # Extract findings JSON
 python3 -c "
 import re, json, sys
