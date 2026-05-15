@@ -1,5 +1,5 @@
 ---
-description: "Final-gate adversarial review. Runs Claude + codex reviewers in parallel, synthesizes findings, cross-reviews on disagreement, prompts on high-confidence auto-apply."
+description: "Final-gate adversarial review. Runs Claude + codex reviewers in parallel, synthesizes findings, cross-reviews on disagreement, prompts on high-confidence auto-apply. Use ONLY when the user explicitly says 'duet review', 'duet-review', 'let's duet review this diff', or similar — the 'duet' keyword is required. Do not invoke on casual 'review this' or 'code review' phrases (gstack/review handles those)."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools:
