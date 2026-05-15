@@ -169,13 +169,7 @@ Check if `CLAUDE.md` exists in the project root.
 
 ## Session Management (koji)
 
-On session start:
-1. Read `$DOCS_DIR/AI_HANDOFF.md` for project state and architecture rules
-2. Read `$DOCS_DIR/TODO.md` for open tasks and next steps
-3. Review recent `$DOCS_DIR/lessons.md` entries for gotchas
-
-On session end: run `/wrap`
-Mid-session checkpoint: run `/take-note`
+Session docs in `$DOCS_DIR/` (handoff, lessons, session log + Load on Kick-Off) and `TODO.md` at project root. Use `/kick-off` to start a session, `/wrap` to end, `/take-note` mid-session.
 ```
 
 **If `CLAUDE.md` does not exist:**
@@ -186,18 +180,14 @@ Mid-session checkpoint: run `/take-note`
 
 ## Session Management (koji)
 
-On session start:
-1. Read `$DOCS_DIR/AI_HANDOFF.md` for project state and architecture rules
-2. Read `$DOCS_DIR/TODO.md` for open tasks and next steps
-3. Review recent `$DOCS_DIR/lessons.md` entries for gotchas
-
-On session end: run `/wrap`
-Mid-session checkpoint: run `/take-note`
+Session docs in `$DOCS_DIR/` (handoff, lessons, session log + Load on Kick-Off) and `TODO.md` at project root. Use `/kick-off` to start a session, `/wrap` to end, `/take-note` mid-session.
 ```
 
 (Substitute the actual resolved `$DOCS_DIR` value — e.g., `.koji` or `docs` — when writing to CLAUDE.md. Do not write the literal string `$DOCS_DIR`.)
 
-Tell the user: "Added session management instructions to CLAUDE.md — your agent will now automatically read handoff state and lessons at session start."
+**Why pointer-only, not auto-read instructions:** earlier koji versions inlined `Read $DOCS_DIR/AI_HANDOFF.md`, `Read $DOCS_DIR/TODO.md`, etc. into this block. That had two problems: (a) it duplicated `/kick-off`'s job (which also handles migrations, version-check, budget warning, drift report), and (b) `$DOCS_DIR/TODO.md` was wrong — TODO.md is at project root, not under `$DOCS_DIR/`. The pointer-only block fixes both: no auto-reads (use `/kick-off`), and the path hint is correct.
+
+Tell the user: "Added koji session-management routing to CLAUDE.md. Start each session with `/kick-off`."
 
 ### 6. For Migrations (existing projects with old-style wrap)
 

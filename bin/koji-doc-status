@@ -37,10 +37,22 @@ fi
 
 KOJI_YAML="$PROJECT_ROOT/.koji.yaml"
 
-STALE_THRESHOLD=$(grep -E '^[[:space:]]*stale_threshold[[:space:]]*:' "$KOJI_YAML" 2>/dev/null \
-  | head -1 \
-  | sed -E 's/.*:[[:space:]]*([0-9]+).*/\1/' \
-  | grep -E '^[0-9]+$' || true)
+STALE_THRESHOLD=$(awk '
+  /^docs:[[:space:]]*(#.*)?$/ { in_docs=1; next }
+  /^[^[:space:]]/ && !/^docs:/ { in_docs=0 }
+  in_docs && /^[[:space:]]+stale_threshold[[:space:]]*:/ {
+    sub(/^[[:space:]]+stale_threshold[[:space:]]*:[[:space:]]*/, "")
+    sub(/[[:space:]]+#.*$/, "")
+    sub(/[[:space:]]*$/, "")
+    # Strip surrounding quotes (YAML allows `stale_threshold: "10"`)
+    n = length($0)
+    if (n >= 2) {
+      f = substr($0, 1, 1); l = substr($0, n, 1)
+      if ((f == "\"" && l == "\"") || (f == "\047" && l == "\047")) $0 = substr($0, 2, n - 2)
+    }
+    print; exit
+  }
+' "$KOJI_YAML" 2>/dev/null | grep -E '^[0-9]+$' || true)
 [ -n "${STALE_THRESHOLD:-}" ] || STALE_THRESHOLD=10
 
 # --- frontmatter primitives ---
@@ -48,6 +60,7 @@ STALE_THRESHOLD=$(grep -E '^[[:space:]]*stale_threshold[[:space:]]*:' "$KOJI_YAM
 # Does the doc have a top-level `covers:` key in YAML frontmatter?
 has_covers_key() {
   awk '
+    { sub(/\r$/, "") }   # CRLF compat: strip trailing CR before pattern checks
     NR==1 { if ($0 != "---") exit 1; in_fm=1; next }
     in_fm && /^---[[:space:]]*$/ { exit 1 }
     in_fm && /^covers[[:space:]]*:/ { found=1; exit 0 }
@@ -59,11 +72,31 @@ has_covers_key() {
 # Emits nothing for empty (`covers: []`, bare `covers:`) or scalar values.
 parse_covers() {
   awk '
+    { sub(/\r$/, "") }   # CRLF compat
     NR==1 { if ($0 != "---") exit 0; in_fm=1; next }
     in_fm && /^---[[:space:]]*$/ { exit 0 }
     in_fm && /^covers[[:space:]]*:/ {
       in_covers=1
+      # Empty inline list: covers: []
       if (match($0, /^covers[[:space:]]*:[[:space:]]*\[[[:space:]]*\][[:space:]]*$/)) exit 0
+      # Non-empty inline list: covers: [a, b, "c"]
+      if (match($0, /^covers[[:space:]]*:[[:space:]]*\[.*\][[:space:]]*$/)) {
+        inner = $0
+        sub(/^covers[[:space:]]*:[[:space:]]*\[/, "", inner)
+        sub(/\][[:space:]]*$/, "", inner)
+        n = split(inner, items, /,/)
+        for (i = 1; i <= n; i++) {
+          it = items[i]
+          sub(/^[[:space:]]+/, "", it)
+          sub(/[[:space:]]+$/, "", it)
+          if (length(it) >= 2) {
+            f = substr(it, 1, 1); l = substr(it, length(it), 1)
+            if ((f == "\"" && l == "\"") || (f == "\047" && l == "\047")) it = substr(it, 2, length(it) - 2)
+          }
+          if (length(it) > 0) print it
+        }
+        exit 0
+      }
       next
     }
     in_fm && in_covers {
@@ -84,16 +117,45 @@ parse_covers() {
   ' "$1" 2>/dev/null || true
 }
 
-# Is the `covers:` line a legal-but-empty form?
-# Matches: "covers:", "covers: ", "covers: []", "covers: [ ]"
+# Is the `covers:` line in the YAML frontmatter a legal-but-empty form?
+# Matches: "covers:", "covers: ", "covers: []", "covers: [ ]" — frontmatter only.
+# Body lines that look like the empty form (e.g., in code examples) are ignored.
 is_empty_covers_form() {
-  grep -qE '^covers[[:space:]]*:[[:space:]]*(\[[[:space:]]*\])?[[:space:]]*$' "$1" 2>/dev/null
+  awk '
+    BEGIN { fail = 1 }
+    { sub(/\r$/, "") }   # CRLF compat
+    NR==1 { if ($0 != "---") exit fail; in_fm=1; next }
+    in_fm && /^---[[:space:]]*$/ { exit fail }
+    in_fm && /^covers[[:space:]]*:[[:space:]]*(\[[[:space:]]*\])?[[:space:]]*(#.*)?$/ { fail = 0; exit fail }
+    END { exit fail }
+  ' "$1" 2>/dev/null
 }
 
-# Is the `covers:` line the intentional-untagged sentinel `covers: none`?
+# Is the frontmatter `covers:` value the intentional-untagged sentinel `covers: none`?
 # Case-insensitive. Accepts quoted (`"none"`, `'none'`) and trailing-comment forms.
+# Frontmatter only — body lines that look like the sentinel (e.g., in code examples) are ignored.
 is_covers_none() {
-  grep -qiE '^covers[[:space:]]*:[[:space:]]*("none"|'"'"'none'"'"'|none)[[:space:]]*(#.*)?$' "$1" 2>/dev/null
+  awk '
+    BEGIN { fail = 1 }
+    { sub(/\r$/, "") }   # CRLF compat
+    NR==1 { if ($0 != "---") exit fail; in_fm=1; next }
+    in_fm && /^---[[:space:]]*$/ { exit fail }
+    in_fm && /^covers[[:space:]]*:[[:space:]]*/ {
+      val = $0
+      sub(/^covers[[:space:]]*:[[:space:]]*/, "", val)
+      sub(/[[:space:]]*#.*$/, "", val)
+      sub(/[[:space:]]*$/, "", val)
+      n = length(val)
+      if (n >= 2) {
+        f = substr(val, 1, 1)
+        l = substr(val, n, 1)
+        if ((f == "\"" && l == "\"") || (f == "\047" && l == "\047")) val = substr(val, 2, n - 2)
+      }
+      if (tolower(val) == "none") fail = 0
+      exit fail
+    }
+    END { exit fail }
+  ' "$1" 2>/dev/null
 }
 
 # --- one-doc status ---
@@ -202,7 +264,7 @@ extract_loko_paths() {
     local path=""
     if printf '%s' "$bullet" | grep -qE '\]\([^)]*\.md'; then
       # Capture path up to `.md`; outer `[^)]*` consumes any #anchor / ?query / "title".
-      path=$(printf '%s' "$bullet" | sed -nE 's/.*\(([^)#?]*\.md)[^)]*\).*/\1/p' | head -1)
+      path=$(printf '%s' "$bullet" | sed -nE 's/.*\(([^)#?]*\.md)[^)]*\).*/\1/p' | awk 'NR==1{print;exit}')
     else
       path=$(printf '%s' "$bullet" | awk '{print $1}')
     fi
@@ -257,7 +319,7 @@ commits_recent() {
   [ -n "$raw" ] || return
   filtered=$(printf '%s\n' "$raw" | noise_filter || true)
   [ -n "$filtered" ] || filtered="$raw"
-  printf '%s\n' "$filtered" | head -n "$limit"
+  printf '%s\n' "$filtered" | awk -v n="$limit" 'NR>n{exit} 1'
 }
 
 # Mode: top N commits ranked by (files_changed * (insertions + deletions)).
@@ -299,7 +361,7 @@ commits_by_size() {
         score = files * (ins + del)
       }
       END { if (have) printf "%d\t%s %s (%s)\n", score, hash, subject, age }
-    ' | sort -rn | head -n "$limit" | cut -f2-
+    ' | sort -rn | awk -v n="$limit" 'NR>n{exit} 1' | cut -f2-
 }
 
 # Mode: up to N commits total, round-robin across each covered path.
@@ -356,23 +418,45 @@ list_loko_bullets_from_stdin() {
   '
 }
 
-# Extract concatenated bodies of every ## Session: entry from agent-session.md
-# (active log only — archives live in $ARCHIVE_DIR and are not consulted here).
-extract_session_bodies() {
-  local session="$1"
-  [ -f "$session" ] || return 0
+# Extract concatenated bodies of every ## Session: entry across BOTH the active
+# log AND archive files. Pre-check 2 (session-mention staleness) needs this
+# wider view because with default archive.keep=1, the active log holds at most
+# 1 session post-rotation — mentions from archived sessions would be invisible.
+_session_bodies_from_file() {
+  local file="$1"
+  [ -f "$file" ] || return 0
   awk '
     /^## Session:/ { in_session=1; next }
     in_session && /^## / && !/^## Session:/ { in_session=0 }
     in_session { print }
-  ' "$session" 2>/dev/null
+  ' "$file" 2>/dev/null
 }
 
-# Count current ## Session: entries in the active log.
-count_active_sessions() {
+extract_session_bodies() {
   local session="$1"
-  [ -f "$session" ] || { echo 0; return; }
-  awk '/^## Session:/{c++} END{print c+0}' "$session" 2>/dev/null
+  _session_bodies_from_file "$session"
+  local archive_dir="$DOCS_PATH/$ARCHIVE_DIR"
+  [ -d "$archive_dir" ] || return 0
+  find "$archive_dir" -type f -name '*.md' ! -name 'INDEX.md' 2>/dev/null | while IFS= read -r f; do
+    _session_bodies_from_file "$f"
+  done
+}
+
+# Count total ## Session: entries across active log AND archive files.
+# Used by wrap step 2c Pre-check 2's "skip if < 2 entries" gate. Active-only
+# count would die under default archive.keep=1.
+count_total_sessions() {
+  local session="$1"
+  local count=0
+  [ -f "$session" ] && count=$(awk '/^## Session:/{c++} END{print c+0}' "$session" 2>/dev/null)
+  local archive_dir="$DOCS_PATH/$ARCHIVE_DIR"
+  if [ -d "$archive_dir" ]; then
+    local arch_count
+    arch_count=$(find "$archive_dir" -type f -name '*.md' ! -name 'INDEX.md' -exec grep -c '^## Session:' {} \; 2>/dev/null \
+      | awk '{s+=$1} END{print s+0}')
+    count=$((count + arch_count))
+  fi
+  echo "$count"
 }
 
 # Emit one row per current LOKO bullet:
@@ -386,22 +470,31 @@ count_active_sessions() {
 #   established = commits_since_add >= 2.
 #
 # mentioned:
-#   yes = path or basename appears in any ## Session: body in the active log.
-#   no  = absent from every active-log session body.
+#   yes = path or basename appears in any ## Session: body across the active
+#         log AND archive files.
+#   no  = absent from every session body (active + archive).
 #
 # commits_since_add:
 #   integer count of commits to agent-session.md since the bullet was first
 #   introduced. -1 if the bullet appears in no committed version.
 loko_history() {
   local session_file="$DOCS_PATH/agent-session.md"
+  local session_file_rel="${session_file#$PROJECT_ROOT/}"
   [ -f "$session_file" ] || return 0
 
   local loko_paths
   loko_paths=$(list_loko_bullets | extract_loko_paths | awk '!seen[$0]++')
   [ -n "$loko_paths" ] || return 0
 
-  local active_bodies
-  active_bodies=$(extract_session_bodies "$session_file")
+  # Stash session bodies (active + archives) in a temp file. We grep against
+  # the FILE in the per-bullet loop, not via `printf "$var" | grep -qF`.
+  # Reason: `extract_session_bodies` can emit hundreds of KB once archives are
+  # included. With pipefail enabled, `grep -qF` exits early on a match → printf
+  # gets SIGPIPE → pipe returns 141 → the `if` reads it as false → `mentioned`
+  # was always reported as `no` regardless of whether the path was present.
+  local active_bodies_file
+  active_bodies_file=$(mktemp)
+  extract_session_bodies "$session_file" > "$active_bodies_file"
 
   # Walk commits oldest-first; for each commit, snapshot LOKO paths.
   # First time a path appears = its add-commit. Cache the add-commit per path.
@@ -411,23 +504,27 @@ loko_history() {
   # Use a temp file as a path → first-seen-commit map (bash 3.2 has no assoc arrays).
   local first_seen_file
   first_seen_file=$(mktemp)
-  trap 'rm -f "$first_seen_file"' RETURN
+  trap 'rm -f "$first_seen_file" "$active_bodies_file"' RETURN
 
   if [ -n "$commits" ]; then
     while IFS= read -r commit; do
       [ -n "$commit" ] || continue
       local snapshot_loko
-      snapshot_loko=$(cd "$PROJECT_ROOT" && git show "$commit:$session_file" 2>/dev/null \
+      snapshot_loko=$(cd "$PROJECT_ROOT" && { git show "$commit:$session_file_rel" 2>/dev/null \
         | list_loko_bullets_from_stdin \
         | extract_loko_paths \
-        | awk '!seen[$0]++')
+        | awk '!seen[$0]++'; } || true)
       [ -n "$snapshot_loko" ] || continue
       while IFS= read -r snap_p; do
         [ -n "$snap_p" ] || continue
         # Escape regex metachars in the path before grepping the tempfile,
         # so paths containing `.` `[` `*` etc. match literally.
-        if ! grep -qE "^[[:space:]]*$(printf '%s' "$snap_p" | sed 's/[][\\.*^$/]/\\&/g')[[:space:]]" "$first_seen_file" 2>/dev/null; then
-          printf '%s %s\n' "$snap_p" "$commit" >> "$first_seen_file"
+        # Tab-separator (not space) so paths containing spaces survive
+        # round-trip through the path→commit map. The duplicate check uses
+        # grep -F with an explicit tab so escaping regex metas in $snap_p
+        # is no longer needed.
+        if ! grep -qF -- "$(printf '%s\t' "$snap_p")" "$first_seen_file" 2>/dev/null; then
+          printf '%s\t%s\n' "$snap_p" "$commit" >> "$first_seen_file"
         fi
       done <<< "$snapshot_loko"
     done <<< "$commits"
@@ -436,21 +533,24 @@ loko_history() {
   while IFS= read -r p; do
     [ -n "$p" ] || continue
 
-    # mentioned: literal path OR basename anywhere in an active session body
+    # mentioned: literal path OR basename appearing as a WHOLE WORD in a
+    # session body (active log + archive files; see extract_session_bodies
+    # above). Word-boundary matching (-w) prevents false positives like
+    # `customapi.md` matching a LOKO bullet for `notes/api.md`.
     local mentioned=no
     local fname
     fname=$(basename "$p")
-    if [ -n "$active_bodies" ]; then
-      if printf '%s\n' "$active_bodies" | grep -qF "$p"; then
+    if [ -s "$active_bodies_file" ]; then
+      if grep -wqF "$p" "$active_bodies_file" 2>/dev/null; then
         mentioned=yes
-      elif printf '%s\n' "$active_bodies" | grep -qF "$fname"; then
+      elif grep -wqF "$fname" "$active_bodies_file" 2>/dev/null; then
         mentioned=yes
       fi
     fi
 
     # commits_since_add: look up first-seen commit, count commits since
     local add_commit=""
-    add_commit=$(awk -v p="$p" '$1 == p { print $2; exit }' "$first_seen_file" 2>/dev/null || true)
+    add_commit=$(awk -F'\t' -v p="$p" '$1 == p { print $2; exit }' "$first_seen_file" 2>/dev/null || true)
 
     local commits_since_add=-1
     if [ -n "$add_commit" ]; then
@@ -496,6 +596,9 @@ case "${1:-}" in
     ;;
   --loko-history)
     loko_history
+    ;;
+  --count-sessions)
+    count_total_sessions "$DOCS_PATH/agent-session.md"
     ;;
   --commits)
     shift

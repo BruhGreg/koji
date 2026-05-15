@@ -366,7 +366,7 @@ Options:
 If A or B, proceed to the remediation walkthrough (step 4).
 If C, exit.
 
-If no stale and no orphan docs, say `All tagged docs are fresh.` and exit.
+If no stale and no orphan docs, **AND at least one `fresh` row exists**, say `All tagged docs are fresh.` and exit. **Exception:** if only `exempt` (and no fresh/stale/orphan) rows exist, the step-2 edge case handler at the bottom of step 2 already printed the exempt footnote without claiming "fresh" — don't print this line here either (exempt docs aren't tracked for drift, so calling them "fresh" is misleading).
 
 ### 4. Remediation walkthrough
 

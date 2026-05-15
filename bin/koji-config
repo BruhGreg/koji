@@ -20,7 +20,10 @@ case "${1:-}" in
       echo "Error: key must contain only alphanumeric characters and underscores" >&2
       exit 1
     fi
-    grep -F "${KEY}:" "$CONFIG_FILE" 2>/dev/null | tail -1 | sed 's/^[^:]*:[[:space:]]*//' | sed 's/[[:space:]]*$//' | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/" | sed 's/\\"/"/g' || true
+    # Anchor to ^ to skip comments (`# KEY:`) and nested keys (`  KEY:`).
+    # Safe to interpolate $KEY into a regex because the validator above
+    # restricts it to [a-zA-Z0-9_]+ — no regex metachars possible.
+    grep -E "^${KEY}:" "$CONFIG_FILE" 2>/dev/null | tail -1 | sed 's/^[^:]*:[[:space:]]*//' | sed 's/[[:space:]]*$//' | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/" | sed 's/\\"/"/g' || true
     ;;
   set)
     KEY="${2:?Usage: koji-config set <key> <value>}"

@@ -9,7 +9,7 @@ allowed-tools:
   - Edit
   - Grep
   - Glob
-  - Agent
+  - AskUserQuestion
 ---
 
 # Session Wrap
@@ -113,7 +113,7 @@ Review the session for task-related changes: completed work, new tasks discovere
    - Add new tasks or tech debt discovered during the session
    - For completed tasks:
      - **If `$TODO_COMPLETED` is `inline`:** move to `## Completed` section, add `(YYYY-MM-DD)`
-     - **If `$TODO_COMPLETED` is `archive`:** move to `$DOCS_PATH/COMPLETED_TASKS.md` (create if needed, with header: `> Archive of completed work. For active work, see [TODO.md](TODO.md).`), remove from TODO file
+     - **If `$TODO_COMPLETED` is `archive`:** move to `$DOCS_PATH/COMPLETED_TASKS.md` (create if needed, with header: `> Archive of completed work. For active work, see [TODO.md](../TODO.md).`), remove from TODO file
    - Do NOT rewrite unchanged sections.
 
 2. **If `$HAS_TODO` is `false`:** This project doesn't have a TODO file yet. Create one at the **project root** (`$PROJECT_ROOT/$TODO_FILE`):
@@ -162,11 +162,19 @@ Each record is tab-separated: `<path>\t<status>\t<drift>\t<last_commit>\t<covers
 
 **Compute session context:**
 
+The session boundary lives in `$SESSION_START_FILE` (resolved by `koji-detect` to `~/.config/koji/sessions/<project>-<hash>/start` — global state, never in the repo). Read it — do NOT use `HEAD@{1}`, which is reflog movement (branch switches, rebases, amends all break it).
+
 ```bash
-TOUCHED=$(git diff --name-only HEAD 2>/dev/null; git log --name-only --format= HEAD@{1}..HEAD 2>/dev/null | sort -u)
+SESSION_START=$(cat "$SESSION_START_FILE" 2>/dev/null || true)
+if [ -n "$SESSION_START" ] && git rev-parse --verify "$SESSION_START" >/dev/null 2>&1; then
+  TOUCHED=$( (git diff --name-only "$SESSION_START..HEAD" 2>/dev/null; git diff --name-only HEAD 2>/dev/null) | sort -u)
+else
+  # Sentinel missing (/wrap without prior /kick-off) OR session-start commit was rewritten (rebase orphan). Degrade to working-tree only.
+  TOUCHED=$(git diff --name-only HEAD 2>/dev/null)
+fi
 ```
 
-Fall back to `git diff --name-only` against an available base if `HEAD@{1}` isn't usable.
+`$SESSION_START` (when set) is also used by Pass B below for `git log "$SESSION_START..HEAD"` subjects.
 
 ---
 
@@ -186,7 +194,7 @@ Pass B runs **unless** the session is genuinely empty (no commits this session, 
 
 **Signals available to Claude for Pass B:**
 
-- **This session's work**: commits made during this session (`git log HEAD@{1}..HEAD` subjects), lessons appended to `lessons.md` this wrap, and Claude's context of what was discussed / attempted / changed (already in Claude's working memory — no re-read needed).
+- **This session's work**: commits made during this session (`git log "$SESSION_START..HEAD"` subjects when `$SESSION_START` is set; otherwise rely on lessons + Claude's working memory), lessons appended to `lessons.md` this wrap, and Claude's context of what was discussed / attempted / changed (already in Claude's working memory — no re-read needed).
 - **Next-session mission**: the "Notes for Next Session" field wrap is writing (wrap has it in hand), `TODO.md` open items (if the file exists), and the starter prompt wrap is generating (same — in hand).
 
 **Candidate pool for Pass B**: every tagged doc *not* already in `## Load on Kick-Off` and *not* already a Pass A candidate. (No double-suggesting.) For each candidate, gather: path, `covers:` paths, and the first 3 non-empty body lines (to signal the doc's purpose).
@@ -248,7 +256,7 @@ For each LOKO entry where `presence=established` AND `mentioned=no`:
 
 Skip Pre-check 2 if any of:
 
-- The active log has fewer than 2 `## Session:` entries (cold start; no signal yet).
+- Fewer than 2 total `## Session:` entries exist across the active log AND archive files (cold start; no signal yet). Count via `~/.claude/skills/koji/bin/koji-doc-status --count-sessions`. The active-log-only count would die under default `archive.keep=1` because rotation leaves at most 1 entry in the active log post-archive.
 - The helper returns no rows (LOKO empty or helper errored).
 - The doc was already flagged by the temp-doc pre-check above (no double-tagging).
 
@@ -315,7 +323,7 @@ Options:
 
 Omit B if no adds, omit C if no removes, omit A/B/C as redundant if either bucket is empty (collapses to the obvious one-bucket prompt).
 
-**Non-interactive fallback — auto mode, or any reason `AskUserQuestion` should not fire:**
+**Non-interactive fallback — ONLY when `AskUserQuestion` is not callable in this runtime** (e.g., the tool is absent from the available tool list, or the session is in a spawned/headless mode that lacks prompt support). Do NOT use this branch just because changes look "obvious" or "low-risk" — if AskUserQuestion is callable, fire it.
 
 The proposal text already printed. Decide what to apply automatically:
 
@@ -349,9 +357,7 @@ Skip either line if its bucket is empty. If nothing was applied and nothing is a
 3. Preserve formatting of unaffected lines: bullet style, links, indentation, comments.
 4. Do NOT delete the H2 itself even if the section ends up empty — leave the heading + any HTML comments. Kick-off treats an empty section as a no-op.
 
-**Report**:
-
-> Updated Load on Kick-Off: added <X> doc(s) (<Xa> reactive, <Xb> theme-based), removed <Y> doc(s).
+(The single summary line emitted earlier — `Updated ## Load on Kick-Off: +X, -Y. To revert: …` — is the only post-apply output. Do not emit a second per-bullet "Report" block here. One line, then move on.)
 
 ### Cold-start behavior (explicit)
 
@@ -489,6 +495,13 @@ Check if `.claude/settings.local.json` exists. If it does:
      **Done — two commits total.**
 
 4. **After committing**, run `git status`. If the worktree is clean, move on. If there are unexpected leftover changes, **report them to the user** but do NOT create additional commits. Let the user decide in the next step or manually.
+
+5. **Delete the session-start sentinel** so the next `/kick-off` creates a fresh boundary:
+   ```bash
+   rm -f "$SESSION_START_FILE"
+   rmdir "$SESSION_DIR" 2>/dev/null || true
+   ```
+   Idempotent — no error if already gone. The `rmdir` removes the per-project sessions directory if empty (no-op if other state lives there). Runs unconditionally at end of Step 5 (even if no commit was made). The next session must `/kick-off` to re-establish the boundary; otherwise the next `/wrap` degrades to working-tree-only diff (Pass A weakens, other passes unaffected).
 
 ---
 

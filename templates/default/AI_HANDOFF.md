@@ -1,6 +1,6 @@
 # AI Handoff
 
-> Open tasks: [TODO.md](TODO.md) | Completed archive: see TODO.md § Completed
+> Open tasks: [TODO.md](../TODO.md) | Completed archive: see TODO.md § Completed
 
 ## 1. Project Status
 

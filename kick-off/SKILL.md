@@ -125,6 +125,108 @@ It moves any `## Load on Kick-Off` section from `AI_HANDOFF.md` into `agent-sess
 - If `KOJI_MIGRATED_LOAD_KO=cleanup`: print `$KOJI_MIGRATION_MSG` once (stray duplicate stripped), continue.
 - If `KOJI_MIGRATED_LOAD_KO=false`: silent, continue.
 
+### 0e. Record session start
+
+Write a session-start sentinel so `/wrap` can find "files touched this session" deterministically. Do NOT rely on `HEAD@{1}` — that's reflog movement (branch switches, rebases, amends all break it), not a session boundary.
+
+The sentinel lives at `$SESSION_START_FILE` (resolved by `koji-detect` to `~/.config/koji/sessions/<project>-<hash>/start`). Global state, NEVER in the repo, so it can't be committed by accident.
+
+```bash
+mkdir -p "$SESSION_DIR"
+if [ ! -f "$SESSION_START_FILE" ]; then
+  # Use --verify so empty repos (no HEAD yet) skip cleanly. Without --verify,
+  # `git rev-parse HEAD` in an empty repo prints the literal string "HEAD" to
+  # stdout (with a fatal error to stderr) and exits 128 — both swallowed by
+  # 2>/dev/null and || true, leaving "HEAD" in the sentinel file. Later /wrap
+  # then resolves "HEAD" against any commit and produces an empty diff,
+  # silently masking the entire first session's work.
+  if HEAD_SHA=$(git rev-parse --verify HEAD 2>/dev/null); then
+    printf '%s\n' "$HEAD_SHA" > "$SESSION_START_FILE"
+  fi
+fi
+```
+
+**First-write-wins:** if the file already exists (a previous `/kick-off` was not followed by `/wrap`), do NOT overwrite — the real session start is preserved across accidental re-kick-offs. `/wrap` deletes the file at end-of-session, so the next `/kick-off` creates a fresh marker.
+
+**Empty-repo behavior:** if the project has no commits yet (no HEAD), the sentinel is NOT written this kick-off — the next `/kick-off` after the first commit will write it cleanly. /wrap in the meantime degrades to working-tree-only diff (Pass A weakens, other passes unaffected).
+
+### 0f. CLAUDE.md old-block migration
+
+Earlier koji versions (< v0.5.0) wrote a 3-instruction auto-read block into project `CLAUDE.md`. That block had two problems: (a) it duplicated `/kick-off`'s job (loaded handoff/TODO/lessons without migrations / budget warnings / drift coverage), and (b) it pointed `TODO.md` to `$DOCS_DIR/TODO.md` when TODO.md is canonically at project root — a failed read at every session start. Current `/koji-init` writes a pointer-only block. This step migrates existing projects.
+
+Detect the old block:
+
+```bash
+OLD_BLOCK_DETECTED=false
+if [ -f "$PROJECT_ROOT/CLAUDE.md" ] && awk '
+  /^## Session Management \(koji\)/ { in_block=1; next }
+  in_block && /^## / { in_block=0 }
+  in_block && /^On session start:/ { found=1 }
+  END { exit found ? 0 : 1 }
+' "$PROJECT_ROOT/CLAUDE.md" 2>/dev/null; then
+  OLD_BLOCK_DETECTED=true
+fi
+
+CLAUDE_MD_DECLINED=$(~/.claude/skills/koji/bin/koji-config get "claude_md_migration_declined_$SESSION_HASH" 2>/dev/null || true)
+```
+
+If `OLD_BLOCK_DETECTED=true` AND `CLAUDE_MD_DECLINED` is not `true`, use AskUserQuestion:
+
+> Found old koji `## Session Management (koji)` block in CLAUDE.md with 3 auto-read instructions (one of which points TODO.md to the wrong path). Modern koji uses a pointer-only block that defers to `/kick-off` for context loading. Migrate?
+
+Options:
+- **A) Migrate now** (recommended) — replace the block with the pointer-only version
+- **B) Skip this time** — ask again next kick-off
+- **C) Decline permanently for this project** — never ask again
+
+**If A**, rewrite the block atomically:
+
+```bash
+NEW_BLOCK_FILE=$(mktemp)
+CLAUDE_TMP=$(mktemp "$PROJECT_ROOT/CLAUDE.md.XXXXXX")
+cat > "$NEW_BLOCK_FILE" <<EOF
+## Session Management (koji)
+
+Session docs in \`$DOCS_DIR/\` (handoff, lessons, session log + Load on Kick-Off) and \`$TODO_FILE\` at project root. Use \`/kick-off\` to start a session, \`/wrap\` to end, \`/take-note\` mid-session.
+EOF
+
+awk -v new_block_file="$NEW_BLOCK_FILE" '
+  BEGIN {
+    while ((getline line < new_block_file) > 0) {
+      new_block = (new_block == "" ? line : new_block ORS line)
+    }
+    close(new_block_file)
+  }
+  /^## Session Management \(koji\)/ {
+    print new_block
+    print ""
+    in_block=1
+    next
+  }
+  in_block && /^## / { in_block=0 }
+  !in_block { print }
+' "$PROJECT_ROOT/CLAUDE.md" > "$CLAUDE_TMP" \
+  && mv "$CLAUDE_TMP" "$PROJECT_ROOT/CLAUDE.md" \
+  || { rm -f "$CLAUDE_TMP" "$NEW_BLOCK_FILE"; echo "ERROR: migration failed; CLAUDE.md unchanged" >&2; return 1 2>/dev/null || exit 1; }
+rm -f "$NEW_BLOCK_FILE"
+```
+
+Where `$CLAUDE_TMP` was created right before the awk via `CLAUDE_TMP=$(mktemp "$PROJECT_ROOT/CLAUDE.md.XXXXXX")` — using `mktemp` (not a fixed `.tmp` name) so concurrent runs of `/kick-off` can't clobber each other's in-flight rewrites, and so a partial rewrite leaves a uniquely-named temp file rather than corrupting `CLAUDE.md` directly. The `||` cleanup ensures failed writes don't leak the temp.
+
+Tell the user (only after the `mv` succeeded): `Migrated CLAUDE.md to pointer-only koji block.`
+
+**If B**: do nothing this session — the check fires again next kick-off.
+
+**If C**: persist the decline so this prompt never fires again for this project:
+
+```bash
+~/.claude/skills/koji/bin/koji-config set "claude_md_migration_declined_$SESSION_HASH" true
+```
+
+Tell the user: `Won't ask again FOR THIS PROJECT. Edit CLAUDE.md manually if you change your mind, or unset with: koji-config set claude_md_migration_declined_$SESSION_HASH false`
+
+(The `$SESSION_HASH` namespacing means this decline only applies to this project. Other koji projects keep getting the prompt until they decline themselves.)
+
 ### 1. Check for user-provided focus
 
 If the user typed text after `/kick-off` (e.g., `/kick-off build the news landing page`), use that as the **session focus** — skip reading the last session's starter prompt and use the user's intent instead. Still read handoff and lessons for context.
@@ -149,7 +251,8 @@ Three tiers of additional context. No config needed — triggers are automatic.
 Run:
 
 ```bash
-CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "detached")
+CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
+[ -n "$CURRENT_BRANCH" ] || CURRENT_BRANCH="detached"   # --show-current prints empty (not non-zero) on detached HEAD
 UNCOMMITTED=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
 ACTIVE_PLANS=$(ls "$PROJECT_ROOT/.claude/plans/" 2>/dev/null | grep -c '\.md$' || echo 0)
 echo "Branch: $CURRENT_BRANCH"
@@ -219,7 +322,22 @@ The section is optional. If it's absent, skip this entire step silently. Bullets
 
 ```bash
 LOKO_REPORT=$(~/.claude/skills/koji/bin/koji-doc-status --load-on-kickoff 2>/dev/null || true)
-STALE_ACTION=$(grep -E '^[[:space:]]*stale_action[[:space:]]*:' "$PROJECT_ROOT/.koji.yaml" 2>/dev/null | head -1 | sed -E 's/.*:[[:space:]]*([a-z_]+).*/\1/' || true)
+STALE_ACTION=$(awk '
+  /^docs:[[:space:]]*(#.*)?$/ { in_docs=1; next }
+  /^[^[:space:]]/ && !/^docs:/ { in_docs=0 }
+  in_docs && /^[[:space:]]+stale_action[[:space:]]*:/ {
+    sub(/^[[:space:]]+stale_action[[:space:]]*:[[:space:]]*/, "")
+    sub(/[[:space:]]+#.*$/, "")
+    sub(/[[:space:]]*$/, "")
+    # Strip surrounding quotes (YAML allows `stale_action: "skip"`)
+    n = length($0)
+    if (n >= 2) {
+      f = substr($0, 1, 1); l = substr($0, n, 1)
+      if ((f == "\"" && l == "\"") || (f == "\047" && l == "\047")) $0 = substr($0, 2, n - 2)
+    }
+    print; exit
+  }
+' "$PROJECT_ROOT/.koji.yaml" 2>/dev/null | grep -E '^[a-z_]+$' || true)
 [ -n "${STALE_ACTION:-}" ] || STALE_ACTION=warn
 ```
 

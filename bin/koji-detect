@@ -72,36 +72,61 @@ _resolve() {
 }
 
 # --- Emit variables ---
-echo "PROJECT_ROOT=\"$PROJECT_ROOT\""
-echo "PROJECT_NAME=\"$PROJECT_NAME\""
-echo "KOJI_SKILLS=\"$KOJI_SKILLS\""
+# Safe emission: use printf %q so values are escaped for safe sourcing.
+# Without this, a path or config value containing $(), backticks, or quotes
+# would execute as code when the caller does `eval "$(koji-detect)"`.
+_emit() { printf '%s=%q\n' "$1" "$2"; }
+
+_emit PROJECT_ROOT "$PROJECT_ROOT"
+_emit PROJECT_NAME "$PROJECT_NAME"
+_emit KOJI_SKILLS "$KOJI_SKILLS"
 
 DOCS_DIR="$(_resolve "docs_dir" "docs")"
-echo "DOCS_DIR=\"$DOCS_DIR\""
-echo "DOCS_PATH=\"$PROJECT_ROOT/$DOCS_DIR\""
+_emit DOCS_DIR "$DOCS_DIR"
+_emit DOCS_PATH "$PROJECT_ROOT/$DOCS_DIR"
 
-echo "TEMPLATE=\"$(_resolve "template" "default")\""
+_emit TEMPLATE "$(_resolve "template" "default")"
 
-echo "ARCHIVE_STRATEGY=\"$(_resolve "archive.strategy" "numbered")\""
-echo "ARCHIVE_THRESHOLD=\"$(_resolve "archive.threshold" "5")\""
-echo "ARCHIVE_KEEP=\"$(_resolve "archive.keep" "1")\""
-echo "ARCHIVE_DIR=\"$(_resolve "archive.dir" "sessions")\""
+_emit ARCHIVE_STRATEGY "$(_resolve "archive.strategy" "numbered")"
+_emit ARCHIVE_THRESHOLD "$(_resolve "archive.threshold" "5")"
+_emit ARCHIVE_KEEP "$(_resolve "archive.keep" "1")"
+_emit ARCHIVE_DIR "$(_resolve "archive.dir" "sessions")"
 
-echo "SESSION_FILE=\"agent-session.md\""
-echo "HANDOFF_FILE=\"AI_HANDOFF.md\""
-echo "LESSONS_FILE=\"lessons.md\""
+_emit SESSION_FILE "agent-session.md"
+_emit HANDOFF_FILE "AI_HANDOFF.md"
+_emit LESSONS_FILE "lessons.md"
 
-echo "WRAP_STARTER=\"$(_resolve "wrap.starter_prompt" "true")\""
+_emit WRAP_STARTER "$(_resolve "wrap.starter_prompt" "true")"
 
 # Commit strategy preference (persisted via koji-config)
 COMMIT_STRATEGY="$("$KOJI_SKILLS/bin/koji-config" get commit_strategy 2>/dev/null || true)"
-echo "COMMIT_STRATEGY=\"$COMMIT_STRATEGY\""
+_emit COMMIT_STRATEGY "$COMMIT_STRATEGY"
 
 # Agents list
 AGENTS="$(_yaml_list "$PROJECT_CONFIG" "agents")"
 [ -z "$AGENTS" ] && AGENTS="$(_yaml_list "$GLOBAL_CONFIG" "agents")"
 [ -z "$AGENTS" ] && AGENTS="Claude"
-echo "AGENTS=\"$AGENTS\""
+_emit AGENTS "$AGENTS"
+
+# Global session-state path (per-project keyed). Lives OUTSIDE the repo so it
+# can't be committed by accident. /kick-off writes "start" with the session's
+# starting git rev; /wrap reads it and removes it on completion.
+KOJI_STATE_DIR="${KOJI_STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/koji}"
+# Hash the project root for SESSION_DIR uniqueness. md5 is macOS-native;
+# md5sum is GNU coreutils; shasum is in macOS + most Linux (perl-based);
+# cksum is POSIX. Cascade through them so the hash is never empty —
+# an empty hash would let two projects with the same basename collide on
+# the same SESSION_DIR (Alpine/busybox repro: no md5 AND no md5sum).
+_SESSION_HASH=$(printf '%s' "$PROJECT_ROOT" | (md5 2>/dev/null || md5sum 2>/dev/null | cut -d' ' -f1) | head -c 8)
+[ -n "$_SESSION_HASH" ] || _SESSION_HASH=$(printf '%s' "$PROJECT_ROOT" | shasum 2>/dev/null | cut -d' ' -f1 | head -c 8)
+[ -n "$_SESSION_HASH" ] || _SESSION_HASH=$(printf '%s' "$PROJECT_ROOT" | cksum 2>/dev/null | cut -d' ' -f1)
+[ -n "$_SESSION_HASH" ] || _SESSION_HASH="nohash"
+SESSION_DIR="$KOJI_STATE_DIR/sessions/$(basename "$PROJECT_ROOT")-$_SESSION_HASH"
+SESSION_START_FILE="$SESSION_DIR/start"
+_emit KOJI_STATE_DIR "$KOJI_STATE_DIR"
+_emit SESSION_HASH "$_SESSION_HASH"
+_emit SESSION_DIR "$SESSION_DIR"
+_emit SESSION_START_FILE "$SESSION_START_FILE"
 
 # TODO config — resolve file name with auto-detection cascade:
 # 1. Explicit .koji.yaml config (todo.file)
@@ -135,10 +160,10 @@ else
   TODO_PATH="$PROJECT_ROOT/$TODO_FILE"
 fi
 
-echo "TODO_FILE=\"$TODO_FILE\""
-echo "TODO_PATH=\"$TODO_PATH\""
-echo "TODO_COMPLETED=\"$TODO_COMPLETED\""
-echo "TODO_NEEDS_MIGRATION=\"${TODO_NEEDS_MIGRATION:-false}\""
+_emit TODO_FILE "$TODO_FILE"
+_emit TODO_PATH "$TODO_PATH"
+_emit TODO_COMPLETED "$TODO_COMPLETED"
+_emit TODO_NEEDS_MIGRATION "${TODO_NEEDS_MIGRATION:-false}"
 
 # State checks
 [ -f "$PROJECT_CONFIG" ] && echo "HAS_PROJECT_CONFIG=true" || echo "HAS_PROJECT_CONFIG=false"

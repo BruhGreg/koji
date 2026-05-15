@@ -41,34 +41,64 @@ fi
 # Extract the block (heading + body).
 BLOCK=$(sed -n "${START},${END}p" "$HANDOFF")
 
-# If the section already exists in agent-session.md, drop the stray copy from handoff.
+# Helper: rewrite a file via sed-strip + blank-line-collapse, atomically.
+# Uses mktemp (not fixed .tmp suffix) so concurrent runs can't collide, and
+# only mv-promotes the temp to the target after both transforms succeed.
+_strip_and_collapse() {
+  local target="$1" first="$2" last="$3"
+  local tmp
+  tmp=$(mktemp "${target}.XXXXXX")
+  if sed "${first},${last}d" "$target" \
+     | awk 'BEGIN{blank=0} /^$/{blank++; if(blank<=1) print; next} {blank=0; print}' \
+     > "$tmp"; then
+    mv "$tmp" "$target"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+# If the section already exists in agent-session.md:
 if grep -q '^## Load on Kick-Off[[:space:]]*$' "$SESSION" 2>/dev/null; then
-  sed "${START},${END}d" "$HANDOFF" > "$HANDOFF.tmp"
-  # Collapse runs of blank lines down to one.
-  awk 'BEGIN{blank=0} /^$/{blank++; if(blank<=1) print; next} {blank=0; print}' "$HANDOFF.tmp" > "$HANDOFF"
-  rm -f "$HANDOFF.tmp"
+  # Refuse silent cleanup if the two copies have different content — that
+  # would silently lose user data. Compare body bytes (ignoring blank lines).
+  HANDOFF_BODY=$(printf '%s\n' "$BLOCK" | sed -n '2,$p' | grep -v '^[[:space:]]*$' 2>/dev/null || true)
+  SESSION_BODY=$(awk '/^## Load on Kick-Off[[:space:]]*$/{f=1;next} f && /^## /{exit} f' "$SESSION" 2>/dev/null | grep -v '^[[:space:]]*$' 2>/dev/null || true)
+  if [ -n "$HANDOFF_BODY" ] && [ "$HANDOFF_BODY" != "$SESSION_BODY" ]; then
+    echo "KOJI_MIGRATED_LOAD_KO=false"
+    echo "KOJI_MIGRATION_MSG=\"Both AI_HANDOFF.md and agent-session.md have '## Load on Kick-Off' sections with DIFFERENT content. Refusing to auto-merge — resolve manually.\""
+    exit 0
+  fi
+  # Safe to drop from handoff (empty body OR identical content).
+  _strip_and_collapse "$HANDOFF" "$START" "$END"
   echo "KOJI_MIGRATED_LOAD_KO=cleanup"
   echo "KOJI_MIGRATION_MSG=\"Load on Kick-Off already in agent-session.md; removed stray copy from AI_HANDOFF.md\""
   exit 0
 fi
 
-# Insert above the first `## Session:` heading, or append if none.
+# Insert above the first `## Session:` heading, or append if none. Use mktemp
+# (not $SESSION.tmp) so concurrent runs don't collide, and mv only on success.
 FIRST_SESSION=$(grep -n '^## Session:' "$SESSION" 2>/dev/null | head -1 | cut -d: -f1 || true)
 
 if [ -n "$FIRST_SESSION" ]; then
-  {
+  STMP=$(mktemp "${SESSION}.XXXXXX")
+  if {
     head -n $((FIRST_SESSION - 1)) "$SESSION"
     printf '%s\n\n---\n\n' "$BLOCK"
     tail -n +"$FIRST_SESSION" "$SESSION"
-  } > "$SESSION.tmp" && mv "$SESSION.tmp" "$SESSION"
+  } > "$STMP"; then
+    mv "$STMP" "$SESSION"
+  else
+    rm -f "$STMP"
+    echo "KOJI_MIGRATED_LOAD_KO=false"
+    exit 1
+  fi
 else
   printf '\n%s\n' "$BLOCK" >> "$SESSION"
 fi
 
-# Strip block from handoff and collapse blank-line runs.
-sed "${START},${END}d" "$HANDOFF" > "$HANDOFF.tmp"
-awk 'BEGIN{blank=0} /^$/{blank++; if(blank<=1) print; next} {blank=0; print}' "$HANDOFF.tmp" > "$HANDOFF"
-rm -f "$HANDOFF.tmp"
+# Strip block from handoff (atomic via mktemp helper).
+_strip_and_collapse "$HANDOFF" "$START" "$END"
 
 echo "KOJI_MIGRATED_LOAD_KO=true"
 echo "KOJI_MIGRATION_MSG=\"Moved '## Load on Kick-Off' from AI_HANDOFF.md to agent-session.md (v0.4.3)\""
