@@ -1,5 +1,5 @@
 ---
-description: "Walks a /duet-plan locked plan gate-by-gate with codex single-review per gate, then /duet-review on the full diff. Invocation requires the 'duet' keyword."
+description: "Walks a saved plan through strategic gates (foundation, mid-term, final) with codex single-review per gate, then /duet-review on the full diff. Invocation requires the 'duet' keyword."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools:
@@ -19,7 +19,7 @@ allowed-tools:
 
 Use ONLY when the user explicitly types `/duet-impl`, says "duet impl", "duet-impl", "let's duet implement", or similar — the `duet` keyword is required. Do NOT invoke on casual "let's implement" phrases. On review fail: fix-and-retry up to 2 times, then consult codex once, then escalate to user.
 
-Walks a locked plan from `/duet-plan` (or any plan with `<!-- gate: NAME -->` markers) gate by gate. For each segment: implement the work, then run codex single-review on the segment's diff. At end of the run, run `/duet-review` for the 2-reviewer adversarial pass.
+Walks a saved plan from `/duet-plan` (or any structured plan) through strategic gates. For each gate: implement the work, then run codex single-review on the gate's diff. At end of the run, run `/duet-review` for the 2-reviewer adversarial pass. See **Gating Strategy** below for how gates are placed — they are strategic checkpoints, not exhaustive per-step reviews.
 
 ## Preamble
 
@@ -47,7 +47,32 @@ Flags:
 
 **Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens) for each gate review. Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick gates", "lighter review", "use high effort", "save tokens". Don't downgrade for "the gate diff looks small"; only on explicit user signal. Claude inherits the parent session's effort level.
 
-## Step 1 — Parse the plan
+## Gating Strategy
+
+Gates are **strategic checkpoints**, not exhaustive per-step reviews. The default decomposition for a plan with `N` steps:
+
+- **Foundation gate** — after foundation work lands (scaffolding with no standalone behavior: new types, trait-shape changes, mechanical stubs that just make the workspace compile). Validates the base before downstream depends on it.
+- **Mid-term gate(s)** — at risk inflection points in the bulk work, typically ~halfway through the post-foundation steps. Catches direction issues before compound drift across the back half.
+- **Final `/duet-review`** — comprehensive adversarial pass on the cumulative diff (Step 3 below).
+
+Common shape for medium-large plans (10–20 steps): **2 codex single-review gates + 1 final `/duet-review`**, not one gate per step.
+
+Adjust:
+- **Add gates** when an inflection point doesn't fit "halfway" — e.g., right before a step that crosses a layer boundary (engine ↔ frontend), or right after a step that establishes a pattern for many subsequent steps.
+- **Remove gates** for very small plans (<5 steps) where foundation + final `/duet-review` is enough.
+
+**Anti-pattern: one gate per step.** Codex single-review at every step is expensive, fatigues the reviewer, and produces noise that obscures the high-signal findings. Reserve exhaustive coverage for the final `/duet-review`.
+
+The agent decides gate placement by reading the plan and identifying:
+1. Where foundation work ends (cutoff before behavioral changes begin)
+2. Midpoint(s) of the post-foundation steps, or natural inflection points (layer boundaries, pattern-establishing steps)
+3. End of plan → final `/duet-review`
+
+For plans with `<!-- gate: NAME -->` markers, honor them as explicit boundaries. For plans without markers (the common case), derive boundaries from structure: numbered `### Step N` headings, sectional H2/H3 breaks, or the agent's reading of natural cohesion.
+
+## Step 1 — Identify gates from the plan
+
+The agent reads the plan and decides gate placement per the **Gating Strategy** above. This is a judgment call from plan structure — no parser tool.
 
 ```bash
 PLAN_FILE="<resolved-path>"
@@ -57,10 +82,6 @@ PLAN_FILE="<resolved-path>"
 START_SHA=$(git rev-parse --verify HEAD 2>/dev/null) || { echo "ERROR: no commits yet"; exit 1; }
 RUN_DIR=$(mktemp -d -t duet-impl-XXXXXX)
 
-# Parse segments
-~/.claude/skills/koji/bin/koji-duet-impl-parse --plan "$PLAN_FILE" > "$RUN_DIR/segments.json"
-~/.claude/skills/koji/bin/koji-duet-impl-parse --plan "$PLAN_FILE" --summary
-
 # Effort: see "Codex effort" in Flags above for the opt-down rule.
 EFFORT="${EFFORT:-xhigh}"
 TIMEOUT="${TIMEOUT:-1800}"
@@ -68,9 +89,15 @@ RETRIES="${RETRIES:-2}"
 echo "Start SHA: $START_SHA | Run dir: $RUN_DIR | Effort: $EFFORT | Retries/gate: $RETRIES"
 ```
 
+Then **read the plan** (via the `Read` tool), identify the natural gate boundaries, and announce the proposed gate plan in one sentence before Step 2 begins. Example:
+
+> "Plan has foundation prelude + 11 numbered steps. Proposing 3 gates: Foundation (after types + mechanical stubs), Mid-term (after Step 6), Final `/duet-review` (after Step 11)."
+
+The user can redirect the gate plan before any work starts. Each gate becomes a "segment" used by Step 2 — gate name + the plan text governing that segment's scope.
+
 ## Step 2 — Walk gates
 
-For each segment in `segments.json` (in order):
+For each gate (in the order identified in Step 1):
 
 ### 2a. Skip if `--from-gate` says so
 
@@ -84,12 +111,12 @@ FROM_GATE_REACHED=1
 
 ### 2b. Implement the segment
 
-The agent reads `segment.text` and executes the described work using Edit/Write/Bash tools. This is the part where /duet-impl effectively does the coding — the plan tells *what*, the agent figures out *how* (file paths, edits, test runs).
+The agent reads the gate's governing plan text and executes the described work using Edit/Write/Bash tools. This is the part where /duet-impl effectively does the coding — the plan tells *what*, the agent figures out *how* (file paths, edits, test runs).
 
 Concretely the agent should:
-1. Read the segment text. Identify concrete file edits, new files, dependency changes, test additions.
+1. Re-read the plan section(s) for this gate. Identify concrete file edits, new files, dependency changes, test additions.
 2. Make the changes via Edit/Write tools.
-3. If the segment specifies running tests/commands, run them via Bash.
+3. If the plan specifies running tests/commands, run them via Bash.
 4. Capture a snapshot SHA for diff computation:
    ```bash
    SEGMENT_START_SHA="${PREV_GATE_SHA:-$START_SHA}"
@@ -106,7 +133,7 @@ SEGMENT_DIFF_FILE="$RUN_DIR/diff-${gate_name}.patch"
 git diff "$SEGMENT_START_SHA" -- > "$SEGMENT_DIFF_FILE"   # working-tree diff since segment start
 
 GATE_PROMPT_TEMPLATE="$KOJI_SKILLS/duet-impl/references/gate-review-prompt.md"
-PHASE_TEXT="<segment.text>"  # from segments.json
+PHASE_TEXT="<plan text for this gate — agent extracts from the plan file>"
 
 CODEX_PROMPT="$(awk '/^## Reviewer prompt/,/^## Implementer-side/' "$GATE_PROMPT_TEMPLATE" | sed -n '/^```/,/^```/p' | sed '1d;$d')
 
@@ -226,7 +253,6 @@ If any gate escalated, mention which one and how the user resolved it.
 
 | Symptom | Cause | Mitigation |
 |---|---|---|
-| Plan parser returns 0 segments | Plan file is empty, or only gate markers with no text | Surface error, exit |
 | Codex review at gate hangs | `--enable web_search_cached` re-introduced, or stdin not closed | Skill explicitly drops both — verify bash not modified |
 | Codex exits 124 at a gate | Gate diff too large or `xhigh` exceeded 30-min wall | Re-run with `--retries 1` (faster fail) and smaller gate scopes |
 | Implementer-applied fix doesn't compile | Suggested_fix.details was wrong for the actual context | Counts as a retry attempt; codex's next review will flag the new issue. Up to budget |
@@ -237,6 +263,5 @@ If any gate escalated, mention which one and how the user resolved it.
 
 - Autonomy principle: [../references/agent-autonomy.md](../references/agent-autonomy.md)
 - Gate review prompt: [references/gate-review-prompt.md](references/gate-review-prompt.md)
-- Plan parser: [koji/bin/koji-duet-impl-parse](../bin/koji-duet-impl-parse)
-- Upstream producer: `/duet-plan` writes the locked plan files `/duet-impl` consumes
+- Upstream producer: `/duet-plan` saves the plan files `/duet-impl` consumes
 - End-of-run pass: `/duet-review` provides the 2-reviewer adversarial verdict

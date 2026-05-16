@@ -1,5 +1,5 @@
 ---
-description: "Multi-round Claude↔codex planning dialogue. Locks the agreed plan to $DOCS_PATH/plans/. Invocation requires the 'duet' keyword."
+description: "Multi-round Claude↔codex planning dialogue. Saves the agreed plan to $DOCS_PATH/plans/. Invocation requires the 'duet' keyword."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools:
@@ -19,7 +19,7 @@ allowed-tools:
 
 Use ONLY when the user explicitly types `/duet-plan`, says "duet plan", "duet-plan", "let's duet plan X", or similar — the `duet` keyword is required. Do NOT invoke on casual "let's plan" or "help me plan" phrases (too generic). Agents debate autonomously; user is escalated only when consensus stalls at the round limit.
 
-Multi-round Claude↔codex planning dialogue. Each round, Claude drafts/updates a plan and codex critiques. The skill detects consensus via `VERDICT:` markers; when both agents emit `AGREE` in the same round, the plan is locked to `$DOCS_PATH/plans/<slug>.md`. Process artifacts (round drafts and critiques) stay in `/tmp` and are cleaned up at end of run.
+Multi-round Claude↔codex planning dialogue. Each round, Claude drafts/updates a plan and codex critiques. The skill detects consensus via `VERDICT:` markers; when both agents emit `AGREE` in the same round, the plan is saved to `$DOCS_PATH/plans/<slug>.md`. Process artifacts (round drafts and critiques) stay in `/tmp` and are cleaned up at end of run.
 
 ## Preamble
 
@@ -206,23 +206,53 @@ Options:
   4. "Abort and discard"
 ```
 
-## Step 3 — Lock the plan
+## Step 3 — Save the plan
 
 When CONSENSUS=1 (or user picked option 1 or 2 above):
 
 ```bash
 PLANS_DIR="$DOCS_PATH/plans"
-~/.claude/skills/koji/bin/koji-duet-plan-lock \
-  --plan "$RUN_DIR/round-${ROUND}-claude.md" \
-  --topic "$TOPIC" \
-  --rounds "$ROUND" \
-  --claude-verdict "$CLAUDE_V" \
-  --codex-verdict "$CODEX_V" \
-  --plans-dir "$PLANS_DIR" \
-  ${SLUG:+--slug "$SLUG"}
+mkdir -p "$PLANS_DIR"
+
+# Auto-derive slug from topic if not provided via --slug
+SLUG="${SLUG:-$(printf '%s' "$TOPIC" | tr '[:upper:]' '[:lower:]' \
+  | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60)}"
+[ -n "$SLUG" ] || SLUG="untitled-plan"
+
+# Auto-suffix on conflict (<slug>.md → <slug>-2.md → -3, etc.)
+OUT="$PLANS_DIR/$SLUG.md"
+N=2
+while [ -e "$OUT" ]; do
+  OUT="$PLANS_DIR/${SLUG}-${N}.md"
+  N=$((N + 1))
+done
+
+# Strip trailing VERDICT line(s) from the agreed plan body so the saved file is clean.
+PLAN_BODY=$(python3 -c "
+import re, sys
+content = open('$RUN_DIR/round-${ROUND}-claude.md').read()
+lines = content.rstrip('\n').splitlines()
+while lines and (not lines[-1].strip() or re.match(r'^\s*VERDICT\s*:', lines[-1], re.I)):
+    lines.pop()
+print('\n'.join(lines))
+")
+
+# Save with minimal frontmatter inline (status field feeds koji-plans-research).
+DATE=$(date -u +%Y-%m-%d)
+cat > "$OUT" <<EOF
+---
+status: pending
+origin-session: $DATE
+target: implementation
+---
+
+$PLAN_BODY
+EOF
+
+echo "Plan saved: $OUT"
 ```
 
-The helper prints the locked file path on stdout. Capture and report to user.
+Report the saved path to the user.
 
 ## Step 4 — Cleanup
 
@@ -256,12 +286,11 @@ If the user wants to immediately continue with `/duet-impl`, mention the locked 
 | Codex hangs (no output, no timeout) | `--enable web_search_cached` re-introduced, or stdin not closed | Skill explicitly drops both — verify bash blocks not modified. Kill PID and treat as DISAGREE for that round. |
 | Codex exits 124 (timeout) | Round prompt got too long (cumulative context) | Skill writes prior rounds as files, not stuffs them all into one prompt. If still hitting limit: lower `--rounds` or use `high` instead of `xhigh`. |
 | Claude (Agent) returns prose without VERDICT line | Prompt drift — agent forgot the marker | Re-invoke the Agent with an explicit reminder: "Your last response was missing the VERDICT line — re-output the same plan with the marker appended." Limit to 1 retry. |
-| Plan locks to wrong slug | Auto-slug from topic | Use `--slug <name>` to override. Existing files get auto-suffixed (`-2`, `-3`). |
+| Plan saves to wrong slug | Auto-slug from topic | Use `--slug <name>` to override. Existing files get auto-suffixed (`-2`, `-3`). |
 | `$DOCS_PATH` not set | `/koji-init` never run | Same failure mode as `/wrap` — surface and direct user to `/koji-init`. |
 
 ## Related
 
 - Autonomy principle: [../references/agent-autonomy.md](../references/agent-autonomy.md)
 - Round prompt templates: [references/prompt-templates.md](references/prompt-templates.md)
-- Lock helper: [koji/bin/koji-duet-plan-lock](../bin/koji-duet-plan-lock)
-- Downstream consumer: `/duet-impl` reads the locked plan and walks the gates
+- Downstream consumer: `/duet-impl` reads the saved plan and walks the gates

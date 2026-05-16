@@ -1,12 +1,12 @@
 # Gate Review Prompt (intermediate gates)
 
-Used by `/duet-impl` at each intermediate `<!-- gate: NAME -->` marker. The implementer's diff for that phase is reviewed by codex (single reviewer). The FINAL phase (last segment of the plan) uses `/duet-review` instead — two reviewers + cross-review pass.
+Used by `/duet-impl` at each intermediate gate (agent identifies gates from plan structure per `/duet-impl` SKILL.md "Gating Strategy"). The implementer's diff for that gate is reviewed by codex (single reviewer). The FINAL phase (cumulative diff at end of run) uses `/duet-review` instead — two reviewers + cross-review pass.
 
 ## Reviewer prompt
 
 ```
-You are reviewing the implementation of one phase of a locked plan. You are the
-SINGLE reviewer for this intermediate checkpoint. The plan named this phase:
+You are reviewing the implementation of one phase of a plan. You are the
+SINGLE reviewer for this intermediate checkpoint. The phase is named:
 "{gate_name}".
 
 The diff below shows what the implementer did since the previous gate (or

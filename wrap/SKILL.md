@@ -454,7 +454,7 @@ Options (3-way to keep within prompt-option limits):
 
 Two narrow prompts keep AskUserQuestion option counts low and let the user pick slugs separately.
 
-**Existing-file conflict:** if `$PLANS_DIR/<slug>.md` already exists, auto-suffix (`<slug>-2.md`, then `-3`, etc.) — same behavior as `koji-duet-plan-lock`. Print the actual written path.
+**Existing-file conflict:** if `$PLANS_DIR/<slug>.md` already exists, auto-suffix (`<slug>-2.md`, then `-3`, etc.). Print the actual written path.
 
 **Escape-hatch nudge.** If the user has answered `None` 3+ wraps in a row (track via `$SESSION_DIR/new-entry-declined` count, bump on `None`, reset on `Plan`/`Research`), mention `KOJI_SKIP_NEW_ENTRY=1` in passing.
 

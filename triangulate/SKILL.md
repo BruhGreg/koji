@@ -385,7 +385,7 @@ esac
 SLUG="${REL_PATH#*/}"; SLUG="${SLUG%.md}"
 mkdir -p "$TARGET_DIR"
 
-# Auto-suffix on conflict (matches koji-duet-plan-lock behavior).
+# Auto-suffix on conflict.
 OUT="$TARGET_DIR/$SLUG.md"
 N=2
 while [ -e "$OUT" ]; do
@@ -506,7 +506,7 @@ Saved to: <$OUT or "in-session only">
 | Codex exits 124 (timeout) | Web research took too long, or xhigh ran past 30 min | Re-run with `--rounds 1` only, or invoke with a "use high effort" / "lighter pass" phrase to opt down from the xhigh default. Round prompts are kept small (single question, no cumulative round context). |
 | Both voices produce nearly-identical positions | Question framing didn't differentiate them | Re-run with `--stances=convention,principled` (or other opposing pair) to force divergent prompts. |
 | Voices each ran heavy web research, total wallclock too slow | Both did `--search` independently | Acceptable for foundational decisions (the whole point is depth). For faster runs, invoke with a "use high effort" / "lighter pass" phrase to opt down, and set `--rounds 1`. |
-| `--save-as plans/foo/bar.md` rejected | Nested subdirs not supported in v1 | Use a flat slug: `--save-as plans/foo-bar.md`. Same constraint as `koji-duet-plan-lock`. |
+| `--save-as plans/foo/bar.md` rejected | Nested subdirs not supported in v1 | Use a flat slug: `--save-as plans/foo-bar.md`. |
 
 ## Related
 
