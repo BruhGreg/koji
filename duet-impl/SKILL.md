@@ -1,5 +1,5 @@
 ---
-description: "Walks a /duet-plan locked plan gate-by-gate. Implements each phase, then runs codex single-review at each <!-- gate: NAME --> marker. On review fail: fix-and-retry up to 2 times, then consult codex once, then escalate to user. At end of run, runs /duet-review (2-reviewer pass) on the full diff. Use ONLY when the user explicitly says 'duet impl', 'duet-impl', 'let's duet implement', or similar — the 'duet' keyword is required. Do not invoke on casual 'let's implement' phrases."
+description: "Walks a /duet-plan locked plan gate-by-gate with codex single-review per gate, then /duet-review on the full diff. Invocation requires the 'duet' keyword."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools:
@@ -14,6 +14,10 @@ allowed-tools:
 # /duet-impl
 
 > Follows the [agent-autonomy principle](../references/agent-autonomy.md): agents resolve technical questions together; users see prompts only for policy choices and unresolved deadlocks.
+
+## When to invoke
+
+Use ONLY when the user explicitly types `/duet-impl`, says "duet impl", "duet-impl", "let's duet implement", or similar — the `duet` keyword is required. Do NOT invoke on casual "let's implement" phrases. On review fail: fix-and-retry up to 2 times, then consult codex once, then escalate to user.
 
 Walks a locked plan from `/duet-plan` (or any plan with `<!-- gate: NAME -->` markers) gate by gate. For each segment: implement the work, then run codex single-review on the segment's diff. At end of the run, run `/duet-review` for the 2-reviewer adversarial pass.
 
@@ -37,10 +41,11 @@ The plan file path comes from the user's invocation. Examples:
 | `duet-impl` (no plan) | AskUserQuestion to pick from `$DOCS_PATH/plans/*.md` |
 
 Flags:
-- `--xhigh` — bump codex effort to xhigh (default high)
 - `--from-gate <name>` — resume from a specific gate (skip earlier segments; useful for re-runs)
 - `--no-final-review` — skip the end-of-run `/duet-review` (rare; only for partial impl)
 - `--retries N` — fix-and-retry budget per gate (default 2)
+
+**Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens) for each gate review. Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick gates", "lighter review", "use high effort", "save tokens". Don't downgrade for "the gate diff looks small"; only on explicit user signal. Claude inherits the parent session's effort level.
 
 ## Step 1 — Parse the plan
 
@@ -56,8 +61,9 @@ RUN_DIR=$(mktemp -d -t duet-impl-XXXXXX)
 ~/.claude/skills/koji/bin/koji-duet-impl-parse --plan "$PLAN_FILE" > "$RUN_DIR/segments.json"
 ~/.claude/skills/koji/bin/koji-duet-impl-parse --plan "$PLAN_FILE" --summary
 
-EFFORT="high"; [ "$XHIGH" = "1" ] && EFFORT="xhigh"
-TIMEOUT=$([ "$XHIGH" = "1" ] && echo 1800 || echo 900)
+# Effort: see "Codex effort" in Flags above for the opt-down rule.
+EFFORT="${EFFORT:-xhigh}"
+TIMEOUT="${TIMEOUT:-1800}"
 RETRIES="${RETRIES:-2}"
 echo "Start SHA: $START_SHA | Run dir: $RUN_DIR | Effort: $EFFORT | Retries/gate: $RETRIES"
 ```
@@ -200,9 +206,7 @@ else
 fi
 ```
 
-For MVP, /duet-impl's "final review" step **invokes /duet-review as the next agent action** (not via subprocess). The agent reading /duet-impl SKILL.md proceeds to invoke /duet-review naturally — the user-visible behavior is one continuous run that ends with the verdict.
-
-Future hardening: a wrapper helper that spawns /duet-review with the same RUN_DIR / SHA boundaries, returns the verdict JSON. Not needed for MVP.
+For MVP, the agent invokes `/duet-review` as the next action (not via subprocess) — user-visible behavior is one continuous run ending with the verdict.
 
 ## Step 4 — Report
 

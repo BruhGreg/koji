@@ -23,17 +23,9 @@ covers:
 ---
 ```
 
-Docs whose content isn't tied to specific code — onboarding guides, runbooks, glossaries, narrative design docs — can opt out of drift tracking with the **`covers: none`** sentinel:
+Docs without specific code mapping (onboarding, runbooks, glossaries, narrative design) can opt out with the **`covers: none`** sentinel — they still commit and load at kick-off but drop out of drift reports and untagged scans.
 
-```markdown
----
-covers: none
----
-```
-
-These docs still commit normally and still load at kick-off (if listed in `## Load on Kick-Off`); they just drop out of drift reports and untagged-scan prompts.
-
-The skill also surfaces **untagged docs listed in `## Load on Kick-Off`** and offers to tag them — because loaded-without-coverage means loaded-without-drift-signal.
+The skill also surfaces **untagged docs listed in `## Load on Kick-Off`** and offers to tag them — loaded-without-coverage means loaded-without-drift-signal.
 
 ## Preamble
 
@@ -65,7 +57,7 @@ cd "$PROJECT_ROOT"
 TAGGED_REPORT=$(~/.claude/skills/koji/bin/koji-doc-status --scan-tagged 2>/dev/null || true)
 ```
 
-In `--scan-tagged` mode, `status` is `fresh`, `stale`, `orphan`, `exempt`, or `malformed`. The helper honors `docs.stale_threshold` from `.koji.yaml` (default `10`). `exempt` = doc declared `covers: none` (intentionally untagged — narrative/ops/process content with no code to track).
+In `--scan-tagged` mode, `status` is `fresh`, `stale`, `orphan`, `exempt`, or `malformed`. (`working-doc` only appears via explicit-path mode or `--load-on-kickoff` — `--scan-tagged` skips `$PLANS_DIR/`/`$RESEARCH_DIR/` entries.) The helper honors `docs.stale_threshold` from `.koji.yaml` (default `10`). `exempt` = doc declared `covers: none` (intentionally untagged — narrative/ops/process content with no code to track).
 
 **B. All tracked `.md` files** (for the untagged scan — `git ls-files` respects `.gitignore`, so vendored trees like `node_modules/`, `Pods/`, `vendor/` are excluded):
 
@@ -89,7 +81,7 @@ Column 1 of each record is the bullet's resolved `.md` path.
   `README.md`, `LICENSE*.md`, `CHANGELOG*.md`, `CODE_OF_CONDUCT*.md`, `SECURITY.md`, `CONTRIBUTING.md`,
   `CLAUDE.md`, `AGENTS.md`, `AI_HANDOFF.md`, `agent-session.md`, `lessons.md`, `TODO.md`,
   `COMPLETED_TASKS.md`, `SESSION_TEMPLATE.md`.
-  Also exclude anything under `$ARCHIVE_DIR/` (session archives).
+  Also exclude anything under `$ARCHIVE_DIR/` (session archives), `$PLANS_DIR/` (working plans), and `$RESEARCH_DIR/` (working research). Working docs use the lighter status workflow handled by `koji-plans-research`; they're not code-coverage docs.
 - `UNTAGGED_ALL` = `ALL_MD - TAGGED - META`
 - `UNTAGGED_LOADED` = `UNTAGGED_ALL ∩ LOADED` (high-priority subset)
 - `UNTAGGED_OTHER` = `UNTAGGED_ALL - UNTAGGED_LOADED`
@@ -232,7 +224,7 @@ Options:
 
 ### Option A — Auto-tag (bulk classify + review)
 
-This is the default path for most projects. The skill does the classification work so the user only makes one approve/edit decision across all docs.
+Default path. The skill classifies each doc; user makes one approve/edit decision across the batch.
 
 **For each doc in `CHOSEN`:**
 
@@ -490,31 +482,16 @@ After the user picks an action (or Exit), print a one-line summary: `<path>: <ac
 
 ## Edge cases
 
-- **Doc has no git history (new/untracked)**: DRIFT = 0. Still apply orphan check — if covered path missing, doc is orphan; otherwise fresh.
-- **Covered path doesn't exist in repo**: doc is **orphan**. Remediation menu surfaces appropriate options.
-- **Malformed frontmatter YAML**: skip with `warn: malformed frontmatter in <path>`.
-- **Frontmatter exists but `covers` is not a list** (e.g., a scalar other than `none`, or missing): treat as malformed. `warn: covers must be a list or the sentinel 'none' in <path>`.
-- **`covers: none` sentinel** (case-insensitive): doc is intentionally untagged. Status = `exempt`. Dropped from drift dashboard (counted in a footnote) and from the untagged bucket. Use for narrative, ops, or process docs with no code to track.
-- **Detached HEAD**: `git log HEAD` still works. No special handling needed.
-- **User is in a subdirectory**: always use `$PROJECT_ROOT` from the preamble for all git commands.
-- **Deleting a doc on option D/C**: use `git rm <path>`. Stage only — do not commit. User's next commit cleans up.
-
----
-
-## Cross-platform notes
-
-- `git grep`, `git log`, `git rm` — identical on Windows/macOS/Linux.
-- No date arithmetic (BSD vs GNU `date` differs) — drift is commit-count-based.
-- Forward slashes in all paths; Git Bash translates on Windows.
-- Frontmatter is a widely-parseable YAML-in-markdown convention (same shape parsed by Cursor, Continue.dev, Astro, MkDocs, Hugo, Jekyll).
+- **Doc has no git history (new/untracked)**: DRIFT = 0. Still apply orphan check.
+- **Frontmatter exists but `covers` is not a list** (scalar other than `none`, missing): treat as malformed. `warn: covers must be a list or the sentinel 'none' in <path>`.
+- **Subdirectory invocation**: always use `$PROJECT_ROOT` from the preamble for git commands.
+- **Deleting a doc on option D/C**: `git rm <path>` — stage only, no commit. User's next commit cleans up.
 
 ---
 
 ## Related skills
 
-- `/kick-off` — parses the `## Load on Kick-Off` section of `agent-session.md` to decide which docs to load. Tagged docs that are stale still load at kick-off (with a warning) — skipping is a user decision via `/inspect-doc-drift`.
-- `/wrap` — suggests tagged docs to add to the Load on Kick-Off section based on the session's git diff. Complements this skill: wrap decides what to track, `/inspect-doc-drift` decides what to fix.
+- `/kick-off` — parses `## Load on Kick-Off` in `agent-session.md` to decide which docs to load. Stale tagged docs still load (with a warning) — skipping is a `/inspect-doc-drift` user decision.
+- `/wrap` — suggests tagged docs to add/remove from Load on Kick-Off based on the session's git diff.
 
-**Shared primitive:** both `/kick-off` and `/inspect-doc-drift` read doc drift through `~/.claude/skills/koji/bin/koji-doc-status`. Modes:
-- `--scan-tagged` / `--load-on-kickoff` / explicit paths → per-doc status records: `<path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>` with `status ∈ {fresh, stale, orphan, exempt, untagged, missing, malformed}`. `exempt` = doc declared `covers: none` (intentionally untagged).
-- `--commits <path> [--limit N] [--by-size|--per-path]` → per-line commit view `<short-hash> <subject> (<age>)`. Default picks most-recent N with a noise-prefix filter (typo/chore/deps/lint/fmt/bump/style/ci/build/docs/version). `--by-size` ranks by `files_changed × (insertions + deletions)`. `--per-path` round-robins across covered paths.
+**Shared primitives:** doc drift via `~/.claude/skills/koji/bin/koji-doc-status` (run with `--help` for modes); plans/research status via `~/.claude/skills/koji/bin/koji-plans-research`.

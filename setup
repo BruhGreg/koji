@@ -67,11 +67,15 @@ create_link "take-note" "take-note"
 create_link "kick-off" "kick-off"
 create_link "koji-init" "koji-init"
 create_link "inspect-doc-drift" "inspect-doc-drift"
+create_link "duet-plan" "duet-plan"
+create_link "duet-impl" "duet-impl"
+create_link "duet-review" "duet-review"
+create_link "triangulate" "triangulate"
 
 # --- Verify ---
 echo ""
 echo "Installed skills:"
-for skill in wrap take-note kick-off koji-init inspect-doc-drift; do
+for skill in wrap take-note kick-off koji-init inspect-doc-drift duet-plan duet-impl duet-review triangulate; do
   if [ -f "$SKILLS_DIR/$skill/SKILL.md" ]; then
     echo "  /$skill  OK"
   else

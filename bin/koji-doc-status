@@ -1,37 +1,19 @@
 #!/usr/bin/env bash
-# koji-doc-status — report drift status for docs tagged with YAML `covers:` frontmatter.
-#
+# koji-doc-status — drift status for docs tagged with YAML `covers:` frontmatter.
 # Shared helper for /kick-off (step 2c) and /inspect-doc-drift.
-# Parses a doc's frontmatter, checks whether covered paths still exist,
-# and counts commits in those paths since the doc's last edit.
+# Run with --help for usage, modes, and field schema.
 #
-# Usage:
-#   koji-doc-status --scan-tagged           # all repo docs with a `covers:` key
-#   koji-doc-status --load-on-kickoff       # bullets from ## Load on Kick-Off
-#   koji-doc-status <path> [<path> ...]     # specific docs (repo-root relative or absolute)
-#
-# Output — one tab-separated record per doc:
-#   <path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>
-#
-#     status      : fresh | stale | orphan | exempt | untagged | missing | malformed
-#     drift       : integer commit count in covered paths since the doc's
-#                   last edit, or "-" if N/A
-#     last_commit : short hash of the doc's last edit, or "-"
-#     covers      : space-separated list of covered paths, "none" (sentinel),
-#                   or "-"
-#     missing     : space-separated list of covered paths that no longer
-#                   exist in the working tree, or "-"
-#
-# The `covers: none` sentinel marks a doc as intentionally untagged — i.e.,
-# the doc is narrative/ops/process content that doesn't map to specific code.
-# Such docs are omitted from drift reports and from untagged-tagging prompts.
-#
-# Requires koji-detect to have been sourced (uses $PROJECT_ROOT, $DOCS_PATH).
-# Self-sources if those variables are unset.
+# Requires koji-detect to have been sourced (uses $PROJECT_ROOT, $DOCS_PATH);
+# self-sources if those vars are unset.
 
 set -euo pipefail
 
-if [ -z "${PROJECT_ROOT:-}" ] || [ -z "${DOCS_PATH:-}" ]; then
+if [ -z "${PROJECT_ROOT:-}" ] || [ -z "${DOCS_PATH:-}" ] \
+   || [ -z "${PLANS_DIR:-}" ] || [ -z "${RESEARCH_DIR:-}" ]; then
+  # Re-source koji-detect to populate the working-doc dir vars too.
+  # Without PLANS_DIR/RESEARCH_DIR, the case patterns at compute_status:182
+  # and the --scan-tagged loop below collapse to `/*`, which would match
+  # every absolute path and silently misclassify every doc as `working-doc`.
   eval "$(~/.claude/skills/koji/bin/koji-detect)"
 fi
 
@@ -168,6 +150,15 @@ compute_status() {
     printf '%s\tmissing\t-\t-\t-\t-\n' "$rel"
     return 0
   fi
+
+  # Working-doc dirs ($PLANS_DIR/, $RESEARCH_DIR/) get classified as
+  # `working-doc` so they load silently (no "add covers:" prompts).
+  case "$abs" in
+    "${PLANS_DIR:-}"/*|"${RESEARCH_DIR:-}"/*)
+      printf '%s\tworking-doc\t-\t-\t-\t-\n' "$rel"
+      return 0
+      ;;
+  esac
 
   if ! has_covers_key "$abs"; then
     printf '%s\tuntagged\t-\t-\t-\t-\n' "$rel"
@@ -459,24 +450,8 @@ count_total_sessions() {
   echo "$count"
 }
 
-# Emit one row per current LOKO bullet:
-#   <path>\t<presence>\t<mentioned>\t<commits_since_add>
-#
-# presence:
-#   new        = path is in the working-tree LOKO but not in HEAD's committed
-#                version (uncommitted add, e.g. mid-wrap), OR file has no git
-#                history at all.
-#   recent     = present in HEAD; commits_since_add == 1.
-#   established = commits_since_add >= 2.
-#
-# mentioned:
-#   yes = path or basename appears in any ## Session: body across the active
-#         log AND archive files.
-#   no  = absent from every session body (active + archive).
-#
-# commits_since_add:
-#   integer count of commits to agent-session.md since the bullet was first
-#   introduced. -1 if the bullet appears in no committed version.
+# Emit one row per current LOKO bullet: <path>\t<presence>\t<mentioned>\t<commits_since_add>
+# Field semantics documented in --help.
 loko_history() {
   local session_file="$DOCS_PATH/agent-session.md"
   local session_file_rel="${session_file#$PROJECT_ROOT/}"
@@ -486,12 +461,8 @@ loko_history() {
   loko_paths=$(list_loko_bullets | extract_loko_paths | awk '!seen[$0]++')
   [ -n "$loko_paths" ] || return 0
 
-  # Stash session bodies (active + archives) in a temp file. We grep against
-  # the FILE in the per-bullet loop, not via `printf "$var" | grep -qF`.
-  # Reason: `extract_session_bodies` can emit hundreds of KB once archives are
-  # included. With pipefail enabled, `grep -qF` exits early on a match → printf
-  # gets SIGPIPE → pipe returns 141 → the `if` reads it as false → `mentioned`
-  # was always reported as `no` regardless of whether the path was present.
+  # Stash session bodies in a tempfile and grep the FILE, not
+  # `printf "$var" | grep -qF` — early-exit grep + pipefail = false negatives.
   local active_bodies_file
   active_bodies_file=$(mktemp)
   extract_session_bodies "$session_file" > "$active_bodies_file"
@@ -517,12 +488,8 @@ loko_history() {
       [ -n "$snapshot_loko" ] || continue
       while IFS= read -r snap_p; do
         [ -n "$snap_p" ] || continue
-        # Escape regex metachars in the path before grepping the tempfile,
-        # so paths containing `.` `[` `*` etc. match literally.
-        # Tab-separator (not space) so paths containing spaces survive
-        # round-trip through the path→commit map. The duplicate check uses
-        # grep -F with an explicit tab so escaping regex metas in $snap_p
-        # is no longer needed.
+        # Tab-separator (paths with spaces survive); grep -F + explicit tab
+        # = no regex-metachar escaping needed.
         if ! grep -qF -- "$(printf '%s\t' "$snap_p")" "$first_seen_file" 2>/dev/null; then
           printf '%s\t%s\n' "$snap_p" "$commit" >> "$first_seen_file"
         fi
@@ -574,25 +541,12 @@ loko_history() {
 }
 
 # Emit a focus-filtered subset of $DOCS_PATH/lessons.md.
-#
-# Convention: entries are appended at the top (newest first). An entry begins
-# with a YYYY-MM-DD date line and continues until the next date line (or EOF).
-# Entries are often multi-line — code blocks, paragraphs, etc.
-#
-# Scoring: for each entry, count distinct focus-token matches in the entry's
-# lowercased text. Tokens come from the --focus argument (space-separated),
-# stripped of common stopwords and short tokens (<3 chars), case-insensitive.
-#
-# Output: union of (a) top 3 most recent entries (always — baseline) and
-# (b) entries with score > 0, sorted by score desc, tie-broken by recency.
-# Deduplicated, capped at --limit (default 8).
-#
-# Cold-start (empty/missing --focus): top 10 by recency (matches the pre-v0.5
-# kick-off behavior — backwards-compatible fallback).
-#
-# Light L1 tags (optional): if the date line has a `[domain1,domain2]` block
-# between `[Agent]` and `—`, those tokens live in the entry's lowercased text
-# like any other content and contribute to scoring naturally.
+# Entries are YYYY-MM-DD-headed, newest-first, possibly multi-line.
+# Scoring: distinct focus-token hits in entry's lowercased text (tokens from
+#   --focus space-split, strip stopwords + <3-char tokens, case-insensitive).
+# Output: top 3 by recency (baseline) ∪ entries with score>0 (sort score desc,
+#   recency desc tie-break), deduped, capped at --limit (default 8).
+# Cold-start (no --focus): top 10 by recency (pre-v0.5 kick-off fallback).
 lessons_relevant() {
   local lessons_file="$DOCS_PATH/lessons.md"
   local focus="$1"
@@ -716,6 +670,12 @@ case "${1:-}" in
     if [ -n "$DOCS" ]; then
       while IFS= read -r rel; do
         [ -n "$rel" ] || continue
+        # Skip plans/ and research/ outright — these are working docs, never
+        # code-coverage docs. Anyone who accidentally added `covers:` to a
+        # working doc shouldn't get drift reports for it.
+        case "$PROJECT_ROOT/$rel" in
+          "${PLANS_DIR:-}"/*|"${RESEARCH_DIR:-}"/*) continue ;;
+        esac
         if has_covers_key "$PROJECT_ROOT/$rel"; then
           compute_status "$PROJECT_ROOT/$rel"
         fi
@@ -802,9 +762,11 @@ Usage:
 
 Output (tab-separated, one record per doc — status modes):
   <path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>
-  status: fresh | stale | orphan | exempt | untagged | missing | malformed
+  status: fresh | stale | orphan | exempt | untagged | working-doc | missing | malformed
 
-  `exempt` means the doc declared `covers: none` — intentionally untagged.
+  `exempt`      means the doc declared `covers: none` — intentionally untagged.
+  `working-doc` means the doc lives under $PLANS_DIR/ or $RESEARCH_DIR/ —
+                koji working docs, never code-coverage docs.
 
 Output (--loko-history mode, one record per current LOKO bullet):
   <path>\t<presence>\t<mentioned>\t<commits_since_add>

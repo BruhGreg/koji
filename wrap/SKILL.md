@@ -34,9 +34,7 @@ Execute the following steps **strictly in order**. Do not skip steps. Do not bat
 
 ## Step 1 — Lessons
 
-**Default action: SKIP.** Most sessions add zero lessons. **Zero is the success path**, not a missed step. A short, high-signal `lessons.md` is far more valuable than a long one full of noise — every weak entry buries the real future-time-savers underneath it.
-
-Before you even consider an addition, read the most recent 5–10 entries in `$DOCS_PATH/lessons.md`. **That file is the calibration target.** Each existing entry is a rule that would still cost real time to rediscover today, with a concrete consequence and a code/commit reference. If a candidate doesn't sit at that bar, drop it.
+**Default action: SKIP.** Most sessions add zero lessons — that's the success path. Every weak entry buries real future-time-savers underneath it. Before considering an addition, read the most recent 5–10 entries in `$DOCS_PATH/lessons.md` — that file is the calibration target.
 
 ### Three gates — a candidate must clear ALL THREE to qualify
 
@@ -55,26 +53,18 @@ The most valuable lesson is one whose absence would force the user to correct th
 
 If only Claude would write this entry, it's noise.
 
-### Anti-examples — these LOOK project-specific but aren't
+### Anti-examples — skip these shapes
 
-Common near-misses that pass a naive "is it project-touching?" check but fail the gates above. If your candidate matches one of these shapes, **skip it**:
-
-- **Import-resolution / namespace collisions** ("X is exported by both libraries — alias one of them"). Generic language behavior; the analyzer error spells it out.
-- **Framework exceptions restated as project rules** (e.g., "LayoutBuilder can't live inside intrinsic-dimension widgets"). The exception text already says this. Hitting it once teaches you forever.
-- **Single-use design choices** ("we replaced widget A's built-in X with our own because pixel-fit on this one row"). Design taste, not a project landmine. Re-reading the code answers it in 2 minutes.
-- **"We picked X over Y because the user preferred X"** — a preference recorded in code. Not a rule a future agent would walk into blind.
-- **Tool or agent knowledge** — how Claude Code hooks work, how koji skills behave, how a git flag works. Belongs in tool docs, not project lessons.
-- **Decisions already encoded in config or code** — if you just wrote it into `.koji.yaml`, `settings.json`, a `SKILL.md`, `CLAUDE.md`, or source, it's already persisted. Don't duplicate it as a lesson.
-- **Workflow design choices** — "X belongs in kick-off not wrap". The skill file already encodes it.
-- **Work outside this project's workspace** — koji, gstack, or other external-tool changes you happened to make while working in this repo belong in those tools' own repos.
+- Import/namespace collisions, framework exceptions, single-use design choices, taste preferences, tool/agent knowledge, decisions already in config/code, workflow design choices, and changes made to *other* repos. All fail the gates above — the analyzer/exception/code itself is the persistence layer.
 
 ### If — and only if — a candidate clears all three gates AND passes the user-test:
 
 1. Read `$DOCS_PATH/lessons.md`.
 2. Append the new entry **at the top** (below the header comment), one per line:
    ```
-   YYYY-MM-DD — [Claude] — what went wrong → rule to prevent it
+   YYYY-MM-DD — [tag1,tag2] — what went wrong → rule to prevent it
    ```
+   Tags are optional but recommended — they sharpen `--lessons-relevant` scoring at `/kick-off`. The `[Agent]` field has been dropped; the parser doesn't use it and it just adds noise to every entry.
 3. Be specific and tactical. Include the concrete consequence and a code/commit reference that ties the rule back to the work.
 
 ### Otherwise
@@ -250,9 +240,9 @@ Each row is tab-separated: `<path>\t<presence>\t<mentioned>\t<commits_since_add>
 
 For each LOKO entry where `presence=established` AND `mentioned=no`:
 
-- The bullet has survived ≥ 2 wraps and is absent from every active-log session body. This is the "I added this 3 wraps ago, never used it again" pattern.
-- Mark as **deterministic** removal candidate. **This overrides the reactive keep-on-touch decision below** — if the user hasn't referenced the doc in any active session despite multiple wraps, the doc isn't load-bearing even when its covered code is hot. Code-freshness ≠ doc-freshness; session-mention is the better proxy for whether the doc is actually being used.
-- Treat the same as a self-tagged temp marker for tagging purposes (deterministic, auto-applies in auto mode).
+- Bullet survived ≥ 2 wraps and is absent from every active-log session body — the "added 3 wraps ago, never used again" pattern.
+- Mark as **deterministic** removal candidate. **Overrides the reactive keep-on-touch decision below** — session-mention beats code-touch as a use signal.
+- Treat as a self-tagged temp marker (deterministic, auto-applies in auto mode).
 
 Skip Pre-check 2 if any of:
 
@@ -272,7 +262,7 @@ Skip Pre-check 2 if any of:
 2. **Drift status is `stale` or `orphan`**: user may have it in LOKO specifically because they want to fix it next session. Leave alone. (**Exception:** doesn't apply to docs flagged by Pre-check 1 (self-tagged temp) or Pre-check 2 (`established + unmentioned`) — both signals are stronger than the "might want to fix" assumption. If two wraps have passed without any session mention, that "might want to fix" signal is stale too.)
 3. **Covers next-session mission**: if any of the doc's `covers:` paths fall inside the next-session scope (per starter prompt / Notes / TODO items), keep — Claude judgment.
 
-**Deferred guard (known gap)**: "manually re-added in last 3 sessions". Detecting bouncing-back via `agent-session.md` git history is doable but adds cost; not implemented here. A doc the user keeps re-adding will get re-suggested for removal each wrap until they either pin it some other way or the theme stabilizes. Acceptable for the 80% case — revisit if it bites.
+**Deferred guard (known gap)**: "manually re-added in last 3 sessions" not implemented — bouncing-back docs get re-suggested each wrap until pinned. Revisit if it bites.
 
 **Pass C candidates that survive the guards** become **remove suggestions**. Tag each removal with the strongest signal that fires:
 
@@ -359,13 +349,114 @@ Skip either line if its bucket is empty. If nothing was applied and nothing is a
 
 (The single summary line emitted earlier — `Updated ## Load on Kick-Off: +X, -Y. To revert: …` — is the only post-apply output. Do not emit a second per-bullet "Report" block here. One line, then move on.)
 
-### Cold-start behavior (explicit)
+### Cold-start behavior
 
-- **Zero tagged docs, zero `.md`**: step skipped silently.
-- **Zero tagged docs, some `.md` exist**: one-line nudge to run `/inspect-doc-drift`. No further action.
-- **Tagged docs, empty session** (first ever wrap, no commits, no lessons, no notes yet): A empty + B gated off + C skipped (first wrap) → nothing suggested. The step effectively no-ops until there's enough signal to act on. Don't pester users with bad suggestions from a blank slate.
-- **LOKO empty, tagged docs exist**: A+B run; C skipped (nothing to review).
-- **LOKO has bullets, no tagged docs anywhere**: C runs over the existing entries (untagged/exempt only). A+B have no candidate pool. The default-keep stance for untagged entries means C usually no-ops here too.
+The gates above (top of Step 2c) handle every combination of `TAGGED_EXISTS` × `LOKO_HAS_BULLETS` × session-emptiness. Net effect on a fresh koji install: the step no-ops silently until there's enough signal to act on.
+
+---
+
+## Step 2d — Plans & research touched this session (status update)
+
+**Gated on touched files.** This sub-step fires only if the session touched files under `$PLANS_DIR/` or `$RESEARCH_DIR/`. Most sessions touch neither; skip silently when the touched list is empty.
+
+**Detection** (mirrors Step 2c's union pattern — catches committed + working-tree + untracked):
+
+```bash
+SESSION_START=$(cat "$SESSION_START_FILE" 2>/dev/null || true)
+if [ -n "$SESSION_START" ] && git rev-parse --verify "$SESSION_START" >/dev/null 2>&1; then
+  TOUCHED_PR=$( (git diff --name-only "$SESSION_START..HEAD" -- "$PLANS_DIR/" "$RESEARCH_DIR/" 2>/dev/null;
+                 git diff --name-only HEAD -- "$PLANS_DIR/" "$RESEARCH_DIR/" 2>/dev/null;
+                 git ls-files --others --exclude-standard -- "$PLANS_DIR/" "$RESEARCH_DIR/" 2>/dev/null) | sort -u)
+else
+  TOUCHED_PR=$( (git diff --name-only HEAD -- "$PLANS_DIR/" "$RESEARCH_DIR/" 2>/dev/null;
+                 git ls-files --others --exclude-standard -- "$PLANS_DIR/" "$RESEARCH_DIR/" 2>/dev/null) | sort -u)
+fi
+
+# If empty, skip the rest of Step 2d entirely (no output).
+# Intent is conveyed by the prose below — there is no bash short-circuit
+# inside SKILL.md prose blocks; agents read this section sequentially.
+```
+
+If `TOUCHED_PR` is empty, skip the rest of Step 2d entirely (no output).
+
+**Resolve each touched file's kind + current status** via the helper:
+
+```bash
+echo "$TOUCHED_PR" | while IFS= read -r path; do
+  [ -n "$path" ] || continue
+  ~/.claude/skills/koji/bin/koji-plans-research --get "$path" 2>/dev/null
+done
+```
+
+Each record is `path\tkind\tstatus\tstatus_source\torigin\ttarget\tnext_step`. Use `kind` to pick the valid-status menu and `status_source=inferred` to detect newly-created or YAML-less files (those get an `add-frontmatter` option, since `--set-status` on them will prepend the frontmatter block).
+
+**AskUserQuestion batching — bounded by count of touched files:**
+
+- **1-3 touched:** fire one `AskUserQuestion` per file (sequential). Options depend on `kind`:
+  - **plan**: `Leave at current` / `Advance to in-progress` / `Mark completed` / `Mark archived`
+  - **research**: `Leave at current` / `Mark validated` / `Mark archived`
+  - **Newly-created (`status_source=inferred`)**: add a fifth option, `Add frontmatter (set status: <default>)` — which calls `--set-status` with the kind-default to prepend the YAML block.
+- **4+ touched:** fire a single batched `AskUserQuestion` with three options — `Leave all unchanged` / `Review each manually (open list)` / `Batch-mark all to <next-status>`. The batch option only fires when all touched files are the same kind. If mixed kinds, drop the batch option and present the first two only.
+
+**Apply** the user's choice by calling `koji-plans-research --set-status <path> <new>`. The helper handles the line-oriented frontmatter edit (replace existing `status:`, insert into existing frontmatter, or prepend a minimal block when none exists).
+
+**Non-interactive fallback** (when `AskUserQuestion` is not callable): print one line and continue.
+
+> Touched plans/research this session: <list>. No status changes (non-interactive).
+
+---
+
+## Step 2e — Capture new durable artifact from this session?
+
+**Always fires** unless suppressed by `KOJI_SKIP_NEW_ENTRY=1`. Independent of Step 2d — the question is *"did this session produce work that should become a new plan or research file?"*, which is meaningful whether or not existing files were touched.
+
+**Suppress entirely** when `KOJI_SKIP_NEW_ENTRY=1` is set, OR when `AskUserQuestion` is not callable (non-interactive mode — emit nothing). Both checks are prose-level — read the env var via `printenv KOJI_SKIP_NEW_ENTRY` or `echo "$KOJI_SKIP_NEW_ENTRY"`, and skip the rest of this step when either condition holds. (No bash short-circuit appears here because SKILL.md prose blocks aren't executable scripts.)
+
+**Otherwise**, fire one `AskUserQuestion`:
+
+> Did this session produce work that should become a new plan or research file?
+
+Options (3-way to keep within prompt-option limits):
+
+- **None** — move on.
+- **Plan** — prompt for a slug (kebab-case, no extension). Run `mkdir -p "$PLANS_DIR"` first (existing projects may lack the dir — `/koji-init` only scaffolds it on fresh installs). Then write `$PLANS_DIR/<slug>.md` with:
+  ```yaml
+  ---
+  status: pending
+  origin-session: <today>
+  target: implementation
+  next-step: <empty — user fills in>
+  ---
+
+  # <slug>
+
+  <!-- TODO: fill in the plan body before commit. -->
+  ```
+  Tell the user the path that was written and remind them to fill in the body.
+- **Research** — same flow (`mkdir -p "$RESEARCH_DIR"` first) with `$RESEARCH_DIR/<slug>.md`:
+  ```yaml
+  ---
+  status: unvalidated
+  origin-session: <today>
+  target: validation
+  next-step: <empty — user fills in>
+  ---
+
+  # <slug>
+
+  <!-- TODO: fill in the investigation findings + validation steps before commit. -->
+  ```
+
+**If the user wants both**: after the chosen file is written, fire one more `AskUserQuestion`:
+
+> Also create a research file? (no / yes)
+> (or for the inverse: "Also create a plan file?")
+
+Two narrow prompts keep AskUserQuestion option counts low and let the user pick slugs separately.
+
+**Existing-file conflict:** if `$PLANS_DIR/<slug>.md` already exists, auto-suffix (`<slug>-2.md`, then `-3`, etc.) — same behavior as `koji-duet-plan-lock`. Print the actual written path.
+
+**Escape-hatch nudge.** If the user has answered `None` 3+ wraps in a row (track via `$SESSION_DIR/new-entry-declined` count, bump on `None`, reset on `Plan`/`Research`), mention `KOJI_SKIP_NEW_ENTRY=1` in passing.
 
 ---
 
@@ -429,11 +520,7 @@ Check if `.claude/settings.local.json` exists. If it does:
    - Broader `Bash` patterns that aren't standard dev commands (e.g., `Bash(curl:*)`, `Bash(docker:*)`)
    - Commands that touch external services (e.g., `Bash(gh:*)`, `Bash(ssh:*)`)
    - Permissions that are project-specific but not machine-specific (e.g., `Bash(./scripts/deploy.sh)`)
-   - **Minimize prompts aggressively:**
-     - Batch similar permissions into one group (e.g., `docker build`, `docker compose`, `docker run` → ask once as "Docker commands")
-     - If the user already approved or denied a similar pattern in `settings.json` (e.g., they have `Bash(docker build:*)` already), infer their intent for related ones (`docker compose`, `docker run`) and auto-promote without asking
-     - If the deny list has a pattern, auto-skip similar ones without asking
-     - **Goal: zero prompts most sessions.** Only ask when something genuinely new and ambiguous shows up.
+   - **Minimize prompts aggressively** — batch similar perms into one group, infer from existing approved/denied patterns in `settings.json`, and only ask when something genuinely new and ambiguous shows up. Goal: zero prompts most sessions.
 
 5. **If there are auto-promoted permissions**, briefly list them (one line summary, not a full list):
 
@@ -454,7 +541,7 @@ Check if `.claude/settings.local.json` exists. If it does:
 **Important:** Steps 1-4 above only edit files. No commits happen until this step.
 
 1. Run `git status` and `git diff --stat` to capture **all** changes (session work, wrap doc updates, and permission changes).
-2. Classify every changed file as either **code** (session work) or **docs** (koji files: `$DOCS_PATH/lessons.md`, `$DOCS_PATH/AI_HANDOFF.md`, `$TODO_PATH`, `$DOCS_PATH/COMPLETED_TASKS.md`, `$DOCS_PATH/agent-session.md`, `$DOCS_PATH/SESSION_TEMPLATE.md`, `$DOCS_PATH/$ARCHIVE_DIR/**`, `.claude/settings.json`).
+2. Classify every changed file as either **code** (session work) or **docs** (koji files: `$DOCS_PATH/lessons.md`, `$DOCS_PATH/AI_HANDOFF.md`, `$TODO_PATH`, `$DOCS_PATH/COMPLETED_TASKS.md`, `$DOCS_PATH/agent-session.md`, `$DOCS_PATH/SESSION_TEMPLATE.md`, `$DOCS_PATH/$ARCHIVE_DIR/**`, `$PLANS_DIR/**`, `$RESEARCH_DIR/**`, `.claude/settings.json`).
 3. Determine the commit strategy:
 
    **If there are only doc changes (work was already committed):**
@@ -502,7 +589,7 @@ Check if `.claude/settings.local.json` exists. If it does:
    [ -n "$SESSION_DIR" ] && rm -f "$SESSION_DIR/duet-rules.json"
    rmdir "$SESSION_DIR" 2>/dev/null || true
    ```
-   Idempotent — no error if already gone. The `[ -n "$SESSION_DIR" ]` guard prevents the cleanup from expanding to `rm -f /duet-rules.json` if the variable is unset (sourcing failure or scope leak). Clears the session-scoped `duet-rules.json` (any `Apply + remember for session` choices from `/duet-review` expire here). The `rmdir` removes the per-project sessions directory if empty (no-op if other state lives there). Sibling skills that write to `$SESSION_DIR` should add their own cleanup line here, or the `rmdir` will leave stale files behind. Runs unconditionally at end of Step 5 (even if no commit was made). The next session must `/kick-off` to re-establish the boundary; otherwise the next `/wrap` degrades to working-tree-only diff (Pass A weakens, other passes unaffected).
+   Idempotent. The `[ -n "$SESSION_DIR" ]` guard prevents `rm -f /duet-rules.json` if the variable is unset. `rmdir` is a no-op if other state lives in the dir — sibling skills writing to `$SESSION_DIR` should add their own cleanup line. **Step 2e's `new-entry-declined` counter is intentionally NOT cleaned** — it's a cross-session streak counter (see Step 2e), so the `rmdir` is expected to silently fail when the file is present. Runs unconditionally at end of Step 5. Without a fresh `/kick-off`, the next `/wrap` degrades to working-tree-only diff (Pass A weakens).
 
 ---
 

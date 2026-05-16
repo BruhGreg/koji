@@ -85,6 +85,12 @@ DOCS_DIR="$(_resolve "docs_dir" "docs")"
 _emit DOCS_DIR "$DOCS_DIR"
 _emit DOCS_PATH "$PROJECT_ROOT/$DOCS_DIR"
 
+# Plans and research are sibling working-doc directories under $DOCS_PATH.
+# Created lazily by /duet-plan lock helper or /koji-init scaffolding; surfaced
+# at /kick-off and offered for status update at /wrap.
+_emit PLANS_DIR "$PROJECT_ROOT/$DOCS_DIR/plans"
+_emit RESEARCH_DIR "$PROJECT_ROOT/$DOCS_DIR/research"
+
 _emit TEMPLATE "$(_resolve "template" "default")"
 
 _emit ARCHIVE_STRATEGY "$(_resolve "archive.strategy" "numbered")"
@@ -112,11 +118,8 @@ _emit AGENTS "$AGENTS"
 # can't be committed by accident. /kick-off writes "start" with the session's
 # starting git rev; /wrap reads it and removes it on completion.
 KOJI_STATE_DIR="${KOJI_STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/koji}"
-# Hash the project root for SESSION_DIR uniqueness. md5 is macOS-native;
-# md5sum is GNU coreutils; shasum is in macOS + most Linux (perl-based);
-# cksum is POSIX. Cascade through them so the hash is never empty —
-# an empty hash would let two projects with the same basename collide on
-# the same SESSION_DIR (Alpine/busybox repro: no md5 AND no md5sum).
+# Hash project root for SESSION_DIR uniqueness. Cascade md5 → md5sum →
+# shasum → cksum so the hash is never empty (Alpine has none of the first two).
 _SESSION_HASH=$(printf '%s' "$PROJECT_ROOT" | (md5 2>/dev/null || md5sum 2>/dev/null | cut -d' ' -f1) | head -c 8)
 [ -n "$_SESSION_HASH" ] || _SESSION_HASH=$(printf '%s' "$PROJECT_ROOT" | shasum 2>/dev/null | cut -d' ' -f1 | head -c 8)
 [ -n "$_SESSION_HASH" ] || _SESSION_HASH=$(printf '%s' "$PROJECT_ROOT" | cksum 2>/dev/null | cut -d' ' -f1)
@@ -171,4 +174,6 @@ _emit TODO_NEEDS_MIGRATION "${TODO_NEEDS_MIGRATION:-false}"
 [ -f "$PROJECT_ROOT/$DOCS_DIR/agent-session.md" ] && echo "HAS_SESSION_LOG=true" || echo "HAS_SESSION_LOG=false"
 [ -f "$PROJECT_ROOT/$DOCS_DIR/AI_HANDOFF.md" ] && echo "HAS_HANDOFF=true" || echo "HAS_HANDOFF=false"
 [ -f "$PROJECT_ROOT/$DOCS_DIR/lessons.md" ] && echo "HAS_LESSONS=true" || echo "HAS_LESSONS=false"
+[ -d "$PROJECT_ROOT/$DOCS_DIR/plans" ] && echo "HAS_PLANS_DIR=true" || echo "HAS_PLANS_DIR=false"
+[ -d "$PROJECT_ROOT/$DOCS_DIR/research" ] && echo "HAS_RESEARCH_DIR=true" || echo "HAS_RESEARCH_DIR=false"
 [ -f "$TODO_PATH" ] && echo "HAS_TODO=true" || echo "HAS_TODO=false"

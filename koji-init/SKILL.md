@@ -54,19 +54,12 @@ Options:
 - B) Keep in `docs/` — use `docs/` as-is, set `docs_dir: docs`
 
 **If A (Relocate):**
-1. Create `.koji/` directory (and `.koji/sessions/` if `docs/sessions/` exists)
-2. Move **only** koji session files from `docs/` to `.koji/`:
-   - `agent-session.md`, `AI_HANDOFF.md`, `lessons.md`, `SESSION_TEMPLATE.md`
-   - `sessions/` subdirectory (entire directory, if it exists)
-   - Do NOT move other project documentation in `docs/`
-3. Scan the moved files for references to `docs/` session paths (e.g., `docs/lessons.md`, `docs/agent-session.md`, `docs/sessions/`) and update them to `.koji/` equivalents
-4. If `CLAUDE.md` exists, update any `docs/AI_HANDOFF.md`, `docs/lessons.md`, or `docs/agent-session.md` references to `.koji/`
-5. Set `DOCS_DIR` to `.koji` for the remainder of this workflow
-6. Skip Steps 2 and 3 (preferences and scaffolding) — files already exist. Proceed to Step 4.
+1. Create `.koji/` (and `.koji/sessions/` if `docs/sessions/` exists).
+2. Move **only** koji session files from `docs/` to `.koji/`: `agent-session.md`, `AI_HANDOFF.md`, `lessons.md`, `SESSION_TEMPLATE.md`, and `sessions/`. Do NOT move other project docs.
+3. Update any `docs/`-prefixed references inside the moved files to `.koji/` equivalents. Also update `CLAUDE.md` if it references those paths.
+4. Set `DOCS_DIR=.koji` and skip Steps 2-3 (files already exist) — proceed to Step 4.
 
-**If B (Keep in `docs/`):**
-1. Set `DOCS_DIR` to `docs` for the remainder of this workflow
-2. Skip Steps 2 and 3 — files already exist. Proceed to Step 4.
+**If B (Keep in `docs/`):** Set `DOCS_DIR=docs` and skip Steps 2-3 — proceed to Step 4.
 
 **Pass 2 — Scan for stray session files outside `$DOCS_DIR/`:**
 Search the project root for common session file names that may exist from before koji:
@@ -125,6 +118,10 @@ $DOCS_DIR/
 ├── AI_HANDOFF.md             # from templates/$TEMPLATE/
 ├── lessons.md                # from templates/$TEMPLATE/
 ├── SESSION_TEMPLATE.md       # from templates/$TEMPLATE/
+├── plans/                    # cross-session implementation handbooks
+│   └── .gitkeep
+├── research/                 # cross-session unvalidated findings
+│   └── .gitkeep
 └── sessions/                 # archive directory
     └── (INDEX.md if dated strategy)
 ```
@@ -134,6 +131,53 @@ Copy templates from `~/.claude/skills/koji/templates/$TEMPLATE/` to `$PROJECT_RO
 **Note:** `TODO.md` is NOT created here. It gets created automatically by `/wrap` the first time task-related work is done — no empty scaffolding.
 
 Also copy `SESSION_TEMPLATE.md` into `$DOCS_DIR/` so the project has a local reference.
+
+**Plans + research scaffolding.** Create `$DOCS_DIR/plans/` and `$DOCS_DIR/research/` with a `.gitkeep` and brief `README.md` in each:
+
+- **`plans/`** — implementation handbooks; `/duet-plan` locks, `/duet-impl` consumes.
+- **`research/`** — investigation findings pending validation; default `status: unvalidated`.
+
+Both surface in `/kick-off` (pending entries) and `/wrap` (status update + new-entry offer). Status field is optional — missing frontmatter degrades to the kind-default with `(inferred)` annotation.
+
+Write `$DOCS_DIR/plans/README.md` with this content (outer fence uses four backticks so the inner three-backtick `yaml` block is preserved verbatim):
+
+````markdown
+# Plans
+
+Implementation handbooks for designed-but-not-yet-implemented work. One file per
+plan. Use `koji-plans-research --set-status <path> <new>` to update status.
+
+Frontmatter (optional, all fields):
+
+```yaml
+---
+status: pending | in-progress | completed | archived   # default: pending
+origin-session: YYYY-MM-DD
+target: implementation
+next-step: brief one-line hint surfaced at /kick-off
+---
+```
+````
+
+Write `$DOCS_DIR/research/README.md`:
+
+````markdown
+# Research
+
+Investigation findings whose conclusions need validation before becoming
+canonical (e.g., ROADMAP / ASSESSMENT updates). One file per investigation.
+
+Frontmatter (optional, all fields):
+
+```yaml
+---
+status: unvalidated | validated | archived             # default: unvalidated
+origin-session: YYYY-MM-DD
+target: validation
+next-step: brief one-line hint surfaced at /kick-off
+---
+```
+````
 
 ### 4. Generate `.koji.yaml`
 
@@ -185,7 +229,7 @@ Session docs in `$DOCS_DIR/` (handoff, lessons, session log + Load on Kick-Off) 
 
 (Substitute the actual resolved `$DOCS_DIR` value — e.g., `.koji` or `docs` — when writing to CLAUDE.md. Do not write the literal string `$DOCS_DIR`.)
 
-**Why pointer-only, not auto-read instructions:** earlier koji versions inlined `Read $DOCS_DIR/AI_HANDOFF.md`, `Read $DOCS_DIR/TODO.md`, etc. into this block. That had two problems: (a) it duplicated `/kick-off`'s job (which also handles migrations, version-check, budget warning, drift report), and (b) `$DOCS_DIR/TODO.md` was wrong — TODO.md is at project root, not under `$DOCS_DIR/`. The pointer-only block fixes both: no auto-reads (use `/kick-off`), and the path hint is correct.
+(Earlier koji versions inlined auto-read instructions for handoff/TODO/lessons. Pointer-only defers to `/kick-off` instead, avoiding duplication and a wrong TODO.md path.)
 
 Tell the user: "Added koji session-management routing to CLAUDE.md. Start each session with `/kick-off`."
 

@@ -54,6 +54,15 @@ def lock_plan(
 ) -> None:
     body = strip_verdict_line(plan_content)
     date = datetime.now().strftime("%Y-%m-%d")
+    # YAML frontmatter for koji-plans-research; goes above the HTML comment
+    # so human-readable metadata shows first. Pre-YAML plans get `inferred`.
+    yaml_fm = (
+        "---\n"
+        "status: pending\n"
+        f"origin-session: {date}\n"
+        "target: implementation\n"
+        "---\n\n"
+    )
     header = (
         "<!--\n"
         "locked plan from /duet-plan\n"
@@ -65,7 +74,7 @@ def lock_plan(
         "-->\n\n"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(header + body)
+    out_path.write_text(yaml_fm + header + body)
 
 
 def main() -> int:

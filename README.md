@@ -2,7 +2,7 @@
 
 Session management for AI coding agents. Like a fermentation starter — seed any project with structured session continuity.
 
-koji gives your AI agent a memory across sessions: lessons learned, project state handoffs, and session logs with automatic archiving. Eight skills, one install. Pure bash + markdown, no build step.
+koji gives your AI agent a memory across sessions: lessons learned, project state handoffs, and session logs with automatic archiving. Nine skills, one install. Pure bash + markdown, no build step.
 
 ## Install
 
@@ -32,6 +32,14 @@ cd ~/.claude/skills/koji && ./setup
 | `/duet-review` | 2-reviewer adversarial code review. Claude + codex run in parallel as **background tasks** — keep working while they run — cross-review on disagreement, prompt to apply high-confidence fixes |
 
 All duet skills follow the [agent-autonomy principle](references/agent-autonomy.md): agents resolve technical questions together; users see prompts only for deadlocks and policy choices.
+
+**Triangulate** — user-as-participant cross-model decision.
+
+| Skill | What it does |
+|-------|-------------|
+| `/triangulate` | Claude + codex argue in parallel on one question with web research per voice. You synthesize the call. Optional save to `.koji/plans/` or `.koji/research/`, or update an existing plan — picked conversationally based on what's active in the project |
+
+Different shape from `/duet-*`: where the duet skills converge AI voices to consensus, `/triangulate` keeps **you** as a third reference point and the synthesizer.
 
 ## Quick Start
 
@@ -71,19 +79,24 @@ Global preferences (`commit_strategy`, `auto_update`) live in `~/.config/koji/co
 
 ## Notable features
 
-**Focus-filtered context at kick-off.** `/kick-off` doesn't dump everything — it loads a focus-filtered subset of `lessons.md` matched against your kick-off arg, last session's notes, open TODO items, plus a top-3 recency baseline. Tag entries `YYYY-MM-DD — [Agent] — [domain1,domain2] — …` to sharpen matching.
+**Focus-filtered context at kick-off.** `/kick-off` doesn't dump everything — it loads a focus-filtered subset of `lessons.md` matched against your kick-off arg, last session's notes, open TODO items, plus a top-3 recency baseline. Tag entries `YYYY-MM-DD — [tag1,tag2] — …` to sharpen matching.
 
 **Load on Kick-Off.** Add a `## Load on Kick-Off` section to `agent-session.md` listing docs to pull into context at session start. `/wrap` proposes adds/removes to keep it aligned with where the project is going. See [`kick-off/SKILL.md`](kick-off/SKILL.md).
 
 **Doc drift detection.** Tag any doc with `covers:` frontmatter listing the code paths it describes. `/kick-off` warns when covered paths have drifted past a commit threshold since the doc was last edited. `/inspect-doc-drift` audits the whole repo. Deterministic — no LLM needed.
 
-**Duet workflow.** Cross-model agent collaboration that doesn't block the user. `/duet-plan` runs a multi-round Claude↔codex dialogue till consensus, locks the plan. `/duet-impl` walks the plan gate-by-gate with codex review at each. `/duet-review` does a 2-reviewer adversarial pass with cross-review on disagreement. All three run reviewers as background tasks — you can keep working while they progress.
+**Duet workflow.** Cross-model agent collaboration that doesn't block the user. `/duet-plan` runs a multi-round Claude↔codex dialogue till consensus, locks the plan. `/duet-impl` walks the plan gate-by-gate with codex review at each. `/duet-review` does a 2-reviewer adversarial pass with severity-aware cross-review on any reviewer-exclusive medium/high disagreement; a hard gate plus `-PRELIMINARY` verdict suffix make sure the cross-review pass can't be silently skipped. All three run reviewers as background tasks — you can keep working while they progress. Codex defaults to `xhigh` effort; opt down with a natural-language signal in the invocation phrase.
+
+**Triangulation (`/triangulate`).** When you want multi-side debate but YOU should be the synthesizer (not the agents): Claude + codex argue in parallel on one question with web research per voice, present their positions, and you weigh and decide. Optional save to `.koji/plans/` or `.koji/research/`, or append a synthesis section to an existing plan — picked conversationally based on what's active in the project.
+
+**Plans + research working docs.** `.koji/plans/` (decided work, ready to implement) and `.koji/research/` (investigation findings, pending validation). Lightweight YAML frontmatter (`status:` field, kind-aware: pending/in-progress/completed/archived for plans, unvalidated/validated/archived for research). `/kick-off` surfaces pending entries; `/wrap` offers status updates for touched files and asks once per session whether to capture a new entry. `koji-plans-research --set-status <path> <new>` mutates from the command line. Drift-exempt (not code-coverage docs).
 
 ## Deeper docs
 
 The README is intentionally short. SKILL.md files have the details:
 - [`kick-off/SKILL.md`](kick-off/SKILL.md), [`wrap/SKILL.md`](wrap/SKILL.md), [`take-note/SKILL.md`](take-note/SKILL.md), [`koji-init/SKILL.md`](koji-init/SKILL.md), [`inspect-doc-drift/SKILL.md`](inspect-doc-drift/SKILL.md)
 - [`duet-plan/SKILL.md`](duet-plan/SKILL.md), [`duet-impl/SKILL.md`](duet-impl/SKILL.md), [`duet-review/SKILL.md`](duet-review/SKILL.md)
+- [`triangulate/SKILL.md`](triangulate/SKILL.md) — Claude + codex + you = 3 reference points on one decision
 - [`references/agent-autonomy.md`](references/agent-autonomy.md) — shared principle for the duet skills
 
 ## FAQ

@@ -1,5 +1,5 @@
 ---
-description: "Multi-round Claude↔codex planning dialogue that reaches consensus on a plan, then locks it to $DOCS_PATH/plans/. Use ONLY when the user explicitly says 'duet plan', 'duet-plan', 'let's duet plan X', or similar — the 'duet' keyword is required. Do not invoke on casual 'let's plan' or 'help me plan' phrases (too generic). Agents debate autonomously; user is escalated only when consensus stalls at the round limit."
+description: "Multi-round Claude↔codex planning dialogue. Locks the agreed plan to $DOCS_PATH/plans/. Invocation requires the 'duet' keyword."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools:
@@ -14,6 +14,10 @@ allowed-tools:
 # /duet-plan
 
 > Follows the [agent-autonomy principle](../references/agent-autonomy.md): agents resolve technical questions together; users see prompts only for policy choices and unresolved deadlocks.
+
+## When to invoke
+
+Use ONLY when the user explicitly types `/duet-plan`, says "duet plan", "duet-plan", "let's duet plan X", or similar — the `duet` keyword is required. Do NOT invoke on casual "let's plan" or "help me plan" phrases (too generic). Agents debate autonomously; user is escalated only when consensus stalls at the round limit.
 
 Multi-round Claude↔codex planning dialogue. Each round, Claude drafts/updates a plan and codex critiques. The skill detects consensus via `VERDICT:` markers; when both agents emit `AGREE` in the same round, the plan is locked to `$DOCS_PATH/plans/<slug>.md`. Process artifacts (round drafts and critiques) stay in `/tmp` and are cleaned up at end of run.
 
@@ -39,9 +43,10 @@ The topic is whatever the user provided. Examples of how to extract it:
 
 Flags:
 - `--rounds N` — round limit (default 5)
-- `--xhigh` — bump codex effort to xhigh (default high)
 - `--slug <name>` — override auto-derived plan slug
 - `--keep` — keep `/tmp/duet-plan-<sha>/` for debugging (default: cleaned)
+
+**Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens). The agent should drop to `high` (~15-min timeout, ~1× tokens) ONLY when the user's invocation phrase signals lighter effort — e.g., "quick check", "lighter pass", "use high effort", "save tokens", "fast pass". Don't downgrade for "the diff looks small" or similar heuristics; only on explicit user signal. Claude inherits the parent session's effort level — set `/effort max` once before running if you want max-tier Claude.
 
 ## Step 1 — Setup
 
@@ -50,13 +55,12 @@ RUN_DIR=$(mktemp -d -t duet-plan-XXXXXX)
 TOPIC="<topic from invocation>"
 echo "$TOPIC" > "$RUN_DIR/topic.txt"
 
-EFFORT="high"; [ "$XHIGH" = "1" ] && EFFORT="xhigh"
-TIMEOUT=$([ "$XHIGH" = "1" ] && echo 1800 || echo 900)
+# Effort: see "Codex effort" in Flags above for the opt-down rule.
+EFFORT="${EFFORT:-xhigh}"
+TIMEOUT="${TIMEOUT:-1800}"
 ROUND_LIMIT="${ROUNDS:-5}"
 TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
 PROMPT_TEMPLATES="$KOJI_SKILLS/duet-plan/references/prompt-templates.md"
-
-# Brief project context for the prompts (1-line)
 PROJECT_CONTEXT="(repo: $(basename "$PROJECT_ROOT"); branch: $(git branch --show-current 2>/dev/null || echo unknown))"
 
 echo "Topic: $TOPIC"

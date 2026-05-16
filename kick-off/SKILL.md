@@ -134,12 +134,9 @@ The sentinel lives at `$SESSION_START_FILE` (resolved by `koji-detect` to `~/.co
 ```bash
 mkdir -p "$SESSION_DIR"
 if [ ! -f "$SESSION_START_FILE" ]; then
-  # Use --verify so empty repos (no HEAD yet) skip cleanly. Without --verify,
-  # `git rev-parse HEAD` in an empty repo prints the literal string "HEAD" to
-  # stdout (with a fatal error to stderr) and exits 128 — both swallowed by
-  # 2>/dev/null and || true, leaving "HEAD" in the sentinel file. Later /wrap
-  # then resolves "HEAD" against any commit and produces an empty diff,
-  # silently masking the entire first session's work.
+  # --verify so empty repos skip cleanly. Without it, `git rev-parse HEAD`
+  # writes the literal "HEAD" to stdout (swallowed by 2>/dev/null) — the
+  # sentinel would later mask the entire first session's diff.
   if HEAD_SHA=$(git rev-parse --verify HEAD 2>/dev/null); then
     printf '%s\n' "$HEAD_SHA" > "$SESSION_START_FILE"
   fi
@@ -152,7 +149,7 @@ fi
 
 ### 0f. CLAUDE.md old-block migration
 
-Earlier koji versions (< v0.5.0) wrote a 3-instruction auto-read block into project `CLAUDE.md`. That block had two problems: (a) it duplicated `/kick-off`'s job (loaded handoff/TODO/lessons without migrations / budget warnings / drift coverage), and (b) it pointed `TODO.md` to `$DOCS_DIR/TODO.md` when TODO.md is canonically at project root — a failed read at every session start. Current `/koji-init` writes a pointer-only block. This step migrates existing projects.
+Earlier koji versions (< v0.5.0) wrote a 3-instruction auto-read block into project `CLAUDE.md` that duplicated `/kick-off`'s job and pointed `TODO.md` to the wrong path. Current `/koji-init` writes a pointer-only block; this step migrates existing projects.
 
 Detect the old block:
 
@@ -211,8 +208,6 @@ awk -v new_block_file="$NEW_BLOCK_FILE" '
 rm -f "$NEW_BLOCK_FILE"
 ```
 
-Where `$CLAUDE_TMP` was created right before the awk via `CLAUDE_TMP=$(mktemp "$PROJECT_ROOT/CLAUDE.md.XXXXXX")` — using `mktemp` (not a fixed `.tmp` name) so concurrent runs of `/kick-off` can't clobber each other's in-flight rewrites, and so a partial rewrite leaves a uniquely-named temp file rather than corrupting `CLAUDE.md` directly. The `||` cleanup ensures failed writes don't leak the temp.
-
 Tell the user (only after the `mv` succeeded): `Migrated CLAUDE.md to pointer-only koji block.`
 
 **If B**: do nothing this session — the check fires again next kick-off.
@@ -223,9 +218,7 @@ Tell the user (only after the `mv` succeeded): `Migrated CLAUDE.md to pointer-on
 ~/.claude/skills/koji/bin/koji-config set "claude_md_migration_declined_$SESSION_HASH" true
 ```
 
-Tell the user: `Won't ask again FOR THIS PROJECT. Edit CLAUDE.md manually if you change your mind, or unset with: koji-config set claude_md_migration_declined_$SESSION_HASH false`
-
-(The `$SESSION_HASH` namespacing means this decline only applies to this project. Other koji projects keep getting the prompt until they decline themselves.)
+Tell the user: `Won't ask again FOR THIS PROJECT. Edit CLAUDE.md manually if you change your mind, or unset with: koji-config set claude_md_migration_declined_$SESSION_HASH false` (the `$SESSION_HASH` namespacing keeps the decline project-scoped).
 
 ### 1. Check for user-provided focus
 
@@ -245,9 +238,7 @@ Read these files and internalize the content — do NOT dump them back to the us
    FOCUS=""
    [ -n "${USER_FOCUS:-}" ] && FOCUS="$USER_FOCUS"
    if [ -f "$DOCS_PATH/agent-session.md" ]; then
-     # Take the LATEST Notes for Next Session — /wrap appends sessions at the
-     # bottom, so the last occurrence in the file is the freshest. Overwrite
-     # the buffer on each new heading; print only at END.
+     # Latest Notes for Next Session (wrap appends at bottom).
      NOTES=$(awk '
        /^### Notes for Next Session[[:space:]]*$/ { capturing=1; buf=""; next }
        capturing && /^## |^### / { capturing=0 }
@@ -257,10 +248,8 @@ Read these files and internalize the content — do NOT dump them back to the us
      FOCUS="$FOCUS $NOTES"
    fi
    if [ "$HAS_TODO" = "true" ] && [ -f "$TODO_PATH" ]; then
-     # Pull the top of TODO.md (excluding the Completed section). The template
-     # uses heading-style tasks (`### Foo` + `- **Status**:`), not checkboxes,
-     # so a `grep '^- \[ \]'` filter would miss all default-template content.
-     # Token parser strips stopwords/headings downstream, so dumb is robust.
+     # Top of TODO.md, sans Completed. Template uses heading-style tasks,
+     # so dumb-include (not `grep '^- \[ \]'`) is intentional.
      TODOS=$(awk '/^## Completed/{exit} 1' "$TODO_PATH" 2>/dev/null | head -30)
      FOCUS="$FOCUS $TODOS"
    fi
@@ -282,19 +271,48 @@ Run:
 CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
 [ -n "$CURRENT_BRANCH" ] || CURRENT_BRANCH="detached"   # --show-current prints empty (not non-zero) on detached HEAD
 UNCOMMITTED=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-ACTIVE_PLANS=$(ls "$PROJECT_ROOT/.claude/plans/" 2>/dev/null | grep -c '\.md$' || echo 0)
+
+# Active plans + research entries from $PLANS_DIR and $RESEARCH_DIR.
+# Filter rules:
+#   plans     → status ∈ {pending, in-progress} AND status_source ∈ {explicit, inferred}
+#   research  → status = unvalidated AND status_source ∈ {explicit, inferred}
+#   invalid   → kept separately for the Frontmatter warnings line
+PLANS_RESEARCH=$(~/.claude/skills/koji/bin/koji-plans-research --list 2>/dev/null || true)
+ACTIVE_PLANS=$(printf '%s\n' "$PLANS_RESEARCH" | awk -F'\t' '
+  $2 == "plan" && $4 != "invalid" && ($3 == "pending" || $3 == "in-progress")
+' | wc -l | tr -d ' ')
+ACTIVE_RESEARCH=$(printf '%s\n' "$PLANS_RESEARCH" | awk -F'\t' '
+  $2 == "research" && $4 != "invalid" && $3 == "unvalidated"
+' | wc -l | tr -d ' ')
+INVALID_FM=$(printf '%s\n' "$PLANS_RESEARCH" | awk -F'\t' '$4 == "invalid"' | wc -l | tr -d ' ')
+
 echo "Branch: $CURRENT_BRANCH"
 echo "Uncommitted changes: $UNCOMMITTED"
 echo "Active plans: $ACTIVE_PLANS"
+echo "Active research: $ACTIVE_RESEARCH"
+[ "$INVALID_FM" -gt 0 ] && echo "Frontmatter warnings: $INVALID_FM"
 ```
 
-Internalize. Include branch in the brief header. Warn if uncommitted changes > 0. If active plans > 0, list them as available context.
+Internalize. Include branch in the brief header. Warn if uncommitted changes > 0.
+
+If `$ACTIVE_PLANS > 0` or `$ACTIVE_RESEARCH > 0`, **render one line per kind** in the brief (Step 3) — only when the count is positive — formatted as:
+
+> **Pending plans:** <slug-1> (in-progress), <slug-2> (pending, inferred)
+> **Pending research:** <slug-3> (UNVALIDATED — <next-step from frontmatter>)
+
+The `(inferred)` annotation fires when `status_source = inferred` (file has no YAML status; default applied). The trailing `— <next-step>` on research lines comes from the `next-step:` frontmatter field; omit the dash and the string when the field is empty (`-`).
+
+If `$INVALID_FM > 0`, list the invalid entries on a separate line so the user notices the typo and can fix it:
+
+> **Frontmatter warnings:** <path> (invalid status: `<raw>`)
+
+Filter records by walking `$PLANS_RESEARCH` (tab-separated `path\tkind\tstatus\tstatus_source\torigin\ttarget\tnext_step` per row).
 
 **Tier 2 — Reference-follow (if session note has references):**
 
 If the "Notes for Next Session" from step 2 mentions specific files, directories, plans, or modules:
 
-1. List `$PROJECT_ROOT/.claude/plans/` — read any plan whose filename matches keywords from the note
+1. List `$PLANS_DIR` and `$RESEARCH_DIR` — read any plan/research file whose filename matches keywords from the note
 2. Grep `$DOCS_PATH/$ARCHIVE_DIR/` for archived sessions matching the focus topic — read the top 2 matches (headers + summary only, not full entries)
 3. If the note mentions specific file paths, read them if they exist and are <200 lines
 
@@ -375,7 +393,7 @@ Each record in `$LOKO_REPORT` is tab-separated:
 <path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>
 ```
 
-with `status ∈ {fresh, stale, orphan, exempt, untagged, missing, malformed}`. The helper already honors `docs.stale_threshold` from `.koji.yaml` (default `10`) when deciding `fresh` vs `stale`. If `$LOKO_REPORT` is empty, the section is absent or has no valid bullets — skip the rest of this step silently.
+with `status ∈ {fresh, stale, orphan, exempt, untagged, working-doc, missing, malformed}`. The helper already honors `docs.stale_threshold` from `.koji.yaml` (default `10`) when deciding `fresh` vs `stale`. If `$LOKO_REPORT` is empty, the section is absent or has no valid bullets — skip the rest of this step silently.
 
 **For each record — decide load + warning based on `status` and `$STALE_ACTION`:**
 
@@ -388,6 +406,7 @@ with `status ∈ {fresh, stale, orphan, exempt, untagged, missing, malformed}`. 
 - `fresh` → Read the file silently; count as `loaded`.
 - `exempt` → Read the file silently; count as `loaded` (doc declared `covers: none` — intentionally untagged, no drift tracking expected).
 - `untagged` → Read the file silently; count as `untagged` (loaded but no drift signal).
+- `working-doc` → Read the file silently; count as `loaded` (file under `$PLANS_DIR/` or `$RESEARCH_DIR/` — koji working docs, never code-coverage docs; drift bookkeeping doesn't apply).
 
 Use the `Read` tool for each file that should load — internalize content, do NOT dump it back to the user.
 
@@ -401,10 +420,9 @@ TOTAL_TOKENS=$((TOTAL_CHARS / 4))   # standard ~4 chars/token approximation
 
 Also build a per-doc size list (path → chars) — keep it sorted by size descending, used if the budget warning fires.
 
-**Read budget config from `.koji.yaml`** (both keys optional, defaults apply if absent). Keys MUST be inside a top-level `docs:` block to be honored — a stray `budget_warn_tokens:` under another block is ignored. Truthy values for `budget_silent` accept the full YAML-conventional set (`true`/`yes`/`on`/`1`, case-insensitive); anything else is treated as false:
+**Read budget config from `.koji.yaml`** (both keys optional). Keys MUST live inside the top-level `docs:` block to be honored. `budget_silent` accepts `true`/`yes`/`on`/`1` (case-insensitive); anything else is false:
 
 ```bash
-# Scoped-to-docs: reader — emits the value of a key only if it lives inside `docs:`.
 _koji_read_docs_key() {
   awk -v key="$1" '
     /^docs:/ { in_docs=1; next }
@@ -502,9 +520,7 @@ Skip the menu. Emit a single actionable line alongside the brief, then continue 
 
 **Edge case — no `.koji.yaml` exists at all** (rare; file is normally created by `/koji-init`): omit options C and D from the menu. Show A and B only, plus the hint `Run /koji-init to persist koji config.`
 
-**Fail-safe**: if size computation or yaml parsing errors, skip the warning menu silently and continue. Budget awareness is a nice-to-have, not a blocker.
-
-**Fail-safe**: if the helper errors or returns unparseable output, degrade silently — never block kick-off on doc-loading issues.
+**Fail-safe**: if size computation, yaml parsing, or the helper errors out, degrade silently and continue — never block kick-off on doc-loading issues.
 
 ---
 
@@ -517,6 +533,9 @@ Output a concise briefing (not a wall of text):
 > Last session: [1-line summary of what was done]
 > Handoff says: [1-line — highest priority open task from TODO.md if it exists, otherwise from AI_HANDOFF.md]
 > Watching out for: [1-line gotcha from lessons, if relevant — otherwise skip]
+> [If active plans > 0: **Pending plans:** <slug> (<status>[, inferred]), ...]
+> [If active research > 0: **Pending research:** <slug> (UNVALIDATED[ — <next-step>]), ...]
+> [If invalid frontmatter > 0: **Frontmatter warnings:** <path> (invalid status: `<raw>`)]
 > [If tier 2: Context loaded: read plan X, 2 related archived sessions]
 > [If tier 3: Codebase: React 18 + Express, 12 source dirs]
 > [If uncommitted > 0: Note: N uncommitted changes from previous session]

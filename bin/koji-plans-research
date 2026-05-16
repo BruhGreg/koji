@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+# koji-plans-research — list/get/set status for $PLANS_DIR and $RESEARCH_DIR working docs.
+# This is the only code path that mutates the `status:` field.
+# Run with --help for usage, output schema, kind-defaults, and valid statuses.
+#
+# Requires koji-detect to have been sourced (uses $PLANS_DIR, $RESEARCH_DIR);
+# self-sources if those vars are unset.
+
+set -euo pipefail
+
+if [ -z "${PLANS_DIR:-}" ] || [ -z "${RESEARCH_DIR:-}" ]; then
+  eval "$(~/.claude/skills/koji/bin/koji-detect)"
+fi
+
+# --- frontmatter primitives ---
+
+# Read a YAML scalar field from the file's frontmatter. Echo empty if absent
+# or not in frontmatter. Stops at the closing `---` (anywhere within the
+# first 50 lines, to keep the read bounded for malformed files).
+_fm_get() {
+  local file="$1" key="$2"
+  [ -f "$file" ] || return 0
+  awk -v key="$key" '
+    { sub(/\r$/, "") }
+    NR == 1 { if ($0 != "---") exit 0; in_fm = 1; next }
+    NR > 50 { exit 0 }
+    in_fm && /^---[[:space:]]*$/ { exit 0 }
+    in_fm && $0 ~ "^"key"[[:space:]]*:" {
+      sub("^"key"[[:space:]]*:[[:space:]]*", "")
+      sub(/[[:space:]]+#.*$/, "")
+      sub(/[[:space:]]*$/, "")
+      n = length($0)
+      if (n >= 2) {
+        f = substr($0, 1, 1); l = substr($0, n, 1)
+        if ((f == "\"" && l == "\"") || (f == "\047" && l == "\047")) $0 = substr($0, 2, n - 2)
+      }
+      print
+      exit 0
+    }
+  ' "$file" 2>/dev/null
+}
+
+# Has a COMPLETE YAML frontmatter block (opens AND closes with `---` in
+# first 50 lines). Files that open but don't close → no-FM (cmd_set_status
+# needs a closing fence). `found` flag handles awk's mid-stream `exit` +
+# `END` interaction safely.
+_has_fm() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  awk '
+    { sub(/\r$/, "") }
+    NR == 1 { if ($0 != "---") exit 1; next }
+    NR > 50 { exit 1 }
+    /^---[[:space:]]*$/ { found=1; exit 0 }
+    END { exit (found ? 0 : 1) }
+  ' "$file" 2>/dev/null
+}
+
+# Valid-status check: returns 0 if $2 is a valid status for kind $1.
+_status_valid() {
+  local kind="$1" status="$2"
+  case "$kind" in
+    plan)
+      case "$status" in
+        pending|in-progress|completed|archived) return 0 ;;
+      esac
+      ;;
+    research)
+      case "$status" in
+        unvalidated|validated|archived) return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+# Default status per kind (used when YAML is absent).
+_default_status() {
+  case "$1" in
+    plan)     echo "pending" ;;
+    research) echo "unvalidated" ;;
+  esac
+}
+
+# --- one-record emit ---
+
+# Emit a tab-separated record for one file. $1 = absolute path, $2 = kind.
+_emit_record() {
+  local abs="$1" kind="$2"
+  local rel="${abs#"$PROJECT_ROOT/"}"
+
+  local origin target next_step
+  local status status_source
+
+  if _has_fm "$abs"; then
+    local raw_status
+    raw_status=$(_fm_get "$abs" "status")
+    if [ -z "$raw_status" ]; then
+      # YAML present but no `status:` field — treat as inferred.
+      status=$(_default_status "$kind")
+      status_source="inferred"
+    elif _status_valid "$kind" "$raw_status"; then
+      status="$raw_status"
+      status_source="explicit"
+    else
+      status="$raw_status"
+      status_source="invalid"
+    fi
+    origin=$(_fm_get "$abs" "origin-session")
+    target=$(_fm_get "$abs" "target")
+    next_step=$(_fm_get "$abs" "next-step")
+  else
+    status=$(_default_status "$kind")
+    status_source="inferred"
+    origin=""
+    target=""
+    next_step=""
+  fi
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$rel" \
+    "$kind" \
+    "$status" \
+    "$status_source" \
+    "${origin:--}" \
+    "${target:--}" \
+    "${next_step:--}"
+}
+
+# Resolve a user-given path to (abs_path, kind). Kind is derived from which
+# directory contains the file. Returns 0 on success, non-zero on failure.
+_resolve_kind() {
+  local input="$1"
+  local abs
+
+  case "$input" in
+    /*) abs="$input" ;;
+    *)  abs="$PROJECT_ROOT/$input" ;;
+  esac
+
+  # Reject `..` / `.` segments BEFORE canonicalizing. Without this, a path
+  # like `plans/../setup` would pass the literal `"$PLANS_DIR"/*` check and
+  # let --set-status rewrite frontmatter in an arbitrary repo file. Even
+  # adversarial paths whose canonical form happens to land back inside should
+  # be rejected — the rule is "no traversal segments at all."
+  case "$abs" in
+    *"/.."*|*"/./"*|*"/..") return 4 ;;
+  esac
+
+  if [ ! -f "$abs" ]; then
+    return 1
+  fi
+
+  # Reject scaffold files (README.md, .gitkeep) — they're not working-doc
+  # entries even though they live under $PLANS_DIR / $RESEARCH_DIR.
+  if _is_scaffold "$abs"; then
+    return 3
+  fi
+
+  # Canonicalize the path before the prefix check so a symlink farm or a
+  # `plans/foo/../../setup.md` (caught above, belt-and-braces) can't slip past.
+  local abs_real plans_real research_real
+  abs_real="$(cd "$(dirname "$abs")" 2>/dev/null && pwd -P)/$(basename "$abs")"
+  plans_real="$(cd "$PLANS_DIR" 2>/dev/null && pwd -P)"
+  research_real="$(cd "$RESEARCH_DIR" 2>/dev/null && pwd -P)"
+
+  case "$abs_real" in
+    "$plans_real"/*)    echo "plan $abs_real";    return 0 ;;
+    "$research_real"/*) echo "research $abs_real"; return 0 ;;
+  esac
+  return 2
+}
+
+# --- modes ---
+
+# Scaffold files (created by /koji-init) that are NOT plans/research entries.
+# Excluded from --list, --get, --set-status to avoid showing as phantom pending
+# entries at /kick-off.
+_is_scaffold() {
+  case "$(basename "$1")" in
+    README.md|.gitkeep) return 0 ;;
+  esac
+  return 1
+}
+
+cmd_list() {
+  local f
+  if [ -d "$PLANS_DIR" ]; then
+    find "$PLANS_DIR" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      _is_scaffold "$f" && continue
+      _emit_record "$f" "plan"
+    done
+  fi
+  if [ -d "$RESEARCH_DIR" ]; then
+    find "$RESEARCH_DIR" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      _is_scaffold "$f" && continue
+      _emit_record "$f" "research"
+    done
+  fi
+}
+
+cmd_get() {
+  local input="$1"
+  local result rc=0
+  # `set -e` would abort on _resolve_kind's non-zero return inside a command
+  # substitution before we can read $?. Use `if … else` to capture the exit
+  # status without tripping errexit.
+  if result=$(_resolve_kind "$input"); then
+    :
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    case "$rc" in
+      1) printf 'ERROR: file not found: %s\n' "$input" >&2 ;;
+      2) printf 'ERROR: file is not under $PLANS_DIR or $RESEARCH_DIR: %s\n' "$input" >&2 ;;
+      3) printf 'ERROR: scaffold file (README.md / .gitkeep) is not a plan/research entry: %s\n' "$input" >&2 ;;
+      4) printf 'ERROR: path may not contain ".." or "." segments: %s\n' "$input" >&2 ;;
+    esac
+    return "$rc"
+  fi
+  local kind abs
+  kind="${result%% *}"
+  abs="${result#* }"
+  _emit_record "$abs" "$kind"
+}
+
+# Line-oriented frontmatter status updater. Three cases:
+#   1. Frontmatter exists AND `status:` line exists → replace that line
+#   2. Frontmatter exists AND no `status:` line     → insert after opening `---`
+#   3. No frontmatter                                → prepend minimal block
+# All bytes outside the touched line(s) are preserved verbatim.
+cmd_set_status() {
+  local input="$1" new_status="$2"
+
+  local result rc=0
+  if result=$(_resolve_kind "$input"); then
+    :
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    case "$rc" in
+      1) printf 'ERROR: file not found: %s\n' "$input" >&2 ;;
+      2) printf 'ERROR: file is not under $PLANS_DIR or $RESEARCH_DIR: %s\n' "$input" >&2 ;;
+      3) printf 'ERROR: scaffold file (README.md / .gitkeep) is not a plan/research entry: %s\n' "$input" >&2 ;;
+      4) printf 'ERROR: path may not contain ".." or "." segments: %s\n' "$input" >&2 ;;
+    esac
+    return "$rc"
+  fi
+  local kind abs
+  kind="${result%% *}"
+  abs="${result#* }"
+
+  if ! _status_valid "$kind" "$new_status"; then
+    printf 'ERROR: invalid status %q for kind %s\n' "$new_status" "$kind" >&2
+    case "$kind" in
+      plan)     printf '  valid: pending | in-progress | completed | archived\n' >&2 ;;
+      research) printf '  valid: unvalidated | validated | archived\n' >&2 ;;
+    esac
+    return 2
+  fi
+
+  local today tmp
+  today=$(date +%Y-%m-%d)
+  tmp=$(mktemp "${abs}.XXXXXX")
+
+  # Preserve line endings: if the original file uses CRLF, keep CRLF on output.
+  # The awk below strips `\r$` for pattern matching; without re-adding it on
+  # write, a Windows-authored file would be silently rewritten to LF.
+  #
+  # Probe the first 5 lines (not just line 1) — handles the empty-file case
+  # (a brand-new plan stub) and the mixed-line-endings case (where line 1 may
+  # be LF but later lines are CRLF after a partial edit).
+  local crlf=""
+  if head -5 "$abs" 2>/dev/null | grep -q $'\r$'; then
+    crlf=$'\r'
+  fi
+
+  if _has_fm "$abs"; then
+    # Frontmatter exists. Find the `status:` line if present; otherwise insert
+    # after the opening `---`. Preserves CRLF if the original file used it.
+    awk -v new_status="$new_status" -v crlf="$crlf" '
+      BEGIN { in_fm = 0; done = 0 }
+      { sub(/\r$/, "") }
+      NR == 1 {
+        if ($0 == "---") { in_fm = 1; print $0 crlf; next }
+        print $0 crlf; next
+      }
+      in_fm && /^---[[:space:]]*$/ {
+        # Closing fence. If we never found a status line, insert one now.
+        if (!done) { print "status: " new_status crlf; done = 1 }
+        in_fm = 0
+        print $0 crlf
+        next
+      }
+      in_fm && /^status[[:space:]]*:/ && !done {
+        print "status: " new_status crlf
+        done = 1
+        next
+      }
+      { print $0 crlf }
+    ' "$abs" > "$tmp"
+  else
+    # No frontmatter. Prepend a minimal block. Honor the file's existing line
+    # endings when re-appending the body (cat preserves CRLF/LF as-is).
+    {
+      printf -- '---%s\n' "$crlf"
+      printf 'status: %s%s\n' "$new_status" "$crlf"
+      printf 'origin-session: %s%s\n' "$today" "$crlf"
+      printf -- '---%s\n%s\n' "$crlf" "$crlf"
+      cat "$abs"
+    } > "$tmp"
+  fi
+
+  mv "$tmp" "$abs"
+  printf 'set %s status=%s\n' "${abs#"$PROJECT_ROOT/"}" "$new_status"
+}
+
+# --- dispatch ---
+
+case "${1:-}" in
+  --list)
+    cmd_list
+    ;;
+  --get)
+    [ $# -ge 2 ] || { echo "ERROR: --get requires a path" >&2; exit 1; }
+    cmd_get "$2"
+    ;;
+  --set-status)
+    [ $# -ge 3 ] || { echo "ERROR: --set-status requires <path> <new-status>" >&2; exit 1; }
+    cmd_set_status "$2" "$3"
+    ;;
+  --help|-h|"")
+    cat <<'USAGE'
+koji-plans-research — read/write status for plans and research working docs.
+
+Usage:
+  koji-plans-research --list
+  koji-plans-research --get <path>
+  koji-plans-research --set-status <path> <new-status>
+
+Output (--list, --get) is tab-separated:
+  <path>\t<kind>\t<status>\t<status_source>\t<origin>\t<target>\t<next_step>
+
+Valid statuses:
+  plan      pending | in-progress | completed | archived
+  research  unvalidated | validated | archived
+
+status_source ∈ {explicit, inferred, invalid}:
+  explicit  — YAML present and value is valid for the kind
+  inferred  — YAML missing entirely; kind-default applied (pending / unvalidated)
+  invalid   — YAML present but value is not in the valid set
+USAGE
+    ;;
+  *)
+    printf 'ERROR: unknown mode: %s\n' "$1" >&2
+    printf 'Run with --help for usage.\n' >&2
+    exit 1
+    ;;
+esac
