@@ -254,7 +254,23 @@ echo "Plan saved: $OUT"
 
 Report the saved path to the user.
 
-## Step 4 — Cleanup
+## Step 4 — Research capture (optional, judgment-gated)
+
+The multi-round dialogue often produces substantial investigation as a
+byproduct of converging on the plan — web fetches, code reads, alternatives
+weighed, dead-ends considered. Sometimes that byproduct is the higher-value
+artifact (future you wants the model and reasoning, not just the plan).
+
+Apply the criteria in [`../references/research-capture-eval.md`](../references/research-capture-eval.md)
+to the dialogue that just happened. If the reference's signals fire (judgment,
+not checkbox), surface the exit-prompt from that reference. Otherwise stay
+silent — no prompt, no mention.
+
+If the user accepts, draft the research file using the body structure from
+the reference and write it to `$RESEARCH_DIR/<slug>.md`. Slug is derived
+from the topic; existing files auto-suffix.
+
+## Step 5 — Cleanup
 
 ```bash
 if [ "${KEEP:-0}" = "1" ]; then
@@ -265,7 +281,7 @@ else
 fi
 ```
 
-## Step 5 — Report
+## Step 6 — Report
 
 Print a brief summary:
 

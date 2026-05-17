@@ -89,7 +89,7 @@ agents:                      # 工作階段條目的標籤
 
 **三角化(`/triangulate`)。** 當你想要多方論述但希望由「你」當綜合者(而不是讓代理收斂)時:Claude + codex 並行針對單一問題論述,各自可進行網路研究,呈現立場,你權衡與決定。可選擇儲存到 `.koji/plans/` 或 `.koji/research/`,或將綜合段落附加到既有計畫——根據專案目前進行中的項目以對話方式選擇。
 
-**計畫與研究工作文件。** `.koji/plans/`(已決定、待實作的工作)與 `.koji/research/`(調查發現,待驗證)。輕量的 YAML frontmatter(`status:` 欄位,依類型而定:plans 為 pending/in-progress/completed/archived,research 為 unvalidated/validated/archived)。`/kick-off` 會在工作階段開始時列出待辦項目;`/wrap` 會對本工作階段觸碰過的檔案詢問狀態更新,並每個工作階段詢問一次是否要建立新項目。`koji-plans-research --set-status <path> <new>` 可從命令列修改。漂移豁免(不是程式碼覆蓋文件)。
+**計畫與研究工作文件。** `.koji/plans/`(已決定、待實作的工作)與 `.koji/research/`(調查發現,待驗證)。輕量的 YAML frontmatter(`status:` 欄位,依類型而定:plans 為 pending/in-progress/completed/archived,research 為 unvalidated/validated/archived)。`/kick-off` 會在工作階段開始時列出待辦項目;`/duet-impl` 會在執行結束時將計畫標記為 `completed`;`koji-plans-research --set-status <path> <new>` 可從命令列修改。漂移豁免(不是程式碼覆蓋文件)。
 
 ## 更詳細的文件
 

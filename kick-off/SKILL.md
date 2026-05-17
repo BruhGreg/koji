@@ -184,7 +184,7 @@ CLAUDE_TMP=$(mktemp "$PROJECT_ROOT/CLAUDE.md.XXXXXX")
 cat > "$NEW_BLOCK_FILE" <<EOF
 ## Session Management (koji)
 
-Session docs in \`$DOCS_DIR/\` (handoff, lessons, session log + Load on Kick-Off) and \`$TODO_FILE\` at project root. Use \`/kick-off\` to start a session, \`/wrap\` to end, \`/take-note\` mid-session.
+Session docs in \`$DOCS_DIR/\` (handoff, lessons, session log + Load on Kick-Off) and \`$TODO_FILE\` at project root. Use \`/kick-off\` to start a session, \`/wrap\` to end, \`/take-note\` mid-session. For substantial research worth keeping, capture to \`$DOCS_DIR/research/\` — see \`~/.claude/skills/koji/references/research-capture-eval.md\` for criteria.
 EOF
 
 awk -v new_block_file="$NEW_BLOCK_FILE" '
@@ -219,6 +219,83 @@ Tell the user (only after the `mv` succeeded): `Migrated CLAUDE.md to pointer-on
 ```
 
 Tell the user: `Won't ask again FOR THIS PROJECT. Edit CLAUDE.md manually if you change your mind, or unset with: koji-config set claude_md_migration_declined_$SESSION_HASH false` (the `$SESSION_HASH` namespacing keeps the decline project-scoped).
+
+### 0g. CLAUDE.md research-capture-eval pointer migration (v0.5.6)
+
+`/koji-init` (v0.5.6+) writes a research-capture-eval pointer into the project's `## Session Management (koji)` block. This step migrates existing projects whose koji block predates the addition.
+
+Detect:
+
+```bash
+RC_BLOCK_DETECTED=false
+if [ -f "$PROJECT_ROOT/CLAUDE.md" ]; then
+  awk '
+    /^## Session Management \(koji\)/ { in_block=1; block_exists=1; next }
+    in_block && /^## / { in_block=0 }
+    in_block && /research-capture-eval/ { found=1 }
+    END {
+      # exit 0 if block exists AND pointer is missing (needs migration)
+      if (block_exists && !found) exit 0
+      exit 1
+    }
+  ' "$PROJECT_ROOT/CLAUDE.md" 2>/dev/null && RC_BLOCK_DETECTED=true
+fi
+
+RC_DECLINED=$(~/.claude/skills/koji/bin/koji-config get "claude_md_research_capture_declined_$SESSION_HASH" 2>/dev/null || true)
+```
+
+If `RC_BLOCK_DETECTED=true` AND `RC_DECLINED` is not `true`, use AskUserQuestion:
+
+> Your CLAUDE.md's koji block doesn't mention the research-capture-eval reference (v0.5.6 addition). When investigation produces "too valuable to throw away" findings during `/duet-plan`, `/triangulate`, or vanilla prompts, this pointer tells the agent where to capture them. Add it now?
+
+Options:
+- **A) Migrate now** (recommended) — extend the koji block with the research-capture-eval pointer
+- **B) Skip this time** — ask again next kick-off
+- **C) Decline permanently for this project** — never ask again
+
+**If A**, rewrite the block atomically (same awk pattern as 0f):
+
+```bash
+NEW_BLOCK_FILE=$(mktemp)
+CLAUDE_TMP=$(mktemp "$PROJECT_ROOT/CLAUDE.md.XXXXXX")
+cat > "$NEW_BLOCK_FILE" <<EOF
+## Session Management (koji)
+
+Session docs in \`$DOCS_DIR/\` (handoff, lessons, session log + Load on Kick-Off) and \`$TODO_FILE\` at project root. Use \`/kick-off\` to start a session, \`/wrap\` to end, \`/take-note\` mid-session. For substantial research worth keeping, capture to \`$DOCS_DIR/research/\` — see \`~/.claude/skills/koji/references/research-capture-eval.md\` for criteria.
+EOF
+
+awk -v new_block_file="$NEW_BLOCK_FILE" '
+  BEGIN {
+    while ((getline line < new_block_file) > 0) {
+      new_block = (new_block == "" ? line : new_block ORS line)
+    }
+    close(new_block_file)
+  }
+  /^## Session Management \(koji\)/ {
+    print new_block
+    print ""
+    in_block=1
+    next
+  }
+  in_block && /^## / { in_block=0 }
+  !in_block { print }
+' "$PROJECT_ROOT/CLAUDE.md" > "$CLAUDE_TMP" \
+  && mv "$CLAUDE_TMP" "$PROJECT_ROOT/CLAUDE.md" \
+  || { rm -f "$CLAUDE_TMP" "$NEW_BLOCK_FILE"; echo "ERROR: migration failed; CLAUDE.md unchanged" >&2; return 1 2>/dev/null || exit 1; }
+rm -f "$NEW_BLOCK_FILE"
+```
+
+Tell the user (only after the `mv` succeeded): `Added research-capture-eval pointer to CLAUDE.md's koji block.`
+
+**If B**: do nothing this session — the check fires again next kick-off.
+
+**If C**: persist the decline:
+
+```bash
+~/.claude/skills/koji/bin/koji-config set "claude_md_research_capture_declined_$SESSION_HASH" true
+```
+
+Tell the user: `Won't ask again FOR THIS PROJECT. Edit CLAUDE.md manually if you change your mind, or unset with: koji-config set claude_md_research_capture_declined_$SESSION_HASH false`.
 
 ### 1. Check for user-provided focus
 

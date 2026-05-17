@@ -108,6 +108,35 @@ Options:
 - A) Numbered — `archive-01.md`, `archive-02.md`, etc. (recommended)
 - B) Dated — `YYYY-MM/DD-slug.md` with INDEX.md lookup table
 
+### 2b. Permission Mode
+
+Fires if `permissions.defaultMode` is absent from **both** `$PROJECT_ROOT/.claude/settings.local.json` AND `$PROJECT_ROOT/.claude/settings.json`. Re-ask behavior — existing projects pick this up on re-running `/koji-init`. Skip silently when either file already has the field set.
+
+Use AskUserQuestion:
+
+> Claude Code can prompt before each tool call (default), or auto-allow them via
+> `bypassPermissions` mode. The setting lands in `.claude/settings.local.json` —
+> per-machine, never committed. Recommended for trusted personal projects; keep
+> prompts for shared/prod work where per-tool review is part of the workflow.
+
+Options:
+- A) Auto-allow tools — set `permissions.defaultMode: bypassPermissions` (recommended for personal projects)
+- B) Keep per-tool prompts — standard Claude Code behavior
+
+If A: write `permissions.defaultMode: bypassPermissions` into `$PROJECT_ROOT/.claude/settings.local.json`, preserving any existing JSON:
+
+```bash
+F="$PROJECT_ROOT/.claude/settings.local.json"
+mkdir -p "$(dirname "$F")"
+if [ -f "$F" ]; then
+  TMP=$(mktemp) && jq '.permissions.defaultMode = "bypassPermissions"' "$F" > "$TMP" && mv "$TMP" "$F"
+else
+  printf '%s\n' '{"permissions": {"defaultMode": "bypassPermissions"}}' > "$F"
+fi
+```
+
+If B: do nothing.
+
 ### 3. Create Scaffolding
 
 Based on answers, create the following (skip files that already exist):
@@ -137,7 +166,7 @@ Also copy `SESSION_TEMPLATE.md` into `$DOCS_DIR/` so the project has a local ref
 - **`plans/`** — implementation handbooks; `/duet-plan` locks, `/duet-impl` consumes.
 - **`research/`** — investigation findings pending validation; default `status: unvalidated`.
 
-Both surface in `/kick-off` (pending entries) and `/wrap` (status update + new-entry offer). Status field is optional — missing frontmatter degrades to the kind-default with `(inferred)` annotation.
+Both surface in `/kick-off` (pending entries). `/duet-impl` Step 4 marks plans `completed` at end of run. Status field is optional — missing frontmatter degrades to the kind-default with `(inferred)` annotation.
 
 Write `$DOCS_DIR/plans/README.md` with this content (outer fence uses four backticks so the inner three-backtick `yaml` block is preserved verbatim):
 
@@ -213,7 +242,7 @@ Check if `CLAUDE.md` exists in the project root.
 
 ## Session Management (koji)
 
-Session docs in `$DOCS_DIR/` (handoff, lessons, session log + Load on Kick-Off) and `TODO.md` at project root. Use `/kick-off` to start a session, `/wrap` to end, `/take-note` mid-session.
+Session docs in `$DOCS_DIR/` (handoff, lessons, session log + Load on Kick-Off) and `$TODO_FILE` at project root. Use `/kick-off` to start a session, `/wrap` to end, `/take-note` mid-session. For substantial research worth keeping, capture to `$DOCS_DIR/research/` — see `~/.claude/skills/koji/references/research-capture-eval.md` for criteria.
 ```
 
 **If `CLAUDE.md` does not exist:**
@@ -224,10 +253,10 @@ Session docs in `$DOCS_DIR/` (handoff, lessons, session log + Load on Kick-Off) 
 
 ## Session Management (koji)
 
-Session docs in `$DOCS_DIR/` (handoff, lessons, session log + Load on Kick-Off) and `TODO.md` at project root. Use `/kick-off` to start a session, `/wrap` to end, `/take-note` mid-session.
+Session docs in `$DOCS_DIR/` (handoff, lessons, session log + Load on Kick-Off) and `$TODO_FILE` at project root. Use `/kick-off` to start a session, `/wrap` to end, `/take-note` mid-session. For substantial research worth keeping, capture to `$DOCS_DIR/research/` — see `~/.claude/skills/koji/references/research-capture-eval.md` for criteria.
 ```
 
-(Substitute the actual resolved `$DOCS_DIR` value — e.g., `.koji` or `docs` — when writing to CLAUDE.md. Do not write the literal string `$DOCS_DIR`.)
+(Substitute the actual resolved values — `$DOCS_DIR` to e.g. `.koji` or `docs`, `$TODO_FILE` to e.g. `TODO.md` or `TODOS.md` — when writing to CLAUDE.md. Do not write the literal `$DOCS_DIR` / `$TODO_FILE` strings.)
 
 (Earlier koji versions inlined auto-read instructions for handoff/TODO/lessons. Pointer-only defers to `/kick-off` instead, avoiding duplication and a wrong TODO.md path.)
 

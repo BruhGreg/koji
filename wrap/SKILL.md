@@ -355,111 +355,6 @@ The gates above (top of Step 2c) handle every combination of `TAGGED_EXISTS` × 
 
 ---
 
-## Step 2d — Plans & research touched this session (status update)
-
-**Gated on touched files.** This sub-step fires only if the session touched files under `$PLANS_DIR/` or `$RESEARCH_DIR/`. Most sessions touch neither; skip silently when the touched list is empty.
-
-**Detection** (mirrors Step 2c's union pattern — catches committed + working-tree + untracked):
-
-```bash
-SESSION_START=$(cat "$SESSION_START_FILE" 2>/dev/null || true)
-if [ -n "$SESSION_START" ] && git rev-parse --verify "$SESSION_START" >/dev/null 2>&1; then
-  TOUCHED_PR=$( (git diff --name-only "$SESSION_START..HEAD" -- "$PLANS_DIR/" "$RESEARCH_DIR/" 2>/dev/null;
-                 git diff --name-only HEAD -- "$PLANS_DIR/" "$RESEARCH_DIR/" 2>/dev/null;
-                 git ls-files --others --exclude-standard -- "$PLANS_DIR/" "$RESEARCH_DIR/" 2>/dev/null) | sort -u)
-else
-  TOUCHED_PR=$( (git diff --name-only HEAD -- "$PLANS_DIR/" "$RESEARCH_DIR/" 2>/dev/null;
-                 git ls-files --others --exclude-standard -- "$PLANS_DIR/" "$RESEARCH_DIR/" 2>/dev/null) | sort -u)
-fi
-
-# If empty, skip the rest of Step 2d entirely (no output).
-# Intent is conveyed by the prose below — there is no bash short-circuit
-# inside SKILL.md prose blocks; agents read this section sequentially.
-```
-
-If `TOUCHED_PR` is empty, skip the rest of Step 2d entirely (no output).
-
-**Resolve each touched file's kind + current status** via the helper:
-
-```bash
-echo "$TOUCHED_PR" | while IFS= read -r path; do
-  [ -n "$path" ] || continue
-  ~/.claude/skills/koji/bin/koji-plans-research --get "$path" 2>/dev/null
-done
-```
-
-Each record is `path\tkind\tstatus\tstatus_source\torigin\ttarget\tnext_step`. Use `kind` to pick the valid-status menu and `status_source=inferred` to detect newly-created or YAML-less files (those get an `add-frontmatter` option, since `--set-status` on them will prepend the frontmatter block).
-
-**AskUserQuestion batching — bounded by count of touched files:**
-
-- **1-3 touched:** fire one `AskUserQuestion` per file (sequential). Options depend on `kind`:
-  - **plan**: `Leave at current` / `Advance to in-progress` / `Mark completed` / `Mark archived`
-  - **research**: `Leave at current` / `Mark validated` / `Mark archived`
-  - **Newly-created (`status_source=inferred`)**: add a fifth option, `Add frontmatter (set status: <default>)` — which calls `--set-status` with the kind-default to prepend the YAML block.
-- **4+ touched:** fire a single batched `AskUserQuestion` with three options — `Leave all unchanged` / `Review each manually (open list)` / `Batch-mark all to <next-status>`. The batch option only fires when all touched files are the same kind. If mixed kinds, drop the batch option and present the first two only.
-
-**Apply** the user's choice by calling `koji-plans-research --set-status <path> <new>`. The helper handles the line-oriented frontmatter edit (replace existing `status:`, insert into existing frontmatter, or prepend a minimal block when none exists).
-
-**Non-interactive fallback** (when `AskUserQuestion` is not callable): print one line and continue.
-
-> Touched plans/research this session: <list>. No status changes (non-interactive).
-
----
-
-## Step 2e — Capture new durable artifact from this session?
-
-**Always fires** unless suppressed by `KOJI_SKIP_NEW_ENTRY=1`. Independent of Step 2d — the question is *"did this session produce work that should become a new plan or research file?"*, which is meaningful whether or not existing files were touched.
-
-**Suppress entirely** when `KOJI_SKIP_NEW_ENTRY=1` is set, OR when `AskUserQuestion` is not callable (non-interactive mode — emit nothing). Both checks are prose-level — read the env var via `printenv KOJI_SKIP_NEW_ENTRY` or `echo "$KOJI_SKIP_NEW_ENTRY"`, and skip the rest of this step when either condition holds. (No bash short-circuit appears here because SKILL.md prose blocks aren't executable scripts.)
-
-**Otherwise**, fire one `AskUserQuestion`:
-
-> Did this session produce work that should become a new plan or research file?
-
-Options (3-way to keep within prompt-option limits):
-
-- **None** — move on.
-- **Plan** — prompt for a slug (kebab-case, no extension). Run `mkdir -p "$PLANS_DIR"` first (existing projects may lack the dir — `/koji-init` only scaffolds it on fresh installs). Then write `$PLANS_DIR/<slug>.md` with:
-  ```yaml
-  ---
-  status: pending
-  origin-session: <today>
-  target: implementation
-  next-step: <empty — user fills in>
-  ---
-
-  # <slug>
-
-  <!-- TODO: fill in the plan body before commit. -->
-  ```
-  Tell the user the path that was written and remind them to fill in the body.
-- **Research** — same flow (`mkdir -p "$RESEARCH_DIR"` first) with `$RESEARCH_DIR/<slug>.md`:
-  ```yaml
-  ---
-  status: unvalidated
-  origin-session: <today>
-  target: validation
-  next-step: <empty — user fills in>
-  ---
-
-  # <slug>
-
-  <!-- TODO: fill in the investigation findings + validation steps before commit. -->
-  ```
-
-**If the user wants both**: after the chosen file is written, fire one more `AskUserQuestion`:
-
-> Also create a research file? (no / yes)
-> (or for the inverse: "Also create a plan file?")
-
-Two narrow prompts keep AskUserQuestion option counts low and let the user pick slugs separately.
-
-**Existing-file conflict:** if `$PLANS_DIR/<slug>.md` already exists, auto-suffix (`<slug>-2.md`, then `-3`, etc.). Print the actual written path.
-
-**Escape-hatch nudge.** If the user has answered `None` 3+ wraps in a row (track via `$SESSION_DIR/new-entry-declined` count, bump on `None`, reset on `Plan`/`Research`), mention `KOJI_SKIP_NEW_ENTRY=1` in passing.
-
----
-
 ## Step 3 — Session Log
 
 1. Read `$DOCS_PATH/agent-session.md`
@@ -496,10 +391,14 @@ Two narrow prompts keep AskUserQuestion option counts low and let the user pick 
 
 ## Step 4 — Permission Hygiene
 
-Check if `.claude/settings.local.json` exists. If it does:
+Resolve paths via `$PROJECT_ROOT/.claude/settings.local.json` and `$PROJECT_ROOT/.claude/settings.json` — relative `.claude/...` is unreliable across cwd contexts (hooks, subshells). Treat missing/unreadable files as not having any fields set (absent `settings.local.json` is normal for fresh sessions; absent `settings.json` is normal for fresh projects).
 
-1. Read `.claude/settings.local.json` (session-accumulated permissions)
-2. Read `.claude/settings.json` (committed permissions)
+**Bypass short-circuit.** If either file has `permissions.defaultMode == "bypassPermissions"`, skip the rest of Step 4 silently. Bypass-mode entries are session noise (auto-allowed tool calls), not curated grants — promoting them would bloat `settings.json` with machine-specific cruft. Move to Step 5.
+
+Otherwise, if `settings.local.json` exists:
+
+1. Read `settings.local.json` (session-accumulated permissions)
+2. Read `settings.json` (committed permissions)
 3. Compare — find permissions in local that aren't already in committed
 4. **Filter with judgement.** First, check existing `settings.json` permissions — if a new permission is already covered by a broader pattern (e.g., `Bash(git diff:*)` already covers `Bash(git diff --stat)`), skip it entirely. Then categorize the remaining into three buckets:
 
@@ -531,7 +430,7 @@ Check if `.claude/settings.local.json` exists. If it does:
    > One permission needs your call:
    > - `Bash(docker compose:*)` — keep for next session? (y/n)
 
-7. Merge auto-promoted + user-approved into `.claude/settings.json`, preserving existing entries. Do not duplicate.
+7. Merge auto-promoted + user-approved into `settings.json`, preserving existing entries. Do not duplicate.
 8. If nothing new to promote, skip this step entirely — no output.
 
 ---
@@ -589,7 +488,7 @@ Check if `.claude/settings.local.json` exists. If it does:
    [ -n "$SESSION_DIR" ] && rm -f "$SESSION_DIR/duet-rules.json"
    rmdir "$SESSION_DIR" 2>/dev/null || true
    ```
-   Idempotent. The `[ -n "$SESSION_DIR" ]` guard prevents `rm -f /duet-rules.json` if the variable is unset. `rmdir` is a no-op if other state lives in the dir — sibling skills writing to `$SESSION_DIR` should add their own cleanup line. **Step 2e's `new-entry-declined` counter is intentionally NOT cleaned** — it's a cross-session streak counter (see Step 2e), so the `rmdir` is expected to silently fail when the file is present. Runs unconditionally at end of Step 5. Without a fresh `/kick-off`, the next `/wrap` degrades to working-tree-only diff (Pass A weakens).
+   Idempotent. The `[ -n "$SESSION_DIR" ]` guard prevents `rm -f /duet-rules.json` if the variable is unset. `rmdir` is a no-op if other state lives in the dir — sibling skills writing to `$SESSION_DIR` should add their own cleanup line. Runs unconditionally at end of Step 5. Without a fresh `/kick-off`, the next `/wrap` degrades to working-tree-only diff (Pass A weakens).
 
 ---
 

@@ -303,7 +303,11 @@ If user picked "Another round":
 
 ## Step 5 — Persistence (conversational, with escape-hatch flags)
 
-After the user picks "Lock the decision" in Step 3, decide where (if anywhere) the synthesis should land. Three modes:
+After the user picks "Lock the decision" in Step 3, decide where (if anywhere) the synthesis should land.
+
+**Eval gate for defaults + body shape.** Consult [`../references/research-capture-eval.md`](../references/research-capture-eval.md) — when the triangulation's research signals fire (multi-source investigation with a model, alternatives, uncertainty, validation path — the reference enumerates the full list), bias the default option toward **"Save as new research"** and prefer the richer body shape from that reference over the default voice-positions writeup below. When the synthesis is a clean decision with no remaining uncertainty, bias toward **"Don't save"** — the conversation captured what's needed.
+
+Three modes:
 
 **(a) Explicit override via flag** — `--save-as plans/<slug>.md`, `--save-as research/<slug>.md`, `--update <path>`, or `--no-save`. Skip the prompt and act directly. Validate shape (see "Path validation" below).
 

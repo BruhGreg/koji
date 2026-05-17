@@ -89,7 +89,7 @@ Global preferences (`commit_strategy`, `auto_update`) live in `~/.config/koji/co
 
 **Triangulation (`/triangulate`).** When you want multi-side debate but YOU should be the synthesizer (not the agents): Claude + codex argue in parallel on one question with web research per voice, present their positions, and you weigh and decide. Optional save to `.koji/plans/` or `.koji/research/`, or append a synthesis section to an existing plan — picked conversationally based on what's active in the project.
 
-**Plans + research working docs.** `.koji/plans/` (decided work, ready to implement) and `.koji/research/` (investigation findings, pending validation). Lightweight YAML frontmatter (`status:` field, kind-aware: pending/in-progress/completed/archived for plans, unvalidated/validated/archived for research). `/kick-off` surfaces pending entries; `/wrap` offers status updates for touched files and asks once per session whether to capture a new entry. `koji-plans-research --set-status <path> <new>` mutates from the command line. Drift-exempt (not code-coverage docs).
+**Plans + research working docs.** `.koji/plans/` (decided work, ready to implement) and `.koji/research/` (investigation findings, pending validation). Lightweight YAML frontmatter (`status:` field, kind-aware: pending/in-progress/completed/archived for plans, unvalidated/validated/archived for research). `/kick-off` surfaces pending entries; `/duet-impl` marks plans `completed` at end of run; `koji-plans-research --set-status <path> <new>` mutates from the command line. Drift-exempt (not code-coverage docs).
 
 ## Deeper docs
 

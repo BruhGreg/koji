@@ -235,7 +235,32 @@ fi
 
 For MVP, the agent invokes `/duet-review` as the next action (not via subprocess) — user-visible behavior is one continuous run ending with the verdict.
 
-## Step 4 — Report
+## Step 4 — Plan reconciliation
+
+Auto-fires at end of every run. Keep the plan file in sync with what
+shipped, so `/kick-off` sees the right `status:` and the file records how
+the work landed.
+
+Re-read the source plan and edit it directly:
+
+- **Step 3 ran with PASS** (final `/duet-review` AGREE'd / approved): set
+  `status: completed`, `implemented: <today>`, `final-review: <verdict>`.
+  Add a top blockquote with N gates + verdict + `git log $START_SHA..HEAD`.
+  Append `## Deviations from this plan` only if material drift happened —
+  skip on a clean run.
+- **Step 3 ran with REJECT or ESCALATED**: leave `status` alone (the
+  implementation is not complete). Add `executed: <today>`,
+  `final-review: <verdict>`. Top blockquote notes: stages executed but
+  review surfaced unresolved findings (REJECT) or required escalation
+  (ESCALATED) — see the run dir / final-diff for what's outstanding.
+- **Step 3 skipped** (`--no-final-review`): leave `status` alone, add
+  `executed: <today>` + `pending: review`. Blockquote: stages executed,
+  review pending.
+
+On a re-run, replace any prior `/duet-impl` annotation. The edit lands in
+the working tree; `/wrap` commits it.
+
+## Step 5 — Report
 
 Print a markdown summary:
 
