@@ -132,8 +132,10 @@ REPOSITORY: {project_root}
 
 {IF stance: Your assigned stance: argue strongly for the "{stance}" position.
 Make the strongest case you can; do not hedge.}
-{IF no stance: Bring your honest take based on the codebase, the question, and
-your training. If you have a strong recommendation, make it. Don't hedge.}
+{IF no stance: Pick the angle from which your answer feels most clear — and
+commit to it. Don't try to cover every consideration; trust the other voice
+to bring the angles you skip. Bring your strongest reasoning from one
+viewpoint, not a balanced survey. Don't hedge.}
 
 You may:
 - Read files in the repo (Read tool)
@@ -190,7 +192,7 @@ CODEX_FILE="$RUN_DIR/round-${ROUND}-codex.md"
 if [ -n "$STANCE_CODEX" ]; then
   STANCE_LINE="Your assigned stance: argue strongly for the \"$STANCE_CODEX\" position. Make the strongest case you can; do not hedge."
 else
-  STANCE_LINE="Bring your honest take based on the codebase, the question, and your training. If you have a strong recommendation, make it. Do not hedge."
+  STANCE_LINE="Pick the angle from which your answer feels most clear — and commit to it. Do not try to cover every consideration; trust the other voice to bring the angles you skip. Bring your strongest reasoning from one viewpoint, not a balanced survey. Do not hedge."
 fi
 
 CODEX_PROMPT="You are one of two AI voices being asked the same question in parallel. The other voice is Claude (a different model with different training and priors). The user will read both perspectives and synthesize the call — you do NOT need to reach consensus with Claude. Argue from your strongest reasoning.
@@ -508,7 +510,7 @@ Saved to: <$OUT or "in-session only">
 |---|---|---|
 | Codex hangs (no output, no timeout fire) | Stdin not closed, or web-search flag re-introduced | Skill omits `--enable web_search_cached` (confirmed silent-hang trigger) and uses `< /dev/null`. Codex's built-in research happens through its agent loop, not the cache flag. Kill PID; treat as empty position. |
 | Codex exits 124 (timeout) | Web research took too long, or xhigh ran past 30 min | Re-run with `--rounds 1` only, or invoke with a "use high effort" / "lighter pass" phrase to opt down from the xhigh default. Round prompts are kept small (single question, no cumulative round context). |
-| Both voices produce nearly-identical positions | Question framing didn't differentiate them | Re-run with `--stances=convention,principled` (or other opposing pair) to force divergent prompts. |
+| Both voices produce nearly-identical positions | Question framing didn't differentiate them, despite the default "pick an angle and commit" nudge | Re-run with `--stances=convention,principled` (or other opposing pair) — the harder forcing function when the soft nudge isn't enough. |
 | Voices each ran heavy web research, total wallclock too slow | Both did `--search` independently | Acceptable for foundational decisions (the whole point is depth). For faster runs, invoke with a "use high effort" / "lighter pass" phrase to opt down, and set `--rounds 1`. |
 | `--save-as plans/foo/bar.md` rejected | Nested subdirs not supported in v1 | Use a flat slug: `--save-as plans/foo-bar.md`. |
 
