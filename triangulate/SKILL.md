@@ -317,13 +317,11 @@ Three modes:
 
 ```bash
 # Candidate parents: active plans + unvalidated research that the synthesis
-# might be a sub-decision OF.
-ACTIVE_CANDIDATES=$(~/.claude/skills/koji/bin/koji-plans-research --list 2>/dev/null | awk -F'\t' '
-  $4 != "invalid" && (
-    ($2 == "plan"     && ($3 == "in-progress" || $3 == "pending"))   ||
-    ($2 == "research" && $3 == "unvalidated")
-  ) { print $1 "\t" $2 "\t" $3 }
-' )
+# might be a sub-decision OF. Filtering lives in the helper (--filter active)
+# so this SKILL.md doesn't carry inline awk with `$N` field refs — those
+# don't survive the transport from disk to agent execution reliably.
+# Records are tab-separated: path\tkind\tstatus\tstatus_source\torigin\ttarget\tnext_step.
+ACTIVE_CANDIDATES=$(~/.claude/skills/koji/bin/koji-plans-research --filter active 2>/dev/null || true)
 
 # Auto-derive a slug from the question for the "save as new" options.
 AUTO_SLUG=$(printf '%s' "$QUESTION" | tr '[:upper:]' '[:lower:]' \

@@ -113,17 +113,23 @@ If `koji-config get auto_update` returns `true` and an update is available, upda
 
 ### 0d. Load-on-Kick-Off migration (v0.4.3)
 
-Run the one-shot migrator:
+Run the one-shot migrator, then print its summary message **only** when something actually migrated:
 
 ```bash
 source <(~/.claude/skills/koji/bin/koji-migrate-load-on-kickoff)
+case "${KOJI_MIGRATED_LOAD_KO:-false}" in
+  true|cleanup) echo "$KOJI_MIGRATION_MSG" ;;
+esac
+true
 ```
 
-It moves any `## Load on Kick-Off` section from `AI_HANDOFF.md` into `agent-session.md` (above the first `## Session:` entry). Idempotent — no-op after first successful run.
+The migrator moves any `## Load on Kick-Off` section from `AI_HANDOFF.md` into `agent-session.md` (above the first `## Session:` entry). Idempotent — no-op after first successful run. Emitted values:
 
-- If `KOJI_MIGRATED_LOAD_KO=true`: print `$KOJI_MIGRATION_MSG` once, continue.
-- If `KOJI_MIGRATED_LOAD_KO=cleanup`: print `$KOJI_MIGRATION_MSG` once (stray duplicate stripped), continue.
-- If `KOJI_MIGRATED_LOAD_KO=false`: silent, continue.
+- `KOJI_MIGRATED_LOAD_KO=true` — section moved; `$KOJI_MIGRATION_MSG` is the human summary.
+- `KOJI_MIGRATED_LOAD_KO=cleanup` — section already in agent-session.md, stray duplicate stripped from handoff; `$KOJI_MIGRATION_MSG` is the summary.
+- `KOJI_MIGRATED_LOAD_KO=false` — no-op; `$KOJI_MIGRATION_MSG` is unset.
+
+**Why the explicit `case` + trailing `true`:** `[ -n "$KOJI_MIGRATION_MSG" ] && echo "$KOJI_MIGRATION_MSG"` looks correct but exits 1 when MSG is empty/unset — and when that line is the last command in a parallel-Bash batch, the harness sees exit 1 and cancels sibling Bash calls. The `case` branches on a known-good value set and always exits 0; the trailing `true` guards against future edits adding a line below that re-introduces a failing-test trailer.
 
 ### 0e. Record session start
 
@@ -350,18 +356,21 @@ CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
 UNCOMMITTED=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
 
 # Active plans + research entries from $PLANS_DIR and $RESEARCH_DIR.
-# Filter rules:
-#   plans     → status ∈ {pending, in-progress} AND status_source ∈ {explicit, inferred}
-#   research  → status = unvalidated AND status_source ∈ {explicit, inferred}
-#   invalid   → kept separately for the Frontmatter warnings line
-PLANS_RESEARCH=$(~/.claude/skills/koji/bin/koji-plans-research --list 2>/dev/null || true)
-ACTIVE_PLANS=$(printf '%s\n' "$PLANS_RESEARCH" | awk -F'\t' '
-  $2 == "plan" && $4 != "invalid" && ($3 == "pending" || $3 == "in-progress")
-' | wc -l | tr -d ' ')
-ACTIVE_RESEARCH=$(printf '%s\n' "$PLANS_RESEARCH" | awk -F'\t' '
-  $2 == "research" && $4 != "invalid" && $3 == "unvalidated"
-' | wc -l | tr -d ' ')
-INVALID_FM=$(printf '%s\n' "$PLANS_RESEARCH" | awk -F'\t' '$4 == "invalid"' | wc -l | tr -d ' ')
+# Filter rules (encoded in koji-plans-research --filter):
+#   active-plan     → kind=plan,     status ∈ {pending, in-progress}, status_source ≠ invalid
+#   active-research → kind=research, status = unvalidated,           status_source ≠ invalid
+#   invalid         → kept separately for the Frontmatter warnings line
+#
+# Counts come from `--count`; records (used for the per-kind rendering below)
+# come from `--filter`. The filtering lives in the helper script — SKILL.md
+# used to inline awk with `$N` field refs, which a transport-layer somewhere
+# between disk and execution can strip (observed during a /kick-off session
+# 2026-05; `$2`/`$3`/`$4` vanished while `$PLANS_RESEARCH` survived). Helper
+# scripts execute via bash directly, not through the skill renderer, so
+# their awk is safe regardless of mechanism.
+ACTIVE_PLANS=$(~/.claude/skills/koji/bin/koji-plans-research --count active-plan 2>/dev/null || echo 0)
+ACTIVE_RESEARCH=$(~/.claude/skills/koji/bin/koji-plans-research --count active-research 2>/dev/null || echo 0)
+INVALID_FM=$(~/.claude/skills/koji/bin/koji-plans-research --count invalid 2>/dev/null || echo 0)
 
 echo "Branch: $CURRENT_BRANCH"
 echo "Uncommitted changes: $UNCOMMITTED"
@@ -383,7 +392,15 @@ If `$INVALID_FM > 0`, list the invalid entries on a separate line so the user no
 
 > **Frontmatter warnings:** <path> (invalid status: `<raw>`)
 
-Filter records by walking `$PLANS_RESEARCH` (tab-separated `path\tkind\tstatus\tstatus_source\torigin\ttarget\tnext_step` per row).
+When you need the records themselves (to render the per-kind lines above), fetch them per filter — do NOT inline-awk a full `--list` to refilter, that's the trap this step's design exists to avoid:
+
+```bash
+ACTIVE_PLANS_RECORDS=$(~/.claude/skills/koji/bin/koji-plans-research --filter active-plan 2>/dev/null || true)
+ACTIVE_RESEARCH_RECORDS=$(~/.claude/skills/koji/bin/koji-plans-research --filter active-research 2>/dev/null || true)
+INVALID_RECORDS=$(~/.claude/skills/koji/bin/koji-plans-research --filter invalid 2>/dev/null || true)
+```
+
+Each record is tab-separated: `path\tkind\tstatus\tstatus_source\torigin\ttarget\tnext_step`. Walk lines using `while IFS=$'\t' read -r path kind status status_source origin target next_step; do …; done <<< "$ACTIVE_PLANS_RECORDS"` (or read into your head — the records are short).
 
 **Tier 2 — Reference-follow (if session note has references):**
 

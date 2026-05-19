@@ -319,6 +319,57 @@ cmd_set_status() {
   printf 'set %s status=%s\n' "${abs#"$PROJECT_ROOT/"}" "$new_status"
 }
 
+# --- filtered views ---
+#
+# cmd_filter and cmd_count exist because SKILL.md cannot reliably embed inline
+# awk with single-digit `$N` field refs: at least one transport path between
+# disk and execution strips numeric `$N` (bug observed during a /kick-off
+# session in 2026-05; mechanism unverifiable from inside the harness, but
+# multi-char `$NAME` references in the same block survive). Pushing the filter
+# into the helper sidesteps the issue entirely — this script is invoked via
+# bash, not rendered through the skill pipeline, so its awk is safe.
+#
+# Filter names cover the views SKILL.md actually needs. Keep the taxonomy
+# narrow on purpose — adding speculative filters here re-introduces the same
+# class of "fragile API used by markdown" we just removed.
+
+_filter_records() {
+  case "$1" in
+    active-plan)
+      awk -F'\t' '$2 == "plan" && $4 != "invalid" && ($3 == "pending" || $3 == "in-progress")'
+      ;;
+    active-research)
+      awk -F'\t' '$2 == "research" && $4 != "invalid" && $3 == "unvalidated"'
+      ;;
+    active)
+      # Kept on one logical line because BSD awk (default on macOS) does not
+      # continue a pattern across literal newlines inside the awk source — a
+      # multi-line `pat1 && (pat2 || pat3)` block raises `syntax error`
+      # at the line break. GNU awk would tolerate it; we don't depend on GNU.
+      awk -F'\t' '$4 != "invalid" && (($2 == "plan" && ($3 == "pending" || $3 == "in-progress")) || ($2 == "research" && $3 == "unvalidated"))'
+      ;;
+    invalid)
+      awk -F'\t' '$4 == "invalid"'
+      ;;
+    *)
+      printf 'ERROR: unknown filter: %s\n' "$1" >&2
+      printf '  valid: active-plan | active-research | active | invalid\n' >&2
+      return 2
+      ;;
+  esac
+}
+
+cmd_filter() {
+  cmd_list | _filter_records "$1"
+}
+
+cmd_count() {
+  # Count the lines emitted by the filter. `wc -l` returns 0 on empty input,
+  # which is what we want — never error on "nothing matched". `tr -d ' '`
+  # strips macOS/BSD wc's leading whitespace so the output is a clean integer.
+  cmd_filter "$1" | wc -l | tr -d ' '
+}
+
 # --- dispatch ---
 
 case "${1:-}" in
@@ -333,6 +384,14 @@ case "${1:-}" in
     [ $# -ge 3 ] || { echo "ERROR: --set-status requires <path> <new-status>" >&2; exit 1; }
     cmd_set_status "$2" "$3"
     ;;
+  --filter)
+    [ $# -ge 2 ] || { echo "ERROR: --filter requires a name (active-plan|active-research|active|invalid)" >&2; exit 1; }
+    cmd_filter "$2"
+    ;;
+  --count)
+    [ $# -ge 2 ] || { echo "ERROR: --count requires a name (active-plan|active-research|active|invalid)" >&2; exit 1; }
+    cmd_count "$2"
+    ;;
   --help|-h|"")
     cat <<'USAGE'
 koji-plans-research — read/write status for plans and research working docs.
@@ -341,9 +400,19 @@ Usage:
   koji-plans-research --list
   koji-plans-research --get <path>
   koji-plans-research --set-status <path> <new-status>
+  koji-plans-research --filter <name>
+  koji-plans-research --count <name>
 
-Output (--list, --get) is tab-separated:
+Output (--list, --get, --filter) is tab-separated:
   <path>\t<kind>\t<status>\t<status_source>\t<origin>\t<target>\t<next_step>
+
+--count prints a single integer (number of records matching the filter).
+
+Filter names:
+  active-plan      plans with status ∈ {pending, in-progress}, excluding invalid
+  active-research  research with status = unvalidated, excluding invalid
+  active           union of active-plan and active-research
+  invalid          records with status_source = invalid (any kind)
 
 Valid statuses:
   plan      pending | in-progress | completed | archived
