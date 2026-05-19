@@ -1,5 +1,5 @@
 ---
-description: "Walks a saved plan through strategic gates (foundation, mid-term, final) with codex single-review per gate, then /duet-review on the full diff. Invocation requires the 'duet' keyword."
+description: "Walks a saved plan: 1 foundation gate (codex single) + N post-foundation reviews where the Nth IS the final /duet-review. Invocation requires the 'duet' keyword."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools:
@@ -19,7 +19,7 @@ allowed-tools:
 
 Use ONLY when the user explicitly types `/duet-impl`, says "duet impl", "duet-impl", "let's duet implement", or similar — the `duet` keyword is required. Do NOT invoke on casual "let's implement" phrases. On review fail: fix-and-retry up to 2 times, then consult codex once, then escalate to user.
 
-Walks a saved plan from `/duet-plan` (or any structured plan) through strategic gates. For each gate: implement the work, then run codex single-review on the gate's diff. At end of the run, run `/duet-review` for the 2-reviewer adversarial pass. See **Gating Strategy** below for how gates are placed — they are strategic checkpoints, not exhaustive per-step reviews.
+Walks a saved plan from `/duet-plan` (or any structured plan). **Total reviewer passes = 1 foundation gate (codex single) + N post-foundation reviews, where the Nth IS the final `/duet-review`** — never schedule a codex single immediately before the duet-review (it already runs codex + cross-review; a back-to-back single is duplicate work). N is typically 1 (small/mechanical) or 2 (medium, default); rarely 3 (large/dense). See **Review checkpoint strategy** below for placement.
 
 ## Preamble
 
@@ -47,32 +47,36 @@ Flags:
 
 **Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens) for each gate review. Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick gates", "lighter review", "use high effort", "save tokens". Don't downgrade for "the gate diff looks small"; only on explicit user signal. Claude inherits the parent session's effort level.
 
-## Gating Strategy
+## Review checkpoint strategy
 
-Gates are **strategic checkpoints**, not exhaustive per-step reviews. The default decomposition for a plan with `N` steps:
+Two kinds of review checkpoint, separately budgeted:
 
-- **Foundation gate** — after foundation work lands (scaffolding with no standalone behavior: new types, trait-shape changes, mechanical stubs that just make the workspace compile). Validates the base before downstream depends on it.
-- **Mid-term gate(s)** — at risk inflection points in the bulk work, typically ~halfway through the post-foundation steps. Catches direction issues before compound drift across the back half.
-- **Final `/duet-review`** — comprehensive adversarial pass on the cumulative diff (Step 3 below).
+1. **Foundation gate** — one codex single-review after foundation steps land (scaffolding with no standalone behavior: new types, trait-shape changes, mechanical stubs that just make the workspace compile). Validates the base before downstream depends on it. Skip only when the plan has no distinct foundation phase.
+2. **Post-foundation reviews** — `N` reviews distributed across the remaining work at fractional positions `1/N, 2/N, …, N/N`. **The `N/N` position IS the final `/duet-review`** (two reviewers + cross-review); the intermediate `1/N … (N-1)/N` positions are codex single-reviews. So `N` includes the duet-review in its count, NOT in addition to it.
 
-Common shape for medium-large plans (10–20 steps): **2 codex single-review gates + 1 final `/duet-review`**, not one gate per step.
+**Total reviewer passes = 1 (foundation gate) + N (post-foundation reviews, the last of which is the duet-review).**
 
-Adjust:
-- **Add gates** when an inflection point doesn't fit "halfway" — e.g., right before a step that crosses a layer boundary (engine ↔ frontend), or right after a step that establishes a pattern for many subsequent steps.
-- **Remove gates** for very small plans (<5 steps) where foundation + final `/duet-review` is enough.
+Pick `N` by weighting the *post-foundation* work — LoC density, risk inflections, and how much real reasoning each step requires. Mechanical pattern-application counts for less; cross-layer or pattern-establishing steps count for more. Default by size:
 
-**Anti-pattern: one gate per step.** Codex single-review at every step is expensive, fatigues the reviewer, and produces noise that obscures the high-signal findings. Reserve exhaustive coverage for the final `/duet-review`.
+| Post-foundation work | `N` | Positions | Total passes (incl. foundation) |
+|---|---|---|---|
+| Small / mostly mechanical (<5 PRs) | 1 | duet-review at end only | 2 |
+| Medium (default) | 2 | codex single at 1/2, duet-review at 2/2 | 3 |
+| Large or dense (>10 PRs, multiple risk inflections) | 3 | codex singles at 1/3 + 2/3, duet-review at 3/3 | 4 |
 
-The agent decides gate placement by reading the plan and identifying:
-1. Where foundation work ends (cutoff before behavioral changes begin)
-2. Midpoint(s) of the post-foundation steps, or natural inflection points (layer boundaries, pattern-establishing steps)
-3. End of plan → final `/duet-review`
+**Position is a judgment call, not strict math.** Slide each fractional checkpoint a step or two to land it on a natural seam — right after a pattern is established, right before a cross-layer transition, right before a risk inflection. Mechanical/mindless steps lower the weight; heavy-reasoning steps raise it. For a 12-step plan with `s1+s2` foundation and 10 steps remaining at `N=2`, the mid-term codex single would land at ~`s2 + 5 = s7`, but it's fine to slide to `s6` or `s8` if the natural seam is there.
+
+**Anti-patterns:**
+
+1. **One gate per step.** Codex single-review at every step is expensive, fatigues the reviewer, and produces noise that obscures high-signal findings. Reserve exhaustive coverage for the final `/duet-review`.
+2. **A codex single-review immediately before the final `/duet-review`.** The duet-review already runs codex + cross-review; a back-to-back single-review is duplicate work. The final reviewer pass IS the duet-review — there is no separate "Gate N codex single + then duet-review" pattern. Schedule `N` total post-foundation reviews, not `N+1`.
+3. **Treating "gate count" as a flat number.** Don't think "3 gates means 3 codex singles plus a duet-review at the end." Think "1 foundation gate + N post-foundation reviews, the last of which is the duet-review." Total reviewer passes is the explicit sum.
 
 For plans with `<!-- gate: NAME -->` markers, honor them as explicit boundaries. For plans without markers (the common case), derive boundaries from structure: numbered `### Step N` headings, sectional H2/H3 breaks, or the agent's reading of natural cohesion.
 
-## Step 1 — Identify gates from the plan
+## Step 1 — Identify checkpoints from the plan
 
-The agent reads the plan and decides gate placement per the **Gating Strategy** above. This is a judgment call from plan structure — no parser tool.
+The agent reads the plan and decides checkpoint placement per the **Review checkpoint strategy** above. This is a judgment call from plan structure — no parser tool.
 
 ```bash
 PLAN_FILE="<resolved-path>"
@@ -89,15 +93,17 @@ RETRIES="${RETRIES:-2}"
 echo "Start SHA: $START_SHA | Run dir: $RUN_DIR | Effort: $EFFORT | Retries/gate: $RETRIES"
 ```
 
-Then **read the plan** (via the `Read` tool), identify the natural gate boundaries, and announce the proposed gate plan in one sentence before Step 2 begins. Example:
+Then **read the plan** (via the `Read` tool), identify the natural checkpoint boundaries per the strategy above, and announce the proposed plan in one sentence before Step 2 begins. State explicitly: foundation gate (yes/no), `N`, the positions, and the total reviewer-pass count. Example:
 
-> "Plan has foundation prelude + 11 numbered steps. Proposing 3 gates: Foundation (after types + mechanical stubs), Mid-term (after Step 6), Final `/duet-review` (after Step 11)."
+> "Plan has 2 foundation steps + 11 post-foundation steps. Proposing **foundation gate (codex single after Step 2)** + **`N=2` post-foundation reviews**: mid-term codex single after Step 7, final `/duet-review` after Step 11. **Total: 3 reviewer passes** (1 foundation + 2 post-foundation, the second of which IS the duet-review)."
 
-The user can redirect the gate plan before any work starts. Each gate becomes a "segment" used by Step 2 — gate name + the plan text governing that segment's scope.
+The user can redirect before any work starts. Each checkpoint becomes a "segment" used by Step 2 — checkpoint name + the plan text governing that segment's scope. Note that the FINAL segment's review is the `/duet-review` itself (Step 3 below), so Step 2 walks only the foundation gate + the `1/N … (N-1)/N` codex singles — Step 2 does NOT execute a codex single at position `N/N`.
 
-## Step 2 — Walk gates
+## Step 2 — Walk codex-reviewed checkpoints
 
-For each gate (in the order identified in Step 1):
+For each checkpoint that has a codex single-review attached (foundation gate + the `1/N … (N-1)/N` post-foundation positions), in order:
+
+> NOTE: the `N/N` position is the final `/duet-review`, handled by Step 3 — **do not** schedule a codex single-review at end-of-plan. Step 2 stops one position short of the end.
 
 ### 2a. Skip if `--from-gate` says so
 
@@ -245,7 +251,7 @@ Re-read the source plan and edit it directly:
 
 - **Step 3 ran with PASS** (final `/duet-review` AGREE'd / approved): set
   `status: completed`, `implemented: <today>`, `final-review: <verdict>`.
-  Add a top blockquote with N gates + verdict + `git log $START_SHA..HEAD`.
+  Add a top blockquote with the reviewer-pass tally (1 foundation gate + `N` post-foundation reviews) + verdict + `git log $START_SHA..HEAD`.
   Append `## Deviations from this plan` only if material drift happened —
   skip on a clean run.
 - **Step 3 ran with REJECT or ESCALATED**: leave `status` alone (the
