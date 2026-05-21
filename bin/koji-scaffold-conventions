@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# koji-scaffold-conventions — write the CODEBASE_CONVENTIONS.md hub stub.
+#
+# Owns the canonical CODEBASE_CONVENTIONS.md format — defined here in ONE place,
+# used by /koji-init (Step 3) and /kick-off (step 0h) so neither has to inline
+# the stub.
+#
+# Usage: koji-scaffold-conventions [source-doc-path ...]
+#   Writes $DOCS_PATH/CODEBASE_CONVENTIONS.md ONLY if it does not already exist —
+#   an existing hub (possibly with accumulated conventions) is never clobbered.
+#   Each argument is recorded as a `sources:` pointer (a pre-existing project
+#   convention doc). No args → an empty `sources: []` stub.
+#
+# Requires koji-detect to have been sourced first (needs $DOCS_PATH);
+# self-sources it if unset.
+set -euo pipefail
+
+if [ -z "${DOCS_PATH:-}" ]; then
+  eval "$(~/.claude/skills/koji/bin/koji-detect)"
+fi
+
+TARGET="$DOCS_PATH/CODEBASE_CONVENTIONS.md"
+
+if [ -e "$TARGET" ]; then
+  echo "koji-scaffold-conventions: $TARGET exists — left untouched."
+  exit 0
+fi
+
+mkdir -p "$DOCS_PATH"
+
+{
+  # --- frontmatter ---
+  printf -- '---\n'
+  printf 'covers: []\n'
+  if [ "$#" -gt 0 ]; then
+    printf 'sources:\n'
+    for s in "$@"; do printf -- '  - %s\n' "$s"; done
+  else
+    printf 'sources: []\n'
+  fi
+  printf -- '---\n\n'
+
+  # --- static body, part 1 (quoted heredoc: backticks stay literal) ---
+  cat <<'EOF'
+<!-- CODEBASE_CONVENTIONS.md — what new code in this project should look like.
+     Read by /duet-plan (Codebase Fit Contract) and /duet-impl (codebase-fit review).
+     covers:  — canonical exemplar CODE files cited below; keep in sync per citation.
+     sources: — the project's own pre-existing convention docs; pointers only,
+                koji never restates or edits them. Must match the bullets below.
+     Grows from /duet-impl review findings; start sparse, do not pre-fill. -->
+
+# Codebase Conventions
+
+## Authoritative project convention sources
+
+The project's own convention docs — authoritative for their scope; koji points
+to them, never restates them. Read them before the sections below.
+
+EOF
+
+  # --- sources bullets (or the empty placeholder) ---
+  if [ "$#" -gt 0 ]; then
+    for s in "$@"; do printf -- '- %s\n' "$s"; done
+  else
+    printf '%s\n' '_None recorded — koji re-checks at each `/kick-off`; or add paths under `sources:`._'
+  fi
+
+  # --- static body, part 2 ---
+  cat <<'EOF'
+
+## Canonical exemplars
+
+The reference implementation for each recurring kind of code. Cite `path:line`
+and say what to copy. Add every cited file to `covers:` above.
+
+_None yet — /duet-impl proposes entries here as review surfaces them._
+
+## Cross-cutting idioms
+
+Conventions that span the codebase — error handling, logging, naming, layering.
+
+_None yet._
+
+## Deliberate decisions & rejected patterns
+
+Choices made on purpose, and what NOT to do (with the one-line why). Live code
+cannot show what was rejected — record it here.
+
+_None yet._
+EOF
+} > "$TARGET"
+
+echo "koji-scaffold-conventions: wrote $TARGET (sources: ${*:-none})"

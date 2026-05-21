@@ -9,6 +9,8 @@ allowed-tools:
   - Edit
   - Agent
   - AskUserQuestion
+  - TaskCreate
+  - TaskUpdate
 ---
 
 # /duet-impl
@@ -99,11 +101,15 @@ Then **read the plan** (via the `Read` tool), identify the natural checkpoint bo
 
 The user can redirect before any work starts. Each checkpoint becomes a "segment" used by Step 2 — checkpoint name + the plan text governing that segment's scope. Note that the FINAL segment's review is the `/duet-review` itself (Step 3 below), so Step 2 walks only the foundation gate + the `1/N … (N-1)/N` codex singles — Step 2 does NOT execute a codex single at position `N/N`.
 
+**Create the progress task list.** With the checkpoints fixed, call `TaskCreate` to lay out the walk as a task list — one task per segment in plan order, named for its checkpoint (e.g. `Foundation: types + scaffolding`, `Segment 2: handlers`), plus a final task for the `/duet-review` pass. This is required, not optional: it is the live checklist the user watches while the implementation runs. Step 2 keeps it current.
+
 ## Step 2 — Walk codex-reviewed checkpoints
 
 For each checkpoint that has a codex single-review attached (foundation gate + the `1/N … (N-1)/N` post-foundation positions), in order:
 
 > NOTE: the `N/N` position is the final `/duet-review`, handled by Step 3 — **do not** schedule a codex single-review at end-of-plan. Step 2 stops one position short of the end.
+
+**Keep the task list current.** As you walk each checkpoint: `TaskUpdate` its task to `in_progress` when its segment work begins (2b), and to `completed` when its gate review passes (2d PASS). Mark the final `/duet-review` task `completed` once Step 3's verdict is in. The user is watching this checklist — it must track the real state of the walk.
 
 ### 2a. Skip if `--from-gate` says so
 
@@ -239,7 +245,7 @@ else
 fi
 ```
 
-For MVP, the agent invokes `/duet-review` as the next action (not via subprocess) — user-visible behavior is one continuous run ending with the verdict.
+For MVP, the agent invokes `/duet-review` as the next action (not via subprocess) — user-visible behavior is one continuous run ending with the verdict. When `/duet-review` finishes, **capture the `Output JSON:` path** from its Step 6 summary (its `verdict.json`) — Step 5 reads the final review's `codebase-fit` findings from that file.
 
 ## Step 4 — Plan reconciliation
 
@@ -266,7 +272,23 @@ Re-read the source plan and edit it directly:
 On a re-run, replace any prior `/duet-impl` annotation. The edit lands in
 the working tree; `/wrap` commits it.
 
-## Step 5 — Report
+## Step 5 — Conventions capture
+
+Auto-fires at end of every run, **only when `$DOCS_PATH/CODEBASE_CONVENTIONS.md` exists**. Skip silently otherwise (the project predates the codebase-fit artifact, or was never `/koji-init`'d with it). Modeled on `/wrap` Step 2c: one consolidated proposal, one user decision, judgment-gated — never an auto-append.
+
+The `codebase-fit` findings raised across this run's gate reviews and the final `/duet-review` are per-diff observations. Most are one-offs and belong nowhere but the gate report. A few encode a **reusable convention** — a rule the next session would otherwise re-derive or re-litigate. Only those earn a `CODEBASE_CONVENTIONS.md` entry.
+
+1. Collect every `codebase-fit` finding from the run: the gate `findings-*.json` files in `$RUN_DIR`, plus the `codebase-fit` entries in the final `/duet-review`'s `verdict.json` — the `Output JSON:` path captured in Step 3. If `--no-final-review` was set there is no `verdict.json`; use the gate findings alone.
+2. Judge each: is it a *recurring, reusable* convention — would it apply beyond this diff — and is it **not already** recorded in `CODEBASE_CONVENTIONS.md` **or in any doc it lists under `sources:`**? Drop one-off nits, taste, and anything the hub or a linked source already covers.
+3. If none survive, skip silently — no prompt.
+4. For each surviving finding, decide its **home**: if it belongs in a project convention doc listed under `sources:` (e.g. a naming rule that fits `CONTRIBUTING.md`), it is a **suggestion for the user to add there** — koji never edits a source doc itself. Otherwise it is a **hub entry** for `CODEBASE_CONVENTIONS.md` under one of its three sections. Fire **one** `AskUserQuestion` listing every proposal — each tagged with its home (the `sources:` doc, or the hub section), the one-line rule, and the `file:line` exemplar it cites. The user may accept all, a subset, or decline.
+5. On acceptance:
+   - **Hub entries** — append under their section in `CODEBASE_CONVENTIONS.md`. If an entry cites a canonical exemplar file not yet in the doc's `covers:` frontmatter, add that file to `covers:` **in the same edit** — `covers:` must always equal the set of cited exemplar files. The edit lands in the working tree; `/wrap` commits it.
+   - **Source-doc suggestions** — do **not** edit the source doc. Surface each as a one-line suggestion (e.g. *"consider adding to `CONTRIBUTING.md`: …"*) for the user to apply by hand.
+
+This is the flywheel: `CODEBASE_CONVENTIONS.md` grows from what review actually caught, not from speculative upfront authoring.
+
+## Step 6 — Report
 
 Print a markdown summary:
 

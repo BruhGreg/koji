@@ -20,6 +20,7 @@ Check:
 - **Scope undershoot** — did they skip required phase work?
 - **Latent bugs** — would these changes cause problems downstream?
 - **Correctness, security, data loss** in the changes themselves.
+- **Codebase fit** — does this diff match the conventions of the files it touches (naming, structure, idioms, layering), and `CODEBASE_CONVENTIONS.md` (in the koji docs dir, `.koji/` by default) — including the convention docs it lists under `sources:` — if the project has one? Read sibling files to learn the local idiom; fit is judged against *this* project, not generic best practice.
 
 ## Output — STRICT JSON ONLY
 
@@ -30,7 +31,7 @@ Schema per entry (matches duet-review/references/reviewer-prompt.md):
 {
   "fingerprint": "<file>:<line>:<category>",
   "severity": "high" | "medium" | "low",
-  "category": "<one-of: correctness | security | perf | data-loss | error-handling | race | types | deps | deadcode | scope | style | other>",
+  "category": "<one-of: correctness | security | perf | data-loss | error-handling | race | types | deps | deadcode | scope | style | codebase-fit | other>",
   "file": "<relative-path>",
   "line": <integer>,
   "description": "<what is wrong, 1-3 sentences>",
@@ -49,6 +50,8 @@ relative to the plan's intent for this phase). Use it when the work strays.
 - **high** — BLOCKS proceeding to the next gate. Correctness, security, data loss, or scope overshoot/undershoot that breaks the plan's phasing.
 - **medium** — Notable but proceeding is OK. Add to gate-report; don't block.
 - **low** — Skip unless directly relevant to this phase.
+
+**Codebase-fit severity.** A `codebase-fit` finding is `high` (blocks the gate) **only when the misfit becomes a dependency surface later work builds on** — a competing construct or helper that duplicates a canonical one, a crossed layer boundary, a divergent public shape that forces consumers to special-case it, or a diff that contradicts a pattern `CODEBASE_CONVENTIONS.md` records as rejected. Every other fit finding is `medium` — logged to the gate-report, non-blocking. Pure taste (formatting, name bikeshedding) is not a `codebase-fit` finding at all — drop it.
 
 If you have no findings → return `[]`.
 

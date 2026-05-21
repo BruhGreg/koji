@@ -28,6 +28,16 @@ REPOSITORY: {project_root}
 Draft a plan that includes:
 - Goals (what we're solving, and why)
 - Approach (high-level design choices, with reasoning)
+- Codebase Fit Contract — before finalizing the approach, read `CODEBASE_CONVENTIONS.md`
+  (the koji hub doc — in the koji docs dir, `.koji/` by default) if the project
+  has one — including the convention docs it lists under `sources:`
+  (the project's own authoritative conventions) — and grep/read the 2-4 existing
+  files most analogous to this work. Record: the conventions doc + `sources:`
+  consulted (and drift status); the analogous files inspected; the conventions to
+  match (naming, file/directory structure, error-handling and logging idioms,
+  layering); existing helpers or modules to reuse rather than re-create; rejected
+  or legacy patterns to avoid; and any fit unknowns. The Steps below must honor
+  this contract.
 - Steps (numbered or bulleted; add `<!-- gate: <name> -->` at natural
   checkpoints — typically foundation, mid, final, but use whatever names
   make sense for this work)
@@ -67,6 +77,7 @@ Your task: find what's missing, wrong, or over-engineered. Specifically check:
 - Technical mistakes or unsafe sequencing
 - Alternatives Claude didn't consider
 - Inconsistencies between sections
+- Codebase fit — does the plan's Codebase Fit Contract honor `CODEBASE_CONVENTIONS.md` (in the koji docs dir, `.koji/` by default) and the conventions of analogous existing code? Flag invented structure that diverges from established patterns, or a missing or thin Fit Contract.
 
 Be precise: cite section names or numbered items. Suggest concrete
 improvements where you can. Don't restate what's already in the plan.

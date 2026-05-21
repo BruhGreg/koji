@@ -64,11 +64,12 @@ Flags (all optional — most users never need any):
 - `--keep` — keep `/tmp/triangulate-<sha>/` for debugging (default: cleaned at end of run).
 
 **Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens). Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick triangulate", "lighter pass", "use high effort", "save tokens", "fast pass". Don't downgrade for "the question seems simple" or similar heuristics; only on explicit user signal. Claude inherits the parent session's effort level — set `/effort max` once before running if you want max-tier Claude.
-- `--no-save` — skip the persistence prompt at end (in-session only, no file write).
-- `--save-as plans/<slug>.md` or `--save-as research/<slug>.md` — explicit override; skip the prompt and write directly.
-- `--update <path>` — explicit override; skip the prompt and append a synthesis section to an existing plan/research file.
+- `--no-save` — in-session only; skip persistence entirely (no fold-in, no prompt, no file write).
+- `--save-as plans/<slug>.md` or `--save-as research/<slug>.md` — explicit override; skip the judgment and write a new file directly.
+- `--update <path>` — explicit override; skip the judgment and append a synthesis section to an existing plan/research file.
+- `--no-anchor` — force the save prompt even when recent context shows a clear anchor doc (use when the synthesis should be saved separately from the doc it looks like it belongs to).
 
-**Persistence is conversational by default** — Step 5 below asks where (if anywhere) to put the synthesis based on what's relevant in `$PLANS_DIR/` and `$RESEARCH_DIR/`. The flags above are escape hatches when you already know.
+**Persistence is context-driven by default** — Step 5 folds the synthesis into the doc it is clearly a sub-decision of (its *anchor*), or prompts where to save when there is no such doc. The flags above are escape hatches when you already know.
 
 ## Step 1 — Setup
 
@@ -278,7 +279,7 @@ Then `AskUserQuestion` — always fire when callable; do NOT skip just because s
 
 Options (single-select):
 
-- **Lock the decision** — synthesis is enough; proceed to the Step 5 persistence prompt.
+- **Lock the decision** — synthesis is enough; proceed to Step 5 persistence.
 - **Another round** — re-dispatch both voices with each one's "what I'd want the other voice to defend" question as adversarial prompt. (Only show if `ROUND < ROUND_LIMIT` or after a +rounds increase below.)
 - **Add a round and increase limit** — bump `ROUND_LIMIT` by 2 and dispatch another round. (Show when current round limit would be hit by "Another round.")
 - **Abort** — drop the whole thing, no decision. Skip Step 5.
@@ -303,57 +304,110 @@ If user picked "Another round":
 4. Same synthesis + AskUserQuestion at end (Step 3 reads `round-${ROUND}-*.md` rather than hard-coded round-1 paths).
 5. Step 5 persistence also reads the latest round's positions.
 
-## Step 5 — Persistence (conversational, with escape-hatch flags)
+## Step 5 — Persistence (context-anchored)
 
-After the user picks "Lock the decision" in Step 3, decide where (if anywhere) the synthesis should land.
+After the user picks "Lock the decision" in Step 3, the synthesis needs a home. There is exactly one judgment, and you answer it from your own **recent context** — not from a disk scan:
 
-**Eval gate for defaults + body shape.** Consult [`../references/research-capture-eval.md`](../references/research-capture-eval.md) — when the triangulation's research signals fire (multi-source investigation with a model, alternatives, uncertainty, validation path — the reference enumerates the full list), bias the default option toward **"Save as new research"** and prefer the richer body shape from that reference over the default voice-positions writeup below. When the synthesis is a clean decision with no remaining uncertainty, bias toward **"Don't save"** — the conversation captured what's needed.
+> **Is this triangulation a sub-decision of an existing doc?**
 
-Three modes:
+- **Yes — there is a clear anchor doc.** Signals: a review (e.g. `/plan-eng-review`) surfaced this question *from* a specific doc; the conversation has been iterating on a specific plan/research doc; the user explicitly tied the question to a doc. → **Branch A.**
+- **No, or unclear.** Signals: no doc is in play; a doc merely *exists* in `.koji/plans/` but this synthesis is not a sub-decision of it; the question is topically near a doc without being part of it; two or more docs are plausible and none clearly wins. → **Branch B.**
 
-**(a) Explicit override via flag** — `--save-as plans/<slug>.md`, `--save-as research/<slug>.md`, `--update <path>`, or `--no-save`. Skip the prompt and act directly. Validate shape (see "Path validation" below).
+The bar for "anchored" is high — only a doc your recent context **clearly names**. Any doubt resolves to Branch B. This is deliberate: Branch B always prompts, so an unanchored synthesis is never silently dropped — the worst case is one prompt you did not strictly need, never a lost decision.
 
-**(b) Conversational prompt** (default). Build the choice menu dynamically from what's relevant in the project:
+**Flags override the judgment** — handle these first, before either branch:
+
+- `--no-save` → skip persistence entirely. Print `Synthesis: in-session only (--no-save).` and go to Step 6.
+- `--no-anchor` → go straight to Branch B, even if context looks anchored.
+- `--save-as plans/<slug>.md` | `research/<slug>.md` → skip the judgment; run the **Save-as-new write** block below directly.
+- `--update <path>` → skip the judgment; run the **Update-existing write** block below directly.
+
+### Branch A — anchored: fold into the doc
+
+No prompt — the destination is already settled by context. Append the synthesis to the anchor doc. Set `ANCHOR` to the path you identified from recent context:
 
 ```bash
-# Candidate parents: active plans + unvalidated research that the synthesis
-# might be a sub-decision OF. Filtering lives in the helper (--filter active)
-# so this SKILL.md doesn't carry inline awk with `$N` field refs — those
-# don't survive the transport from disk to agent execution reliably.
-# Records are tab-separated: path\tkind\tstatus\tstatus_source\torigin\ttarget\tnext_step.
-ACTIVE_CANDIDATES=$(~/.claude/skills/koji/bin/koji-plans-research --filter active 2>/dev/null || true)
+ANCHOR="<anchor doc path — from your reading of recent context>"
+case "$ANCHOR" in /*) ABS="$ANCHOR" ;; *) ABS="$PROJECT_ROOT/$ANCHOR" ;; esac
+TODAY=$(date +%Y-%m-%d)
 
-# Auto-derive a slug from the question for the "save as new" options.
-AUTO_SLUG=$(printf '%s' "$QUESTION" | tr '[:upper:]' '[:lower:]' \
-  | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60 | sed 's/-$//')
-[ -n "$AUTO_SLUG" ] || AUTO_SLUG="triangulated-decision"
+# Validate the anchor before appending. It came from context-reading, which can
+# MISJUDGE — an unchecked append would corrupt whatever file it named (a source
+# file, CLAUDE.md, …). Same guard as the --update block: reject traversal,
+# require an existing file under $PLANS_DIR or $RESEARCH_DIR. Any failure →
+# fall back to Branch B; the synthesis is never appended blind.
+ANCHOR_OK=1
+case "$ABS" in *"/.."*|*"/./"*|*"/..") ANCHOR_OK=0 ;; esac
+if [ "$ANCHOR_OK" = "1" ] && [ -f "$ABS" ]; then
+  ABS_REAL="$(cd "$(dirname "$ABS")" 2>/dev/null && pwd -P)/$(basename "$ABS")"
+  PLANS_REAL="$(cd "$PLANS_DIR" 2>/dev/null && pwd -P)"
+  RESEARCH_REAL="$(cd "$RESEARCH_DIR" 2>/dev/null && pwd -P)"
+  case "$ABS_REAL" in
+    "$PLANS_REAL"/*|"$RESEARCH_REAL"/*) ABS="$ABS_REAL" ;;
+    *) ANCHOR_OK=0 ;;
+  esac
+else
+  ANCHOR_OK=0
+fi
+
+if [ "$ANCHOR_OK" != "1" ]; then
+  echo "Anchor '$ANCHOR' is not an existing doc under \$PLANS_DIR/\$RESEARCH_DIR — fall back to Branch B."
+else
+  # Append one H2 section at end of file. Existing frontmatter, headings,
+  # and prose are left untouched.
+  {
+    printf '\n\n---\n\n'
+    printf '## Triangulated decision: %s — %s\n\n' "$TODAY" "$QUESTION"
+    printf '%s\n\n' "$SYNTHESIS_PARAGRAPH"
+    printf '<details><summary>Voice positions</summary>\n\n'
+    printf '### Claude\n\n'
+    cat "$RUN_DIR/round-${ROUND}-claude.md"
+    printf '\n\n### Codex\n\n'
+    cat "$RUN_DIR/round-${ROUND}-codex.md"
+    printf '\n\n</details>\n'
+  } >> "$ABS"
+  echo "Folded synthesis into: ${ABS#"$PROJECT_ROOT/"}"
+fi
 ```
 
-**Pick a sensible default option** based on context:
+The anchor is **validated, not trusted** — it came from context-reading, which can misjudge. It must be an existing file under `$PLANS_DIR` or `$RESEARCH_DIR` (where plans and research docs live); a traversal segment, a missing file, or any path outside those trees fails the check. On failure the block reports falling back — execute **Branch B** instead, so the synthesis still gets a home. On success, report the destination; do **not** ask.
 
-- If the question references a slug that matches an active plan/research filename (e.g., "should we use enum or hybrid for the error struct" and there's `plans/error-propagation.md`), default to "Update <that plan>".
-- Else if any active candidates exist, default to "Save as new — research" (safer default — synthesis without a parent plan is closer to research-flavored).
-- Else default to "Don't save (in-session only)".
+### Branch B — unanchored: ask where to save
 
-**Fire one `AskUserQuestion`** — at most 4 options:
+No doc clearly owns this synthesis, so where it goes is a genuinely open question — fire one `AskUserQuestion`. **This prompt is unconditional**: it always fires in Branch B. An unanchored synthesis is never disposed of without the user getting a say — there is no "is it valuable enough to ask?" gate to forget.
 
 > Save this synthesis?
 
-Options (omit any that don't apply):
+Three fixed options (single-select):
+
+- **Save as new plan** — write `$PLANS_DIR/<slug>.md` with `pending` status.
+- **Save as new research** — write `$RESEARCH_DIR/<slug>.md` with `unvalidated` status.
 - **Don't save** — synthesis lives in conversation memory only.
-- **Update `<active-plan-path>`** — append a `## Triangulated decision: <date>` section to the existing plan. (Shown when there's at least one active plan; shown per-plan if 1-2 candidates fit; collapsed to "Update an active plan…" with a sub-prompt if 3+ candidates.)
-- **Save as new plan** — write `$PLANS_DIR/<AUTO_SLUG>.md` with pending status.
-- **Save as new research** — write `$RESEARCH_DIR/<AUTO_SLUG>.md` with unvalidated status.
 
-If "Update an active plan…" is collapsed: fire a second `AskUserQuestion` listing each candidate path as a row. Then proceed as if the user picked "Update <that-path>".
+There is no "update an existing doc" option here: if the synthesis belonged to an existing doc, that doc would be the anchor and you would be in Branch A.
 
-**(c) Non-interactive fallback — ONLY when `AskUserQuestion` is not callable in this runtime** (e.g., the tool is absent from the available tool list, or the session is in a spawned/headless mode that lacks prompt support). Do NOT use this branch just because the save choice looks obvious — if AskUserQuestion is callable, fire it. When the fallback does apply, print one line and exit without saving:
+**Default highlight + body shape.** Consult [`../references/research-capture-eval.md`](../references/research-capture-eval.md): when the triangulation's research signals fire (multi-source investigation, alternatives with tradeoffs, preserved uncertainty, a validation path), pre-select **"Save as new research"** and use that reference's richer body shape for the file. When the synthesis is a clean decision with no remaining uncertainty, pre-select **"Don't save"**. This sets only the default highlight — the prompt still fires, and the user still chooses.
+
+On **"Save as new plan/research"**, derive a slug, set `SAVE_AS`, and run the **Save-as-new write** block below:
+
+```bash
+AUTO_SLUG=$(printf '%s' "$QUESTION" | tr '[:upper:]' '[:lower:]' \
+  | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60 | sed 's/-$//')
+[ -n "$AUTO_SLUG" ] || AUTO_SLUG="triangulated-decision"
+# Then set SAVE_AS for the chosen kind:
+#   "Save as new plan"     → SAVE_AS="plans/$AUTO_SLUG.md"
+#   "Save as new research" → SAVE_AS="research/$AUTO_SLUG.md"
+```
+
+On **"Don't save"** → nothing to write; go to Step 6.
+
+**Non-interactive fallback — ONLY when `AskUserQuestion` is not callable** in this runtime (the tool is absent from the available tool list, or the session is in a spawned/headless mode that lacks prompt support). Do NOT use this branch just because the save choice looks obvious — if `AskUserQuestion` is callable, fire it. When the fallback applies, print one line and go to Step 6 without saving:
 
 > Synthesis: in-session only (non-interactive — no save prompt). Re-run with --save-as plans/<slug>.md or --update <path> to persist.
 
 ---
 
-### Save-as-new (`--save-as` or user picked "Save as new plan/research")
+### Save-as-new write (`--save-as`, or Branch B "save as new")
 
 ```bash
 # Resolve target directory and frontmatter based on kind prefix.
@@ -417,13 +471,13 @@ TODAY=$(date +%Y-%m-%d)
 echo "Saved synthesis to: $OUT"
 ```
 
-### Update-existing (`--update` or user picked "Update <path>")
+### Update-existing write (`--update` flag)
 
 ```bash
 # Resolve and validate. Canonicalize before the prefix check — otherwise
 # `--update plans/../setup.md` would pass the literal `"$PLANS_DIR"/*` check,
 # pass `[ -f ]`, and append synthesis to an arbitrary repo file.
-UPDATE_PATH="$1"  # from flag or user choice
+UPDATE_PATH="<path from the --update flag>"
 case "$UPDATE_PATH" in
   /*) ABS="$UPDATE_PATH" ;;
   *)  ABS="$PROJECT_ROOT/$UPDATE_PATH" ;;
@@ -499,7 +553,7 @@ triangulate: <locked | aborted>
 Question: <question>
 Voices:   Claude + codex (effort: <high|xhigh>)
 Rounds:   <N>
-Saved to: <$OUT or "in-session only">
+Saved to: <folded into <anchor> | <new plan/research file> | in-session only>
 ```
 
 ## Failure modes
@@ -516,5 +570,5 @@ Saved to: <$OUT or "in-session only">
 
 - `/duet-plan` — multi-round agent consensus (closer to "let the agents figure it out and lock a plan")
 - `/duet-review` — two-AI code review (closer to "vet a diff with cross-model perspectives")
-- `.koji/plans/` and `.koji/research/` — destination directories for `--save-to`
+- `.koji/plans/` and `.koji/research/` — destination directories for `--save-as`
 - Plans/research status workflow: `bin/koji-plans-research`

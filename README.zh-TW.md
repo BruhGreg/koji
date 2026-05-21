@@ -28,7 +28,7 @@ cd ~/.claude/skills/koji && ./setup
 | 技能 | 功能 |
 |------|------|
 | `/duet-plan` | 多輪 Claude↔codex 規劃對話。達成共識後將計畫鎖定到 `$DOCS_PATH/plans/<slug>.md` |
-| `/duet-impl` | 依照鎖定的計畫逐關卡實作。每個 `<!-- gate: NAME -->` 由 codex 單一審查,最後執行 `/duet-review` |
+| `/duet-impl` | 依照鎖定的計畫逐關卡實作,並以任務清單追蹤進度。每個 `<!-- gate: NAME -->` 由 codex 單一審查,最後執行 `/duet-review` |
 | `/duet-review` | 雙審查者對抗式程式碼審查。Claude + codex 並行**背景執行**——你可以繼續做其他事——意見分歧時交叉審查,高信心修正提示你套用 |
 
 所有 duet 技能皆遵循 [代理自主原則](references/agent-autonomy.md):代理之間共同解決技術問題;只有在無法協商或涉及政策選擇時才會詢問使用者。
@@ -50,12 +50,13 @@ cd ~/.claude/skills/koji && ./setup
 詢問兩個問題（模板樣式 + 歸檔策略),然後建立:
 
 ```
-.koji/                  # 工作階段文件
-├── agent-session.md    # 工作階段歷史
-├── AI_HANDOFF.md       # 給下一個代理的專案狀態
-├── lessons.md          # 修正與發現
-└── sessions/           # 歸檔目錄
-TODO.md                 # 任務追蹤（由 /wrap 首次使用時建立）
+.koji/                       # 工作階段文件
+├── agent-session.md         # 工作階段歷史
+├── AI_HANDOFF.md            # 給下一個代理的專案狀態
+├── lessons.md               # 修正與發現
+├── CODEBASE_CONVENTIONS.md  # 新程式碼應有的樣貌（codebase-fit）
+└── sessions/                # 歸檔目錄
+TODO.md                      # 任務追蹤（由 /wrap 首次使用時建立）
 ```
 
 使用 `/kick-off` 開始工作階段,`/wrap` 結束,`/take-note` 在工作階段中途記錄。
@@ -86,6 +87,8 @@ agents:                      # 工作階段條目的標籤
 **文件漂移偵測。** 任何文件都可以用 `covers:` frontmatter 標記它所描述的程式碼路徑。當被覆蓋路徑自文件最後編輯以來的提交數超過閾值時,`/kick-off` 會警告。`/inspect-doc-drift` 會稽核整個專案。完全確定性——不需要 LLM。
 
 **Duet 工作流程。** 不會卡住使用者的跨模型代理協作。`/duet-plan` 執行多輪 Claude↔codex 對話直到共識,鎖定計畫。`/duet-impl` 依關卡逐步走過計畫,每關 codex 審查。`/duet-review` 進行雙審查者對抗式檢查,對於審查者間任何 medium/high 不一致皆觸發嚴重程度感知的交叉審查;硬性閘門 + `-PRELIMINARY` 後綴確保交叉審查不會被悄悄略過。三個技能皆以背景任務執行審查者——進行中你可以繼續工作。codex 預設使用 `xhigh` 推理強度;在叫用語句中用自然語言訊號可降回 high。
+
+**程式碼契合（codebase fit）。** duet 技能會讓新程式碼契合「這個專案」既有的慣例——檔案結構、命名、慣用寫法、分層——而不只看正確性。`/duet-plan` 會在每份計畫中寫入一段 Codebase Fit Contract,`/duet-impl` 的關卡審查與 `/duet-review` 都帶有 `codebase-fit` 審查視角。共用的參考是 koji 文件目錄中的 `CODEBASE_CONVENTIONS.md`:一個中樞,它透過 `sources:` 清單「指向」（而非複製）專案自己的慣例文件——`CONTRIBUTING.md`、`AGENTS.md`、`.cursorrules`、`STYLE.md`——並從審查實際抓到的問題逐步累積標準範例索引與「已否決模式」紀錄。`/koji-init` 為新專案建立它,`/kick-off` 則把它回填到既有專案。
 
 **三角化(`/triangulate`)。** 當你想要多方論述但希望由「你」當綜合者(而不是讓代理收斂)時:Claude + codex 並行針對單一問題論述,各自可進行網路研究,呈現立場,你權衡與決定。可選擇儲存到 `.koji/plans/` 或 `.koji/research/`,或將綜合段落附加到既有計畫——根據專案目前進行中的項目以對話方式選擇。
 

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# koji-scan-conventions — detect candidate pre-existing convention docs.
+#
+# Used by /koji-init (scaffold step) and /kick-off (step 0h) to discover the
+# docs a project already uses for code conventions, so CODEBASE_CONVENTIONS.md
+# can POINT to them (pointer-not-copy) instead of ignoring or duplicating them.
+#
+# Usage: koji-scan-conventions
+#   Prints candidate convention-doc paths — one per line, project-root-relative —
+#   to stdout; prints nothing if none found. RUN it and read the lines, e.g.
+#   `CANDIDATES=$(koji-scan-conventions)`. Do NOT `source` it: the output is
+#   data (repo-controlled filenames), never shell code — sourcing it would let a
+#   filename like `docs/x$(cmd)style.md` execute on the caller.
+#
+# Requires koji-detect to have been sourced first (needs $PROJECT_ROOT);
+# self-sources it if unset.
+set -euo pipefail
+
+if [ -z "${PROJECT_ROOT:-}" ]; then
+  eval "$(~/.claude/skills/koji/bin/koji-detect)"
+fi
+
+# 1. Fixed-name convention docs at the project root.
+for f in \
+  CONTRIBUTING.md STYLE.md STYLE_GUIDE.md CONVENTIONS.md CODING_STANDARDS.md \
+  AGENTS.md .cursorrules .github/copilot-instructions.md
+do
+  if [ -f "$PROJECT_ROOT/$f" ]; then
+    printf '%s\n' "$f"
+  fi
+done
+
+# 2. Any file under .cursor/rules/ (Cursor's modern rules layout — it nests,
+#    so this recurses; no -maxdepth).
+if [ -d "$PROJECT_ROOT/.cursor/rules" ]; then
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    printf '%s\n' "${f#"$PROJECT_ROOT/"}"
+  done < <(find "$PROJECT_ROOT/.cursor/rules" -type f 2>/dev/null | sort)
+fi
+
+# 3. docs/ files whose name signals conventions or style (top level only).
+#    koji's own CODEBASE_CONVENTIONS.md is the hub, not a pre-existing source.
+if [ -d "$PROJECT_ROOT/docs" ]; then
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$(basename "$f")" in
+      CODEBASE_CONVENTIONS.md) continue ;;
+    esac
+    printf '%s\n' "${f#"$PROJECT_ROOT/"}"
+  done < <(find "$PROJECT_ROOT/docs" -maxdepth 1 -type f \
+             \( -iname '*convention*' -o -iname '*style*' \) 2>/dev/null | sort)
+fi

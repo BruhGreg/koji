@@ -28,7 +28,7 @@ cd ~/.claude/skills/koji && ./setup
 | Skill | What it does |
 |-------|-------------|
 | `/duet-plan` | Multi-round Claude↔codex planning dialogue. Locks plan to `$DOCS_PATH/plans/<slug>.md` on consensus |
-| `/duet-impl` | Walks a locked plan gate-by-gate. Implements each phase, codex single-reviews at `<!-- gate: NAME -->`, runs `/duet-review` at the end |
+| `/duet-impl` | Walks a locked plan gate-by-gate, tracking progress as a task list. Implements each phase, codex single-reviews at `<!-- gate: NAME -->`, runs `/duet-review` at the end |
 | `/duet-review` | 2-reviewer adversarial code review. Claude + codex run in parallel as **background tasks** — keep working while they run — cross-review on disagreement, prompt to apply high-confidence fixes |
 
 All duet skills follow the [agent-autonomy principle](references/agent-autonomy.md): agents resolve technical questions together; users see prompts only for deadlocks and policy choices.
@@ -50,12 +50,13 @@ Different shape from `/duet-*`: where the duet skills converge AI voices to cons
 Asks two questions (template + archive strategy), then creates:
 
 ```
-.koji/                  # session docs
-├── agent-session.md    # session history
-├── AI_HANDOFF.md       # project state for next agent
-├── lessons.md          # corrections and gotchas
-└── sessions/           # archive directory
-TODO.md                 # task tracking (created by /wrap on first use)
+.koji/                       # session docs
+├── agent-session.md         # session history
+├── AI_HANDOFF.md            # project state for next agent
+├── lessons.md               # corrections and gotchas
+├── CODEBASE_CONVENTIONS.md  # what new code should look like (codebase-fit)
+└── sessions/                # archive directory
+TODO.md                      # task tracking (created by /wrap on first use)
 ```
 
 Use `/kick-off` to start a session, `/wrap` to end one, `/take-note` mid-session.
@@ -86,6 +87,8 @@ Global preferences (`commit_strategy`, `auto_update`) live in `~/.config/koji/co
 **Doc drift detection.** Tag any doc with `covers:` frontmatter listing the code paths it describes. `/kick-off` warns when covered paths have drifted past a commit threshold since the doc was last edited. `/inspect-doc-drift` audits the whole repo. Deterministic — no LLM needed.
 
 **Duet workflow.** Cross-model agent collaboration that doesn't block the user. `/duet-plan` runs a multi-round Claude↔codex dialogue till consensus, locks the plan. `/duet-impl` walks the plan gate-by-gate with codex review at each. `/duet-review` does a 2-reviewer adversarial pass with severity-aware cross-review on any reviewer-exclusive medium/high disagreement; a hard gate plus `-PRELIMINARY` verdict suffix make sure the cross-review pass can't be silently skipped. All three run reviewers as background tasks — you can keep working while they progress. Codex defaults to `xhigh` effort; opt down with a natural-language signal in the invocation phrase.
+
+**Codebase fit.** The duet skills hold new code to *this project's* conventions — file structure, naming, idioms, layering — not just correctness. `/duet-plan` records a Codebase Fit Contract in every plan; `/duet-impl` gate reviews and `/duet-review` carry a `codebase-fit` lens. The shared reference is `CODEBASE_CONVENTIONS.md` in your koji docs dir: a hub that *points* (never copies) to the project's own convention docs — `CONTRIBUTING.md`, `AGENTS.md`, `.cursorrules`, a `STYLE.md` — via a `sources:` list, and accumulates a canonical-exemplar index plus a rejected-patterns log from what review actually catches. `/koji-init` scaffolds it for new projects; `/kick-off` backfills it into existing ones.
 
 **Triangulation (`/triangulate`).** When you want multi-side debate but YOU should be the synthesizer (not the agents): Claude + codex argue in parallel on one question with web research per voice, present their positions, and you weigh and decide. Optional save to `.koji/plans/` or `.koji/research/`, or append a synthesis section to an existing plan — picked conversationally based on what's active in the project.
 

@@ -48,6 +48,7 @@ CATEGORY_FAMILY = {
     "deps": "deps",
     "deadcode": "deadcode",
     "style": "style",
+    "codebase-fit": "codebase-fit",
     "other": "other",
 }
 

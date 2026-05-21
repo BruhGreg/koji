@@ -303,6 +303,54 @@ Tell the user (only after the `mv` succeeded): `Added research-capture-eval poin
 
 Tell the user: `Won't ask again FOR THIS PROJECT. Edit CLAUDE.md manually if you change your mind, or unset with: koji-config set claude_md_research_capture_declined_$SESSION_HASH false`.
 
+### 0h. Codebase-fit conventions setup (v0.6.0)
+
+The codebase-fit feature (`/duet-plan` Fit Contract, `/duet-impl` review) reads `$DOCS_PATH/CODEBASE_CONVENTIONS.md`. New projects get it from `/koji-init`; this step backfills it into projects that predate the feature, registering any convention docs the project already has.
+
+Detect:
+
+```bash
+if [ -f "$DOCS_PATH/CODEBASE_CONVENTIONS.md" ]; then CBF_EXISTS=true; else CBF_EXISTS=false; fi
+CBF_DECLINED=$(~/.claude/skills/koji/bin/koji-config get "codebase_conventions_declined_$SESSION_HASH" 2>/dev/null || true)
+echo "CODEBASE_CONVENTIONS.md exists: $CBF_EXISTS | declined: ${CBF_DECLINED:-false}"
+```
+
+If `CBF_EXISTS` is `true` OR `CBF_DECLINED` is `true`, **skip this step silently** — idempotent: a no-op once the doc exists or the user has declined.
+
+Otherwise, scan for the project's existing convention docs:
+
+```bash
+CANDIDATES=$(~/.claude/skills/koji/bin/koji-scan-conventions)
+[ -n "$CANDIDATES" ] && printf 'Convention candidates:\n%s\n' "$CANDIDATES" || echo "Convention candidates: (none)"
+```
+
+**If `$CANDIDATES` is non-empty** — use AskUserQuestion (list the actual candidate paths in the prompt body):
+
+> koji's codebase-fit feature tracks how new code should fit this project. It found existing convention docs: `<candidate list>`. Set up `CODEBASE_CONVENTIONS.md` to point at them?
+
+Options:
+- **A) Link the found docs** — `sources:` points at all the listed docs. (Pick "Other" to name a subset — e.g. link `CONTRIBUTING.md` but skip a stale `.cursorrules`.)
+- **B) Set up, link none** — create the hub with empty `sources:`; the found docs are not authoritative conventions.
+- **C) Don't set up** — decline; koji won't ask again for this project.
+
+**If `$CANDIDATES` is empty** — nothing to confirm; treat it as choice B with no prompt.
+
+**On A / B / empty** — scaffold the hub by running `koji-scaffold-conventions` with the confirmed convention-doc paths as arguments — `koji-scaffold-conventions CONTRIBUTING.md .cursorrules` for choice A, or with **no arguments** for choice B / no candidates. The helper (`~/.claude/skills/koji/bin/koji-scaffold-conventions`) owns the canonical stub format and skips silently if `CODEBASE_CONVENTIONS.md` already exists:
+
+```bash
+~/.claude/skills/koji/bin/koji-scaffold-conventions [confirmed-source-path ...]
+```
+
+Tell the user: `Set up CODEBASE_CONVENTIONS.md (codebase-fit). Sources: <comma-list, or "none">.`
+
+**On C** — persist the decline so the prompt never fires again for this project:
+
+```bash
+~/.claude/skills/koji/bin/koji-config set "codebase_conventions_declined_$SESSION_HASH" true
+```
+
+Tell the user: `Won't set up codebase-fit FOR THIS PROJECT. Re-enable with: koji-config set codebase_conventions_declined_$SESSION_HASH false`.
+
 ### 1. Check for user-provided focus
 
 If the user typed text after `/kick-off` (e.g., `/kick-off build the news landing page`), use that as the **session focus** — skip reading the last session's starter prompt and use the user's intent instead. Still read handoff and lessons for context.

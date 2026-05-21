@@ -147,6 +147,7 @@ $DOCS_DIR/
 ├── AI_HANDOFF.md             # from templates/$TEMPLATE/
 ├── lessons.md                # from templates/$TEMPLATE/
 ├── SESSION_TEMPLATE.md       # from templates/$TEMPLATE/
+├── CODEBASE_CONVENTIONS.md   # codebase-fit reference for /duet-plan + /duet-impl
 ├── plans/                    # cross-session implementation handbooks
 │   └── .gitkeep
 ├── research/                 # cross-session unvalidated findings
@@ -207,6 +208,20 @@ next-step: brief one-line hint surfaced at /kick-off
 ---
 ```
 ````
+
+**Codebase-fit scaffolding.** Scaffold `$DOCS_DIR/CODEBASE_CONVENTIONS.md` — the durable codebase-fit reference that `/duet-plan` reads (Codebase Fit Contract) and `/duet-impl` enforces (codebase-fit review). It is a *hub*: it points to the project's own pre-existing convention docs and owns only what those lack — koji's exemplar index and rejected-patterns. It grows from `/duet-impl` review findings, so it ships sparse.
+
+First, discover the project's existing convention docs — run the scanner and read the lines it prints (one path per line on stdout; do **not** `source` it):
+
+```bash
+CANDIDATES=$(~/.claude/skills/koji/bin/koji-scan-conventions)
+[ -n "$CANDIDATES" ] && printf 'Convention candidates:\n%s\n' "$CANDIDATES" || echo "Convention candidates: (none)"
+```
+
+- **If `$CANDIDATES` is non-empty:** fire one `AskUserQuestion` — list the candidate paths and ask which are the project's *authoritative code conventions* (multi-select; the user may pick a subset, or none). koji will only *point at* the confirmed docs — never copy or edit them.
+- **If empty:** skip the prompt; there is nothing to confirm.
+
+Then scaffold the hub by running `koji-scaffold-conventions` with the confirmed convention-doc paths as arguments — e.g. `koji-scaffold-conventions CONTRIBUTING.md .cursorrules` — or with **no arguments** when there are none. The helper (`~/.claude/skills/koji/bin/koji-scaffold-conventions`) owns the canonical `CODEBASE_CONVENTIONS.md` stub format and **skips silently if the file already exists** — it never clobbers an existing hub.
 
 ### 4. Generate `.koji.yaml`
 
@@ -288,6 +303,7 @@ Config: .koji.yaml
 Template: $TEMPLATE
 Archive: $ARCHIVE_STRATEGY
 CLAUDE.md: session checklist added
+Codebase conventions: $DOCS_DIR/CODEBASE_CONVENTIONS.md (grows via /duet-*)
 
 Available commands:
   /kick-off   — Start a session (loads last session + handoff context)
