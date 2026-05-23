@@ -384,10 +384,11 @@ Read these files and internalize the content — do NOT dump them back to the us
      TODOS=$(awk '/^## Completed/{exit} 1' "$TODO_PATH" 2>/dev/null | head -30)
      FOCUS="$FOCUS $TODOS"
    fi
-   LESSONS=$(~/.claude/skills/koji/bin/koji-doc-status --lessons-relevant --focus "$FOCUS" --limit 8 2>/dev/null || true)
+   LESSONS=$(~/.claude/skills/koji/bin/koji-doc-status --lessons-relevant --focus "$FOCUS" --limit 8 2>/dev/null)
+   LESSONS_EXIT=$?
    ```
 
-   Internalize `$LESSONS` — these are the lessons most relevant to this session, plus a recent baseline. **If the helper fails or returns empty**, fall back to reading the top of `lessons.md` directly (first 10 entries) so kick-off still works without focus context. Cold-start (no focus signals — fresh session with no args, empty Notes, no TODO) returns top 10 by recency automatically, matching pre-v0.5 behavior.
+   Internalize `$LESSONS` — these are the lessons most relevant to this session, plus a recent baseline. **If `$LESSONS_EXIT` is non-zero OR `$LESSONS` is empty when focus signals exist**, fall back to reading the top of `lessons.md` directly (first 10 entries) so kick-off still works without focus context — AND surface one line in the kick-off brief naming the degradation, e.g. `> Note: lessons helper degraded (exit $LESSONS_EXIT) — using recency fallback instead of focus ranking.` The silent-degrade shape is what kept a BSD-awk bug invisible across multiple versions; visibility is cheap insurance. Cold-start (no focus signals — fresh session with no args, empty Notes, no TODO) returns top 10 by recency automatically and is the documented happy path — no warn needed.
 4. `$DOCS_PATH/agent-session.md` — read the **last** session entry for continuity (what was done, notes for next session)
 
 ### 2b. Gather extended context (tiered)

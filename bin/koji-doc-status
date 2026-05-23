@@ -553,6 +553,14 @@ lessons_relevant() {
   local limit="${2:-8}"
   [ -f "$lessons_file" ] || return 0
 
+  # BSD awk (macOS default) rejects newlines inside -v assignments; GNU awk
+  # accepts them. Callers like /kick-off pass focus strings built by
+  # concatenating multi-line markdown (Notes for Next Session + top of TODO),
+  # so this would silently exit 2 and degrade to recency-only on macOS.
+  # Collapsing newlines is semantics-preserving — the awk below splits on
+  # [[:space:]]+ and treats whitespace runs as one delimiter.
+  focus=$(printf '%s' "$focus" | tr '\n' ' ')
+
   awk -v focus="$focus" -v limit="$limit" '
     BEGIN {
       stop = "the|and|for|with|that|this|from|into|but|not|when|how|why|where|what|some|any|all|every|each|will|can|should|must|just|only|than|then|else|like|over|under|been|have|has|had|was|were|are|is|be|to|of|in|on|at|by|or|as|if|it|we|us|our|they|them|their|use|using|used|now|new|run|via|per|too|also|see|via|set|get|got|put"
