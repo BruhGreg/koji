@@ -45,6 +45,7 @@ The plan file path comes from the user's invocation. Examples:
 Flags:
 - `--from-gate <name>` — resume from a specific gate (skip earlier segments; useful for re-runs)
 - `--no-final-review` — skip the end-of-run `/duet-review` (rare; only for partial impl)
+- `--no-promise-audit` — skip the cumulative promise audit (Step 3a). Default off; the audit runs by default. Implied when `--no-final-review` is set.
 - `--retries N` — fix-and-retry budget per gate (default 2)
 
 **Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens) for each gate review. Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick gates", "lighter review", "use high effort", "save tokens". Don't downgrade for "the gate diff looks small"; only on explicit user signal. Claude inherits the parent session's effort level.
@@ -227,20 +228,59 @@ Options:
 
 Update `PREV_GATE_SHA` only if option 1 (override) is chosen.
 
-## Step 3 — Final /duet-review
+## Step 3 — Final review phase (promise audit + /duet-review)
 
-After all segments are processed (or `--from-gate` reaches the end):
+After all segments are processed (or `--from-gate` reaches the end), the final review phase has two sub-steps:
+
+- **3a Promise audit** — extracts every explicit contract promise from the locked plan and verifies each one in the cumulative diff. Skipped when `--no-promise-audit` or `--no-final-review`.
+- **3b Final `/duet-review`** — two-reviewer adversarial review on the cumulative diff. Skipped when `--no-final-review`.
+
+The two sub-steps share `$RUN_DIR/final-diff.patch` (cumulative `$START_SHA..HEAD` diff). Whichever runs first writes it; the other reuses.
+
+### Step 3a — Promise audit
+
+```bash
+if [ "$NO_PROMISE_AUDIT" = "1" ] || [ "$NO_FINAL_REVIEW" = "1" ]; then
+  echo "Skipping promise audit"
+  PROMISE_AUDIT_RAN=0
+else
+  PROMISE_AUDIT_RAN=1
+  # Compute cumulative diff once for both 3a and 3b.
+  git diff "$START_SHA" -- > "$RUN_DIR/final-diff.patch"
+  echo "Cumulative diff at: $RUN_DIR/final-diff.patch"
+fi
+```
+
+If the audit is enabled, dispatch the auditor as a backgrounded `Agent` call. The auditor is a Claude subagent (fresh context — it does not inherit the implementer's view of the work, which is the point: contract verification must be done by someone who reads only the plan and the diff, not someone who knows what the implementer meant).
+
+Call the `Agent` tool with `run_in_background: true`:
+
+- `subagent_type`: `general-purpose`
+- `description`: `Duet-impl promise audit`
+- `prompt`: the "Auditor prompt" template from [references/promise-audit-prompt.md](references/promise-audit-prompt.md), with `{plan_text}` replaced by the locked plan file's full contents and `{diff_text}` replaced by `$RUN_DIR/final-diff.patch` contents.
+- `run_in_background`: `true`
+
+Tell the user: *"Promise audit: auditor reading plan + cumulative diff in the background."* Then return control. When the notification arrives, extract the JSON array from the agent's response and write to `$RUN_DIR/promise-audit.json` via the Write tool. If the response contains no parseable array (timeout, prose-only response, malformed JSON), write `[]` and log: `WARN: promise audit returned no parseable JSON — treating as zero promises found. Run continues.` The audit is a guardrail, not a gate — a flaky audit must not block 3b.
+
+Then count gaps for the Step 6 report:
+
+```bash
+if [ "$PROMISE_AUDIT_RAN" = "1" ]; then
+  PROMISE_AUDIT_TOTAL=$(python3 -c "import json; print(len(json.load(open('$RUN_DIR/promise-audit.json'))))" 2>/dev/null || echo 0)
+  PROMISE_AUDIT_GAPS=$(python3 -c "import json; print(sum(1 for p in json.load(open('$RUN_DIR/promise-audit.json')) if p.get('evidence') == 'GAP'))" 2>/dev/null || echo 0)
+  echo "Promise audit: $PROMISE_AUDIT_TOTAL promises checked, $PROMISE_AUDIT_GAPS gaps found"
+fi
+```
+
+### Step 3b — Final /duet-review
 
 ```bash
 if [ "$NO_FINAL_REVIEW" = "1" ]; then
   echo "Skipping final /duet-review (--no-final-review)"
 else
-  echo "Running /duet-review on the full diff since $START_SHA..."
-  # Invoke /duet-review programmatically — the simplest path is to construct
-  # the same diff and run the two reviewers ourselves, or shell out to a
-  # mini-runner. For MVP: just tell the user to run /duet-review now (the
-  # agent can also invoke it directly via the Skill tool).
-  git diff "$START_SHA" -- > "$RUN_DIR/final-diff.patch"
+  # Reuse cumulative diff from 3a if it ran; compute now if not.
+  [ -f "$RUN_DIR/final-diff.patch" ] || git diff "$START_SHA" -- > "$RUN_DIR/final-diff.patch"
+  echo "Running /duet-review on the cumulative diff since $START_SHA..."
   echo "Full diff at: $RUN_DIR/final-diff.patch"
 fi
 ```
@@ -269,6 +309,12 @@ Re-read the source plan and edit it directly:
   `executed: <today>` + `pending: review`. Blockquote: stages executed,
   review pending.
 
+**Promise audit annotation** — whenever Step 3a ran (`PROMISE_AUDIT_RAN=1`) AND `PROMISE_AUDIT_GAPS > 0`, append one line to the top blockquote (regardless of PASS / REJECT / ESCALATED / pending status):
+
+> Promise audit: `$PROMISE_AUDIT_GAPS` gaps in `$PROMISE_AUDIT_TOTAL` promises — see `$RUN_DIR/promise-audit.json`
+
+The line is informational, not a status change. A clean PASS with promise gaps still records `status: completed` — the gaps are documented as a known deviation, not a blocker (the user already saw them in Step 6 and chose to ship). Skip the line when the audit didn't run or found zero gaps.
+
 On a re-run, replace any prior `/duet-impl` annotation. The edit lands in
 the working tree; `/wrap` commits it.
 
@@ -296,9 +342,14 @@ Print a markdown summary:
 duet-impl: <PASS | REJECT | ESCALATED>
 Plan:      <plan-path>
 Gates:     <gate-1> ✓ → <gate-2> ✓ → <gate-3> ✓ (retries: 0, 1, 0)
+Promise audit: <PROMISE_AUDIT_TOTAL> promises checked, <PROMISE_AUDIT_GAPS> gaps
+  §<plan-location>: <promise> — no evidence in diff
+  §<plan-location>: <promise> — no evidence in diff
 Final review: <verdict from /duet-review>
 Run dir:   <RUN_DIR> (kept for inspection)
 ```
+
+The `Promise audit:` line prints only when Step 3a ran (`PROMISE_AUDIT_RAN=1`). When zero gaps, print just the one-line summary; when ≥ 1 gap, indent one bulleted line per gap below it (read each gap's `promise` and `plan_location` from `$RUN_DIR/promise-audit.json`). Promise gaps are NOT a status change — they appear alongside the verdict so the user sees both signals and decides whether to ship as-is.
 
 If any gate escalated, mention which one and how the user resolved it.
 
@@ -310,11 +361,14 @@ If any gate escalated, mention which one and how the user resolved it.
 | Codex exits 124 at a gate | Gate diff too large or `xhigh` exceeded 30-min wall | Re-run with `--retries 1` (faster fail) and smaller gate scopes |
 | Implementer-applied fix doesn't compile | Suggested_fix.details was wrong for the actual context | Counts as a retry attempt; codex's next review will flag the new issue. Up to budget |
 | Stuck on a "scope" finding (codex says work overshoots phase) | Plan was ambiguous, or implementer interpreted broadly | Consult round usually resolves; if not, escalate to user |
+| Promise audit (Step 3a) times out, returns prose, or emits unparseable JSON | Auditor agent drift, or transient model issue | Write `[]`, log `WARN: promise audit returned no parseable JSON …`, proceed to Step 3b. Audit is a guardrail, not a gate — `/duet-review` still runs |
+| Promise audit reports gaps but `/duet-review` PASSes | Reviewers didn't share the audit's specific-contract checklist (the failure mode this audit exists for) | Gaps appear in Step 6 summary and Step 4 reconciliation blockquote. User decides to fix or accept as known deviation |
 | `$DOCS_PATH` not set | `/koji-init` never run | Same as `/wrap` |
 
 ## Related
 
 - Autonomy principle: [../references/agent-autonomy.md](../references/agent-autonomy.md)
 - Gate review prompt: [references/gate-review-prompt.md](references/gate-review-prompt.md)
+- Promise audit prompt: [references/promise-audit-prompt.md](references/promise-audit-prompt.md)
 - Upstream producer: `/duet-plan` saves the plan files `/duet-impl` consumes
 - End-of-run pass: `/duet-review` provides the 2-reviewer adversarial verdict

@@ -494,12 +494,21 @@ Otherwise, if `settings.local.json` exists:
 
 ## Step 6 — Starter Prompt & Session Name
 
-**Session name** — generate a short kebab-case name that describes **this session's work** (what was done, not what's next). Derive it from the session log entry you just wrote. Examples: `handoff-trim-agent-cleanup`, `auth-middleware-refactor`, `cso-audit-batch-1`.
+**Session name** — derive a short kebab-case name from **the commit message you proposed in Step 5**: take the conventional-commit subject, drop the type+scope prefix (`feat(v0.5.8): `, `fix(koji): `, etc.), then kebab-case the remainder. The commit message has already distilled this session's work; re-deriving from the session log is duplicate work and usually produces a vaguer name.
+
+Examples:
+- `feat(v0.5.8): /duet-impl — N+1 review-pass formula` → `duet-impl-n-plus-1-review-pass-formula`
+- `fix(v0.6.1): koji-doc-status BSD-awk newline crash` → `koji-doc-status-bsd-awk-newline-crash`
+- `docs(koji): trim AI_HANDOFF` → `trim-ai-handoff`
+
+**Fallback** — when Step 5 was skipped or the user declined to commit (no proposed message exists), derive from the session log entry just written (the legacy path). Same kebab-case shape.
 
 Tell the user:
 
 > **Session name:** `<suggested-name>`
-> Rename this session: `claude -n "<suggested-name>"`
+> Rename this session: `/rename <suggested-name>`
+
+The `/rename <name>` slash command renames the *active* Claude Code session — no quit/restart needed (unlike `claude -n`, which is a launch flag that starts a NEW session under that name). As of Claude Code v2.x there is no programmatic rename available to skills (GH issue #50040 closed as duplicate, no hook or tool exposed), so this step prints the suggested name and the user types `/rename` to apply it. If/when upstream exposes a rename tool, this step can auto-apply.
 
 **Starter prompt** — generate a **3-5 sentence** briefing for the next session:
 - Current project state (1 sentence)

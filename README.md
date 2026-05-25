@@ -1,14 +1,44 @@
 # koji
 
-Session management for AI coding agents. Like a fermentation starter — seed any project with structured session continuity.
+Repo-local memory layer for AI coding agents. Like a fermentation starter — seed any project with structured session continuity.
 
-koji gives your AI agent a memory across sessions: lessons learned, project state handoffs, and session logs with automatic archiving. Nine skills, one install. Pure bash + markdown, no build step.
+AI coding agents forget. Every new chat starts cold — yesterday's decisions, fixes, and gotchas don't survive. koji writes project state into plain markdown in your repo, so the next session (and the next agent) reads it and picks up where you left off.
+
+Nine skills covering session lifecycle, doc-drift tracking, and adversarial cross-model planning/review. Pure bash + markdown, no build step.
 
 ## Install
 
 ```bash
 git clone --depth 1 https://github.com/BruhGreg/koji.git ~/.claude/skills/koji
 cd ~/.claude/skills/koji && ./setup
+```
+
+## Quick Start
+
+```bash
+> /koji-init       # creates .koji/ + TODO.md, asks 2 setup questions
+> /kick-off        # start a session (blank context first time)
+... work, take notes ...
+> /wrap            # writes session log + lessons + handoff, proposes commit
+```
+
+Next day:
+
+```bash
+> /kick-off        # reads last session + handoff + focus-filtered lessons
+... agent already knows yesterday's state, picks up where you left off ...
+```
+
+What gets written to your repo:
+
+```
+.koji/                       # session docs (committed)
+├── agent-session.md
+├── AI_HANDOFF.md
+├── lessons.md
+├── CODEBASE_CONVENTIONS.md
+└── sessions/                # archive directory
+TODO.md                      # task tracking
 ```
 
 ## Skills
@@ -41,26 +71,6 @@ All duet skills follow the [agent-autonomy principle](references/agent-autonomy.
 
 Different shape from `/duet-*`: where the duet skills converge AI voices to consensus, `/triangulate` keeps **you** as a third reference point and the synthesizer.
 
-## Quick Start
-
-```
-> /koji-init
-```
-
-Asks two questions (template + archive strategy), then creates:
-
-```
-.koji/                       # session docs
-├── agent-session.md         # session history
-├── AI_HANDOFF.md            # project state for next agent
-├── lessons.md               # corrections and gotchas
-├── CODEBASE_CONVENTIONS.md  # what new code should look like (codebase-fit)
-└── sessions/                # archive directory
-TODO.md                      # task tracking (created by /wrap on first use)
-```
-
-Use `/kick-off` to start a session, `/wrap` to end one, `/take-note` mid-session.
-
 ## Configuration
 
 `.koji.yaml` in your project root. All fields optional.
@@ -86,7 +96,7 @@ Global preferences (`commit_strategy`, `auto_update`) live in `~/.config/koji/co
 
 **Doc drift detection.** Tag any doc with `covers:` frontmatter listing the code paths it describes. `/kick-off` warns when covered paths have drifted past a commit threshold since the doc was last edited. `/inspect-doc-drift` audits the whole repo. Deterministic — no LLM needed.
 
-**Duet workflow.** Cross-model agent collaboration that doesn't block the user. `/duet-plan` runs a multi-round Claude↔codex dialogue till consensus, locks the plan. `/duet-impl` walks the plan gate-by-gate with codex review at each. `/duet-review` does a 2-reviewer adversarial pass with severity-aware cross-review on any reviewer-exclusive medium/high disagreement; a hard gate plus `-PRELIMINARY` verdict suffix make sure the cross-review pass can't be silently skipped. All three run reviewers as background tasks — you can keep working while they progress. Codex defaults to `xhigh` effort; opt down with a natural-language signal in the invocation phrase.
+**Duet workflow.** Cross-model agent collaboration that doesn't block the user. `/duet-plan` runs a multi-round Claude↔codex dialogue till consensus, locks the plan. `/duet-impl` walks the plan gate-by-gate with codex review at each, then audits the cumulative diff against every explicit promise the locked plan made — contract verification distinct from the quality reviews. `/duet-review` does a 2-reviewer adversarial pass with severity-aware cross-review on any reviewer-exclusive medium/high disagreement; a hard gate plus `-PRELIMINARY` verdict suffix make sure the cross-review pass can't be silently skipped. All three run reviewers as background tasks — you can keep working while they progress. Codex defaults to `xhigh` effort; opt down with a natural-language signal in the invocation phrase.
 
 **Codebase fit.** The duet skills hold new code to *this project's* conventions — file structure, naming, idioms, layering — not just correctness. `/duet-plan` records a Codebase Fit Contract in every plan; `/duet-impl` gate reviews and `/duet-review` carry a `codebase-fit` lens. The shared reference is `CODEBASE_CONVENTIONS.md` in your koji docs dir: a hub that *points* (never copies) to the project's own convention docs — `CONTRIBUTING.md`, `AGENTS.md`, `.cursorrules`, a `STYLE.md` — via a `sources:` list, and accumulates a canonical-exemplar index plus a rejected-patterns log from what review actually catches. `/koji-init` scaffolds it for new projects; `/kick-off` backfills it into existing ones.
 
