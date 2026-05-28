@@ -119,7 +119,7 @@ Review the session for task-related changes: completed work, new tasks discovere
 
 The goal: keep `## Load on Kick-Off` aligned with where the project is going. Three passes, one consolidated proposal:
 
-- **Pass A** — deterministic floor: tagged docs whose `covers:` overlaps files touched this session.
+- **Pass A** — deterministic floor: tagged docs whose `covers:` overlaps files touched this session (A.1), plus active plans not yet in LOKO (A.2).
 - **Pass B** — Claude-judgment: tagged docs whose theme matches this session's work or the next-session mission.
 - **Pass C** — review existing entries: currently-loaded docs that have stopped being relevant.
 
@@ -129,15 +129,20 @@ A and B propose **adds**. C proposes **removes**. All three feed one prompt — 
 
 ```bash
 TAGGED_EXISTS=$(git grep -l -E '^[[:space:]]*covers[[:space:]]*:' -- '*.md' 2>/dev/null | head -1)
+ACTIVE_PLAN_COUNT=$(~/.claude/skills/koji/bin/koji-plans-research --count active-plan 2>/dev/null || echo 0)
 LOKO_HAS_BULLETS=$(awk '/^## Load on Kick-Off[[:space:]]*$/{f=1;next} f && /^## /{exit} f && /^[[:space:]]*[-*][[:space:]]+/{print;exit}' "$DOCS_PATH/agent-session.md" 2>/dev/null)
 ```
 
-- `TAGGED_EXISTS` empty AND `LOKO_HAS_BULLETS` empty → nothing to add, nothing to review. If the repo has any tracked `.md` files, print the one-line nudge below; otherwise skip silently. Exit.
-- `TAGGED_EXISTS` empty, `LOKO_HAS_BULLETS` non-empty → A+B have no candidate pool; run C only (judging untagged/exempt entries by theme).
-- `TAGGED_EXISTS` non-empty, `LOKO_HAS_BULLETS` empty → run A+B; skip C (nothing to review).
-- Both non-empty → run A+B+C.
+If `TAGGED_EXISTS` empty AND `ACTIVE_PLAN_COUNT` is `0` AND `LOKO_HAS_BULLETS` empty → nothing to add, nothing to review. If the repo has any tracked `.md` files, print the one-line nudge below; otherwise skip silently. Exit.
 
-The nudge (only fires when no tagged docs exist):
+Otherwise, run only the passes whose preconditions hold:
+
+- **Pass A.1** (covers-driven adds) runs when `TAGGED_EXISTS` is non-empty.
+- **Pass A.2** (active-plan adds) runs when `ACTIVE_PLAN_COUNT > 0`.
+- **Pass B** (judgment adds) runs when `TAGGED_EXISTS` is non-empty (judgment adds remain covers-based).
+- **Pass C** (removes) runs when `LOKO_HAS_BULLETS` is non-empty.
+
+The nudge (only fires in the all-empty case above, and only when tracked `.md` files exist):
 
 > Note: no docs are tagged with `covers:` yet. Run `/inspect-doc-drift` to tag docs so `/wrap` can auto-suggest context for future sessions.
 
@@ -170,6 +175,10 @@ fi
 
 ### Pass A — reactive adds (deterministic floor)
 
+Two deterministic sub-rules. Both feed the same Pass A candidate set and flow through the consolidated proposal together.
+
+**A.1 — covers-driven (tagged docs)**
+
 For each tagged doc:
 
 1. Take its `covers` paths (column 5 of `TAGGED_REPORT`).
@@ -177,6 +186,20 @@ For each tagged doc:
 3. If yes AND the doc is NOT already listed in `## Load on Kick-Off`, mark it a **Pass A candidate**.
 
 Label each candidate with the reason: `covers <path> — <N> files changed`.
+
+**A.2 — active plans (status-driven)**
+
+Fetch active plans (only when `ACTIVE_PLAN_COUNT > 0` per the gate above):
+
+```bash
+ACTIVE_PLANS_RECORDS=$(~/.claude/skills/koji/bin/koji-plans-research --filter active-plan 2>/dev/null || true)
+```
+
+Each record is tab-separated: `<path>\t<kind>\t<status>\t<status_source>\t<origin>\t<target>\t<next_step>`. For each record, check whether `<path>` is already listed in `## Load on Kick-Off`. Use the same path-matching Pass C uses for removes (handles both `[label](path)` and plain-path bullet forms, including the `/`-prefixed root-relative form). If NOT already listed, mark as a **Pass A candidate**. Label:
+
+> `active plan (status: <pending|in-progress>)`
+
+A.2 surfaces plans that `/duet-plan`, `/plan-eng-review`, or any other planning skill produced but never auto-flowed into LOKO — so the next session loads them via the existing LOKO read mechanism instead of relying on `/kick-off` Tier 2 keyword-matching or the Tier 1 small-set safety net.
 
 ### Pass B — judgment adds (session + next-session themes)
 
@@ -250,6 +273,22 @@ Skip Pre-check 2 if any of:
 - The helper returns no rows (LOKO empty or helper errored).
 - The doc was already flagged by the temp-doc pre-check above (no double-tagging).
 
+**Pre-check 3 — completed plans (runs after the session-mention pre-check, before scoring):**
+
+For each LOKO entry whose path starts with `$PLANS_DIR/`, query its current status:
+
+```bash
+PLAN_RECORD=$(~/.claude/skills/koji/bin/koji-plans-research --get "<path>" 2>/dev/null || true)
+```
+
+Parse the tab-separated record (`<path>\t<kind>\t<status>\t<status_source>\t...`). If `<kind>` is `plan` AND `<status>` is `completed`, mark as **deterministic** removal. Label:
+
+> `<path> — plan completed, no longer relevant`
+
+The `status: completed` field is an explicit author-controlled signal (the same way self-tagged temp markers are author-controlled). Treating it as deterministic lets the auto-mode fallback apply the removal without confirmation — symmetric with how Pass A.2 auto-adds active plans.
+
+Skip Pre-check 3 if `LOKO_REPORT` is empty or has zero entries under `$PLANS_DIR/`.
+
 **Score each candidate against this-session + next-session signals** (same signals as Pass B):
 
 - **Reactive**: did its `covers:` paths intersect with `TOUCHED` this session? If yes → keep (theme is active). **Exception:** if Pre-check 2 already flagged this doc as `established + unmentioned`, the reactive keep is overridden — the session-mention signal beats the code-touch signal.
@@ -270,6 +309,7 @@ Skip Pre-check 2 if any of:
   - Covers paths untouched ≥ N commits, where N defaults to the drift threshold.
   - Self-tagged temp marker found (Pre-check 1).
   - `presence=established` AND `mentioned=no` (Pre-check 2 — session-mention staleness).
+  - LOKO entry is a plan file with `status: completed` (Pre-check 3).
 - **Judgment** — off-theme per Claude, no deterministic backing. Carry the doc's `presence` (new/recent/established) into the tag — the auto-mode fallback uses it.
 
 The auto-mode fallback below treats deterministic vs judgment differently, and inside judgment, `presence` decides auto-apply vs advisory.
@@ -318,7 +358,7 @@ Omit B if no adds, omit C if no removes, omit A/B/C as redundant if either bucke
 The proposal text already printed. Decide what to apply automatically:
 
 - **Adds**: apply automatically. Pass A is deterministic; Pass B already errs toward skipping. Low downside.
-- **Removes — deterministic** (untouched ≥ threshold, OR self-tagged temp marker found, OR `established + unmentioned`): apply automatically. All three are author/usage-based signals strong enough to act on without confirmation.
+- **Removes — deterministic** (untouched ≥ threshold, OR self-tagged temp marker found, OR `established + unmentioned`, OR plan with `status: completed`): apply automatically. All four are author/usage-based signals strong enough to act on without confirmation.
 - **Removes — judgment-only** (no deterministic backing, picked purely by Claude theme call): apply automatically **only when `presence=established`** (≥ 2 wraps in LOKO). Two wraps of grace before judgment-removes auto-apply gives the user a cycle to notice and pin a doc they want to keep — without that grace, the asymmetric ratchet (adds via judgment auto-apply, removes via judgment never apply) lets the LOKO list grow unbounded across sessions.
 - **Removes — judgment + `presence=recent` or `presence=new`**: list as **advisory** and do NOT remove. Auto mode shouldn't yank a freshly-added doc on a hunch — let it ride one more wrap so the user can pin if they meant to keep it.
 

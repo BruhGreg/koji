@@ -374,30 +374,53 @@ The anchor is **validated, not trusted** — it came from context-reading, which
 
 ### Branch B — unanchored: ask where to save
 
-No doc clearly owns this synthesis, so where it goes is a genuinely open question — fire one `AskUserQuestion`. **This prompt is unconditional**: it always fires in Branch B. An unanchored synthesis is never disposed of without the user getting a say — there is no "is it valuable enough to ask?" gate to forget.
+No doc clearly owns this synthesis, so where it goes is a genuinely open question — fire one `AskUserQuestion`. **This prompt is unconditional**: it always fires in Branch B. An unanchored synthesis is never disposed of without the user getting a say.
+
+**Before the prompt fires — run the topic-overlap scan** per [`../references/research-capture-eval.md`](../references/research-capture-eval.md) (Topic-overlap check + Naming convention sections):
+
+1. `ls -1 "$RESEARCH_DIR"/*.md 2>/dev/null` — list existing topic-files.
+2. For each existing file, read the first ~10 lines to identify the topic (frontmatter + H1 + opening paragraph).
+3. Compare against this triangulation's synthesis + `$QUESTION`. Judge overlap.
+4. Set `OVERLAP_TARGET` to the strongest overlap candidate's slug (filename without `.md`), or empty if no strong overlap.
+5. Set `CONTENT_AREA_SLUG` to the agent-derived content-area name for the new-file case (1-3 words, names the *thing being studied*, NOT the question/event — see the reference's Naming convention).
 
 > Save this synthesis?
 
-Three fixed options (single-select):
+**When `OVERLAP_TARGET` is non-empty (four options, single-select):**
 
-- **Save as new plan** — write `$PLANS_DIR/<slug>.md` with `pending` status.
-- **Save as new research** — write `$RESEARCH_DIR/<slug>.md` with `unvalidated` status.
+- **Append to `<OVERLAP_TARGET>`** *(Recommended when overlap is strong)* — prepend a new `### YYYY-MM-DD` subsection to the existing topic-file's `## Decisions`. If multiple candidates overlap, this goes to the strongest; mention the others in the option description.
+- **Save as new research: `<CONTENT_AREA_SLUG>`** — fresh topic-file with the accumulating structure; add a cross-ref to `<OVERLAP_TARGET>`.
+- **Save as new plan** — write `$PLANS_DIR/<CONTENT_AREA_SLUG>.md` with `pending` status.
 - **Don't save** — synthesis lives in conversation memory only.
 
-There is no "update an existing doc" option here: if the synthesis belonged to an existing doc, that doc would be the anchor and you would be in Branch A.
+**When `OVERLAP_TARGET` is empty (three options):**
 
-**Default highlight + body shape.** Consult [`../references/research-capture-eval.md`](../references/research-capture-eval.md): when the triangulation's research signals fire (multi-source investigation, alternatives with tradeoffs, preserved uncertainty, a validation path), pre-select **"Save as new research"** and use that reference's richer body shape for the file. When the synthesis is a clean decision with no remaining uncertainty, pre-select **"Don't save"**. This sets only the default highlight — the prompt still fires, and the user still chooses.
+- **Save as new research: `<CONTENT_AREA_SLUG>`** — fresh topic-file with the accumulating structure.
+- **Save as new plan** — write `$PLANS_DIR/<CONTENT_AREA_SLUG>.md`.
+- **Don't save** — conversation memory only.
 
-On **"Save as new plan/research"**, derive a slug, set `SAVE_AS`, and run the **Save-as-new write** block below:
+There is no "update an existing doc" option here for an arbitrary anchor: if the synthesis belonged to an existing doc, that doc would be the anchor and you would be in Branch A. The **Append** option above is specifically for accumulating into an existing research topic-file.
+
+**Default highlight + body shape.** Consult the reference doc: when the triangulation's research signals fire (multi-source investigation, alternatives with tradeoffs, preserved uncertainty, a validation path), pre-select the research option (**Append** when overlap exists, otherwise **Save as new research**) and use the reference's body structure. When the synthesis is a clean decision with no remaining uncertainty, pre-select **"Don't save"**. This sets only the default highlight — the prompt still fires, and the user still chooses.
+
+On **"Save as new plan/research"**, set `SAVE_AS` and run the **Save-as-new write** block below:
 
 ```bash
-AUTO_SLUG=$(printf '%s' "$QUESTION" | tr '[:upper:]' '[:lower:]' \
-  | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60 | sed 's/-$//')
-[ -n "$AUTO_SLUG" ] || AUTO_SLUG="triangulated-decision"
+# CONTENT_AREA_SLUG is agent-derived per the reference's Naming convention:
+# 1-3 word content area, kebab-case, names the thing being studied — NOT
+# the question/event/session that produced the finding. Fallback to regex
+# over $QUESTION only if agent extraction was skipped.
+if [ -z "${CONTENT_AREA_SLUG:-}" ]; then
+  CONTENT_AREA_SLUG=$(printf '%s' "$QUESTION" | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60 | sed 's/-$//')
+  [ -n "$CONTENT_AREA_SLUG" ] || CONTENT_AREA_SLUG="triangulated-decision"
+fi
 # Then set SAVE_AS for the chosen kind:
-#   "Save as new plan"     → SAVE_AS="plans/$AUTO_SLUG.md"
-#   "Save as new research" → SAVE_AS="research/$AUTO_SLUG.md"
+#   "Save as new plan"     → SAVE_AS="plans/$CONTENT_AREA_SLUG.md"
+#   "Save as new research" → SAVE_AS="research/$CONTENT_AREA_SLUG.md"
 ```
+
+On **"Append to `<OVERLAP_TARGET>`"** → set `APPEND_TARGET="$RESEARCH_DIR/$OVERLAP_TARGET.md"` and run the **Append-to-topic-file write** block below.
 
 On **"Don't save"** → nothing to write; go to Step 6.
 
@@ -470,6 +493,71 @@ TODAY=$(date +%Y-%m-%d)
 
 echo "Saved synthesis to: $OUT"
 ```
+
+### Append-to-topic-file write (Branch B "Append to <OVERLAP_TARGET>")
+
+When the user picks **Append to `<OVERLAP_TARGET>`** in Branch B, accumulate the new finding into the existing topic-file's `## Decisions` section rather than spawning a new file.
+
+```bash
+APPEND_TARGET="$RESEARCH_DIR/$OVERLAP_TARGET.md"
+if [ ! -f "$APPEND_TARGET" ]; then
+  echo "WARN: append target $APPEND_TARGET vanished — falling back to new-file write"
+  SAVE_AS="research/$CONTENT_AREA_SLUG.md"
+  # Re-enter the Save-as-new write block above with the fallback SAVE_AS.
+fi
+
+TODAY=$(date +%Y-%m-%d)
+
+# $ONE_LINE_SUMMARY = one-line headline of this finding (≤80 chars,
+# agent-derived from $SYNTHESIS_PARAGRAPH). Falls back to $QUESTION if unset.
+ONE_LINE_SUMMARY="${ONE_LINE_SUMMARY:-$QUESTION}"
+
+# Build the new dated subsection.
+NEW_SECTION=$(cat <<EOF
+
+### $TODAY — $ONE_LINE_SUMMARY
+
+$SYNTHESIS_PARAGRAPH
+
+<details><summary>Voice positions</summary>
+
+#### Claude
+
+$(cat "$RUN_DIR/round-${ROUND}-claude.md")
+
+#### Codex
+
+$(cat "$RUN_DIR/round-${ROUND}-codex.md")
+
+</details>
+EOF
+)
+
+# Two structural cases:
+#   (1) File already has "## Decisions" → insert NEW_SECTION right after that heading
+#       (so the new subsection lands at the TOP of Decisions — newest first).
+#   (2) File has no "## Decisions" → append "## Decisions" + NEW_SECTION at EOF
+#       (an older-format file gets upgraded; H1 + earlier prose stays untouched).
+if grep -q '^## Decisions[[:space:]]*$' "$APPEND_TARGET"; then
+  awk -v newsec="$NEW_SECTION" '
+    /^## Decisions[[:space:]]*$/ && !done {
+      print
+      print newsec
+      done = 1
+      next
+    }
+    { print }
+  ' "$APPEND_TARGET" > "$APPEND_TARGET.tmp" && mv "$APPEND_TARGET.tmp" "$APPEND_TARGET"
+else
+  {
+    printf '\n## Decisions\n%s\n' "$NEW_SECTION"
+  } >> "$APPEND_TARGET"
+fi
+
+echo "Research appended: ${APPEND_TARGET#"$PROJECT_ROOT/"} (## Decisions)"
+```
+
+Frontmatter is preserved unchanged on append — `origin-session` tracks file creation; the dated subsection inside `## Decisions` tracks each finding. If the new finding resolves or surfaces open questions, the agent SHOULD also edit the file's `## Open questions` section accordingly. If it surfaces a related topic, append a one-line entry to `## Cross-refs`.
 
 ### Update-existing write (`--update` flag)
 

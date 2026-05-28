@@ -92,7 +92,7 @@ agents:                      # 工作階段條目的標籤
 
 **焦點過濾的 kick-off 上下文。** `/kick-off` 不會把所有東西都倒出來——它會根據你的 kick-off 參數、上次工作階段的註記、未完成的 TODO 項目,以及前 3 名最近性基準,載入 `lessons.md` 的焦點過濾子集。可用 `YYYY-MM-DD — [領域1,領域2] — …` 標記項目以加強匹配。
 
-**Load on Kick-Off。** 在 `agent-session.md` 中加入 `## Load on Kick-Off` 區段,列出工作階段開始時要載入上下文的文件。`/wrap` 會提議新增/移除以保持對齊。詳見 [`kick-off/SKILL.md`](kick-off/SKILL.md)。
+**Load on Kick-Off。** 在 `agent-session.md` 中加入 `## Load on Kick-Off` 區段,列出工作階段開始時要載入上下文的文件。`/wrap` 會提議新增/移除以保持對齊——包含進行中的計畫,會在生命週期內自動加入 LOKO,在完成時自動移除。詳見 [`kick-off/SKILL.md`](kick-off/SKILL.md)。
 
 **文件漂移偵測。** 任何文件都可以用 `covers:` frontmatter 標記它所描述的程式碼路徑。當被覆蓋路徑自文件最後編輯以來的提交數超過閾值時,`/kick-off` 會警告。`/inspect-doc-drift` 會稽核整個專案。完全確定性——不需要 LLM。
 
@@ -102,7 +102,7 @@ agents:                      # 工作階段條目的標籤
 
 **三角化(`/triangulate`)。** 當你想要多方論述但希望由「你」當綜合者(而不是讓代理收斂)時:Claude + codex 並行針對單一問題論述,各自可進行網路研究,呈現立場,你權衡與決定。可選擇儲存到 `.koji/plans/` 或 `.koji/research/`,或將綜合段落附加到既有計畫——根據專案目前進行中的項目以對話方式選擇。
 
-**計畫與研究工作文件。** `.koji/plans/`(已決定、待實作的工作)與 `.koji/research/`(調查發現,待驗證)。輕量的 YAML frontmatter(`status:` 欄位,依類型而定:plans 為 pending/in-progress/completed/archived,research 為 unvalidated/validated/archived)。`/kick-off` 會在工作階段開始時列出待辦項目;`/duet-impl` 會在執行結束時將計畫標記為 `completed`;`koji-plans-research --set-status <path> <new>` 可從命令列修改。漂移豁免(不是程式碼覆蓋文件)。
+**計畫與研究工作文件。** `.koji/plans/`(已決定、待實作的工作)與 `.koji/research/`(調查發現,待驗證)。研究檔案以主題為定址單位——新發現會累積進現有主題檔案(`## Decisions` 段落由新到舊),而不是另開以工作階段命名的平行檔案。輕量的 YAML frontmatter(`status:` 欄位,依類型而定:plans 為 pending/in-progress/completed/archived,research 為 unvalidated/validated/archived)。`/kick-off` 會在工作階段開始時列出待辦項目;`/duet-impl` 會在執行結束時將計畫標記為 `completed`;`koji-plans-research --set-status <path> <new>` 可從命令列修改。漂移豁免(不是程式碼覆蓋文件)。
 
 ## 更詳細的文件
 

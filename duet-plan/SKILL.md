@@ -266,9 +266,22 @@ to the dialogue that just happened. If the reference's signals fire (judgment,
 not checkbox), surface the exit-prompt from that reference. Otherwise stay
 silent — no prompt, no mention.
 
-If the user accepts, draft the research file using the body structure from
-the reference and write it to `$RESEARCH_DIR/<slug>.md`. Slug is derived
-from the topic; existing files auto-suffix.
+If the user accepts, run the topic-overlap scan from
+[`../references/research-capture-eval.md`](../references/research-capture-eval.md)
+(Topic-overlap check + Naming convention sections) against `$RESEARCH_DIR`.
+Then either:
+
+- **Append** to the strongest overlap target — prepend a new
+  `### YYYY-MM-DD` subsection under that file's `## Decisions`.
+- **Write** a new content-area-named topic-file with the accumulating
+  structure (`## Decisions` / `## Open questions` / `## Cross-refs`).
+
+Existing topic-files take precedence — do not spawn a parallel file when a
+strong overlap exists. The slug for new files is the agent-derived
+content-area name (1-3 words, names the *thing being studied* — NOT the
+planning session or skill that produced the finding). Auto-suffix on slug
+collision only when overlap-scan returned no candidates yet the chosen
+content-area name collides with an unrelated existing file.
 
 ## Step 5 — Cleanup
 

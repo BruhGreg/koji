@@ -92,7 +92,7 @@ Global preferences (`commit_strategy`, `auto_update`) live in `~/.config/koji/co
 
 **Focus-filtered context at kick-off.** `/kick-off` doesn't dump everything — it loads a focus-filtered subset of `lessons.md` matched against your kick-off arg, last session's notes, open TODO items, plus a top-3 recency baseline. Tag entries `YYYY-MM-DD — [tag1,tag2] — …` to sharpen matching.
 
-**Load on Kick-Off.** Add a `## Load on Kick-Off` section to `agent-session.md` listing docs to pull into context at session start. `/wrap` proposes adds/removes to keep it aligned with where the project is going. See [`kick-off/SKILL.md`](kick-off/SKILL.md).
+**Load on Kick-Off.** Add a `## Load on Kick-Off` section to `agent-session.md` listing docs to pull into context at session start. `/wrap` proposes adds/removes to keep it aligned with where the project is going — including active plans, which auto-flow into LOKO during their lifecycle and out again when they complete. See [`kick-off/SKILL.md`](kick-off/SKILL.md).
 
 **Doc drift detection.** Tag any doc with `covers:` frontmatter listing the code paths it describes. `/kick-off` warns when covered paths have drifted past a commit threshold since the doc was last edited. `/inspect-doc-drift` audits the whole repo. Deterministic — no LLM needed.
 
@@ -102,7 +102,7 @@ Global preferences (`commit_strategy`, `auto_update`) live in `~/.config/koji/co
 
 **Triangulation (`/triangulate`).** When you want multi-side debate but YOU should be the synthesizer (not the agents): Claude + codex argue in parallel on one question with web research per voice, present their positions, and you weigh and decide. Optional save to `.koji/plans/` or `.koji/research/`, or append a synthesis section to an existing plan — picked conversationally based on what's active in the project.
 
-**Plans + research working docs.** `.koji/plans/` (decided work, ready to implement) and `.koji/research/` (investigation findings, pending validation). Lightweight YAML frontmatter (`status:` field, kind-aware: pending/in-progress/completed/archived for plans, unvalidated/validated/archived for research). `/kick-off` surfaces pending entries; `/duet-impl` marks plans `completed` at end of run; `koji-plans-research --set-status <path> <new>` mutates from the command line. Drift-exempt (not code-coverage docs).
+**Plans + research working docs.** `.koji/plans/` (decided work, ready to implement) and `.koji/research/` (investigation findings, pending validation). Research files are topic-addressable — new findings accumulate into existing topic-files (`## Decisions` newest-first) rather than spawning parallel session-named files. Lightweight YAML frontmatter (`status:` field, kind-aware: pending/in-progress/completed/archived for plans, unvalidated/validated/archived for research). `/kick-off` surfaces pending entries; `/duet-impl` marks plans `completed` at end of run; `koji-plans-research --set-status <path> <new>` mutates from the command line. Drift-exempt (not code-coverage docs).
 
 ## Deeper docs
 

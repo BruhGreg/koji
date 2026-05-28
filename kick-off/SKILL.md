@@ -451,6 +451,16 @@ INVALID_RECORDS=$(~/.claude/skills/koji/bin/koji-plans-research --filter invalid
 
 Each record is tab-separated: `path\tkind\tstatus\tstatus_source\torigin\ttarget\tnext_step`. Walk lines using `while IFS=$'\t' read -r path kind status status_source origin target next_step; do …; done <<< "$ACTIVE_PLANS_RECORDS"` (or read into your head — the records are short).
 
+**Active-plan auto-load (always fires when set is small):**
+
+Variables already in scope from the records-fetch above. If `$ACTIVE_PLANS` is `1` or `2`, walk `$ACTIVE_PLANS_RECORDS`, **Read each `path`** (project-relative — prefix with `$PROJECT_ROOT/` if your read tool needs absolute paths), internalize the body, and append one line per loaded plan to the brief:
+
+> Active plan loaded: \<slug\> (\<status\>)
+
+`<slug>` = `basename "$path" .md`. Skip silently when count is `0` (nothing to do) or `> 2` (the user should curate via `## Load on Kick-Off` directly; auto-loading 3+ plans inflates kick-off context unpredictably).
+
+At ≤ 2 active plans, "active" ≈ "relevant" — load it. This catches the case where a recent `/wrap` or `/duet-plan` locked a plan the next session is going to work on, but the LOKO proposal hasn't run yet OR Notes-for-Next-Session keywords didn't match the plan filename to trigger Tier 2 reference-follow. The LOKO write-side mechanism (wrap Pass A.2) is the primary path; this auto-load is the deterministic safety net.
+
 **Tier 2 — Reference-follow (if session note has references):**
 
 If the "Notes for Next Session" from step 2 mentions specific files, directories, plans, or modules:
