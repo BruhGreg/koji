@@ -100,6 +100,8 @@ agents:                      # 工作階段條目的標籤
 
 **程式碼契合（codebase fit）。** duet 技能會讓新程式碼契合「這個專案」既有的慣例——檔案結構、命名、慣用寫法、分層——而不只看正確性。`/duet-plan` 會在每份計畫中寫入一段 Codebase Fit Contract,`/duet-impl` 的關卡審查與 `/duet-review` 都帶有 `codebase-fit` 審查視角。共用的參考是 koji 文件目錄中的 `CODEBASE_CONVENTIONS.md`:一個中樞,它透過 `sources:` 清單「指向」（而非複製）專案自己的慣例文件——`CONTRIBUTING.md`、`AGENTS.md`、`.cursorrules`、`STYLE.md`——並從審查實際抓到的問題逐步累積標準範例索引與「已否決模式」紀錄。`/koji-init` 為新專案建立它,`/kick-off` 則把它回填到既有專案。
 
+**死碼掃描(dead-code sweep)。** `/duet-review` 與 `/duet-impl` 的關卡審查者會主動標出 diff 讓哪些程式碼路徑變得不可達(`deadcode` finding)——被取代的 helper、結構上已死的分支、永遠不會進入的 match arm。內建例外處理:測試 scaffolding、生成程式碼、以及前向相容/遷移橋接程式碼會被略過,讓「加新路徑、保留舊路徑」的基底搭建階段順利通過。`/duet-impl` 的執行末段報告也會在 promise 稽核旁顯示一個程式碼增刪比(例如 `+2310 / −267 (ratio 8.6:1)`)——基底搭建 vs 重構的元訊號,搭配 deadcode 發現一起判讀。
+
 **三角化(`/triangulate`)。** 當你想要多方論述但希望由「你」當綜合者(而不是讓代理收斂)時:Claude + codex 並行針對單一問題論述,各自可進行網路研究,呈現立場,你權衡與決定。可選擇儲存到 `.koji/plans/` 或 `.koji/research/`,或將綜合段落附加到既有計畫——根據專案目前進行中的項目以對話方式選擇。
 
 **計畫與研究工作文件。** `.koji/plans/`(已決定、待實作的工作)與 `.koji/research/`(調查發現,待驗證)。研究檔案以主題為定址單位——新發現會累積進現有主題檔案(`## Decisions` 段落由新到舊),而不是另開以工作階段命名的平行檔案。輕量的 YAML frontmatter(`status:` 欄位,依類型而定:plans 為 pending/in-progress/completed/archived,research 為 unvalidated/validated/archived)。`/kick-off` 會在工作階段開始時列出待辦項目;`/duet-impl` 會在執行結束時將計畫標記為 `completed`;`koji-plans-research --set-status <path> <new>` 可從命令列修改。漂移豁免(不是程式碼覆蓋文件)。

@@ -336,12 +336,33 @@ This is the flywheel: `CODEBASE_CONVENTIONS.md` grows from what review actually 
 
 ## Step 6 — Report
 
-Print a markdown summary:
+Before printing, compute the code-delta ratio from the cumulative diff (whichever of Step 3a/3b wrote `$RUN_DIR/final-diff.patch`). When neither final-review path ran, fall back to a one-shot `git diff $START_SHA --` so the metric still emits. The line counts must match `git diff --shortstat` semantics — count every `+`/`-` content line, subtract only the `+++ b/foo` / `--- a/foo` file headers (not content lines that happen to begin with `--`, like deleted markdown bullets):
+
+```bash
+DIFF_FOR_RATIO="$RUN_DIR/final-diff.patch"
+[ -f "$DIFF_FOR_RATIO" ] || git diff "$START_SHA" -- > "$DIFF_FOR_RATIO"
+ADDS=$(grep -cE '^[+]' "$DIFF_FOR_RATIO" 2>/dev/null || echo 0)
+SKIP_A=$(grep -cE '^[+]{3} ' "$DIFF_FOR_RATIO" 2>/dev/null || echo 0)
+ADDS=$((ADDS - SKIP_A))
+DELS=$(grep -cE '^[-]' "$DIFF_FOR_RATIO" 2>/dev/null || echo 0)
+SKIP_D=$(grep -cE '^[-]{3} ' "$DIFF_FOR_RATIO" 2>/dev/null || echo 0)
+DELS=$((DELS - SKIP_D))
+if [ "$DELS" -gt 0 ]; then
+  RATIO=$(python3 -c "print(f'{$ADDS/$DELS:.1f}:1')")
+elif [ "$ADDS" -gt 0 ]; then
+  RATIO="∞:1"
+else
+  RATIO="0:0"
+fi
+```
+
+Then print a markdown summary:
 
 ```
 duet-impl: <PASS | REJECT | ESCALATED>
 Plan:      <plan-path>
 Gates:     <gate-1> ✓ → <gate-2> ✓ → <gate-3> ✓ (retries: 0, 1, 0)
+Code delta: +<ADDS> / −<DELS> (ratio <RATIO>)
 Promise audit: <PROMISE_AUDIT_TOTAL> promises checked, <PROMISE_AUDIT_GAPS> gaps
   §<plan-location>: <promise> — no evidence in diff
   §<plan-location>: <promise> — no evidence in diff
@@ -350,6 +371,8 @@ Run dir:   <RUN_DIR> (kept for inspection)
 ```
 
 The `Promise audit:` line prints only when Step 3a ran (`PROMISE_AUDIT_RAN=1`). When zero gaps, print just the one-line summary; when ≥ 1 gap, indent one bulleted line per gap below it (read each gap's `promise` and `plan_location` from `$RUN_DIR/promise-audit.json`). Promise gaps are NOT a status change — they appear alongside the verdict so the user sees both signals and decides whether to ship as-is.
+
+The `Code delta:` line is a meta-signal, not a status change. High ratios (≥ 5:1) are normal for substrate-shipping phases where "add the new path alongside the old one" is the intended pattern — pair it with the `/duet-review` deadcode findings to decide whether the additivity is a foundation play or a smell. A "cleanup" or "refactor" run producing a high ratio is worth a second look. Informational; do not adjust the verdict on the metric alone.
 
 If any gate escalated, mention which one and how the user resolved it.
 
