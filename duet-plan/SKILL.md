@@ -66,6 +66,11 @@ PROJECT_CONTEXT="(repo: $(basename "$PROJECT_ROOT"); branch: $(git branch --show
 echo "Topic: $TOPIC"
 echo "Run dir: $RUN_DIR"
 echo "Round limit: $ROUND_LIMIT, effort: $EFFORT"
+
+# Keep the machine awake for this unattended run — the background dialogue can
+# span many minutes and rounds. Refcounted + self-cleaning; never touches a
+# caffeinate the user started. Torn down in Step 5. No /wrap dependency.
+~/.claude/skills/koji/bin/koji-keepawake start || true
 ```
 
 ## Step 2 — Dialogue loop (both agents run in background)
@@ -292,6 +297,7 @@ else
   rm -rf "$RUN_DIR"
   echo "Process artifacts cleaned up."
 fi
+~/.claude/skills/koji/bin/koji-keepawake stop || true   # release keep-awake started in Step 1
 ```
 
 ## Step 6 — Report

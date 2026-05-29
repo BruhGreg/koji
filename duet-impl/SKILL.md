@@ -106,6 +106,12 @@ The user can redirect before any work starts. Each checkpoint becomes a "segment
 
 ## Step 2 — Walk codex-reviewed checkpoints
 
+**Keep the machine awake for the walk** (once, before the per-checkpoint loop): the gate reviews dispatch as background tasks across many turns, so the user can step away. Refcounted + self-cleaning; never touches a caffeinate the user started. Torn down in Step 6. No `/wrap` dependency.
+
+```bash
+~/.claude/skills/koji/bin/koji-keepawake start || true
+```
+
 For each checkpoint that has a codex single-review attached (foundation gate + the `1/N … (N-1)/N` post-foundation positions), in order:
 
 > NOTE: the `N/N` position is the final `/duet-review`, handled by Step 3 — **do not** schedule a codex single-review at end-of-plan. Step 2 stops one position short of the end.
@@ -339,6 +345,7 @@ This is the flywheel: `CODEBASE_CONVENTIONS.md` grows from what review actually 
 Before printing, compute the code-delta ratio from the cumulative diff (whichever of Step 3a/3b wrote `$RUN_DIR/final-diff.patch`). When neither final-review path ran, fall back to a one-shot `git diff $START_SHA --` so the metric still emits. The line counts must match `git diff --shortstat` semantics — count every `+`/`-` content line, subtract only the `+++ b/foo` / `--- a/foo` file headers (not content lines that happen to begin with `--`, like deleted markdown bullets):
 
 ```bash
+~/.claude/skills/koji/bin/koji-keepawake stop || true   # run concluding — release keep-awake started in Step 2
 DIFF_FOR_RATIO="$RUN_DIR/final-diff.patch"
 [ -f "$DIFF_FOR_RATIO" ] || git diff "$START_SHA" -- > "$DIFF_FOR_RATIO"
 ADDS=$(grep -cE '^[+]' "$DIFF_FOR_RATIO" 2>/dev/null || echo 0)

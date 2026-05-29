@@ -19,22 +19,33 @@ fi
 
 KOJI_YAML="$PROJECT_ROOT/.koji.yaml"
 
-STALE_THRESHOLD=$(awk '
-  /^docs:[[:space:]]*(#.*)?$/ { in_docs=1; next }
-  /^[^[:space:]]/ && !/^docs:/ { in_docs=0 }
-  in_docs && /^[[:space:]]+stale_threshold[[:space:]]*:/ {
-    sub(/^[[:space:]]+stale_threshold[[:space:]]*:[[:space:]]*/, "")
-    sub(/[[:space:]]+#.*$/, "")
-    sub(/[[:space:]]*$/, "")
-    # Strip surrounding quotes (YAML allows `stale_threshold: "10"`)
-    n = length($0)
-    if (n >= 2) {
-      f = substr($0, 1, 1); l = substr($0, n, 1)
-      if ((f == "\"" && l == "\"") || (f == "\047" && l == "\047")) $0 = substr($0, 2, n - 2)
+# Read docs.<key> from .koji.yaml (top-level `docs:` block only). Strips a
+# trailing `# comment` and surrounding quotes; empty output if the key is
+# absent. Generic over the key — callers grep/validate the value themselves.
+#
+# Lives in this helper (not inlined in a SKILL.md bash block) on purpose: the
+# skill renderer strips awk `$N`/`$0` field refs, which silently breaks the
+# dynamic `$0 ~ "..."key"..."` match below. Helper scripts run via bash directly
+# and are immune. /kick-off step 2c/2c' reads stale + budget config through this.
+read_docs_key() {
+  awk -v key="$1" '
+    /^docs:[[:space:]]*(#.*)?$/ { in_docs=1; next }
+    /^[^[:space:]]/ && !/^docs:/ { in_docs=0 }
+    in_docs && $0 ~ "^[[:space:]]+" key "[[:space:]]*:" {
+      sub(/^[[:space:]]*[^:]*:[[:space:]]*/, "")
+      sub(/[[:space:]]+#.*$/, "")
+      sub(/[[:space:]]*$/, "")
+      n = length($0)
+      if (n >= 2) {
+        f = substr($0, 1, 1); l = substr($0, n, 1)
+        if ((f == "\"" && l == "\"") || (f == "\047" && l == "\047")) $0 = substr($0, 2, n - 2)
+      }
+      print; exit
     }
-    print; exit
-  }
-' "$KOJI_YAML" 2>/dev/null | grep -E '^[0-9]+$' || true)
+  ' "$KOJI_YAML" 2>/dev/null
+}
+
+STALE_THRESHOLD=$(read_docs_key stale_threshold | grep -E '^[0-9]+$' || true)
 [ -n "${STALE_THRESHOLD:-}" ] || STALE_THRESHOLD=10
 
 # --- frontmatter primitives ---
@@ -749,6 +760,9 @@ case "${1:-}" in
       per-path) commits_per_path "$commits_abs" "$commits_limit" ;;
     esac
     ;;
+  --get-docs-key)
+    read_docs_key "${2:?Usage: koji-doc-status --get-docs-key <key>}"
+    ;;
   --help|-h|"")
     cat <<'USAGE'
 koji-doc-status — drift status for docs tagged with YAML `covers:` frontmatter.
@@ -767,6 +781,12 @@ Usage:
     --by-size    rank by files_changed × (insertions+deletions)
     --per-path   round-robin across each covered path
     (default)    most recent, with noise-prefix filter
+
+  koji-doc-status --get-docs-key <key>   # read docs.<key> from .koji.yaml
+                                         # (top-level docs: block; quote- and
+                                         # comment-stripped). Empty if absent.
+                                         # Render-safe reader for /kick-off's
+                                         # stale_* and budget_* config.
 
 Output (tab-separated, one record per doc — status modes):
   <path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>

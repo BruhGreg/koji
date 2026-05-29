@@ -369,12 +369,14 @@ Read these files and internalize the content — do NOT dump them back to the us
    FOCUS=""
    [ -n "${USER_FOCUS:-}" ] && FOCUS="$USER_FOCUS"
    if [ -f "$DOCS_PATH/agent-session.md" ]; then
-     # Latest Notes for Next Session (wrap appends at bottom).
+     # Latest Notes for Next Session (wrap appends at bottom). Bare `print`
+     # (not `buf = buf ORS $0`) keeps this awk free of any literal `$0` token —
+     # the skill renderer strips field refs, which would silently empty NOTES
+     # and degrade the lessons focus signal. Same class as the budget-config bug.
      NOTES=$(awk '
-       /^### Notes for Next Session[[:space:]]*$/ { capturing=1; buf=""; next }
+       /^### Notes for Next Session[[:space:]]*$/ { capturing=1; next }
        capturing && /^## |^### / { capturing=0 }
-       capturing { buf = buf ORS $0 }
-       END { print buf }
+       capturing { print }
      ' "$DOCS_PATH/agent-session.md" 2>/dev/null | head -20)
      FOCUS="$FOCUS $NOTES"
    fi
@@ -521,22 +523,10 @@ The section is optional. If it's absent, skip this entire step silently. Bullets
 
 ```bash
 LOKO_REPORT=$(~/.claude/skills/koji/bin/koji-doc-status --load-on-kickoff 2>/dev/null || true)
-STALE_ACTION=$(awk '
-  /^docs:[[:space:]]*(#.*)?$/ { in_docs=1; next }
-  /^[^[:space:]]/ && !/^docs:/ { in_docs=0 }
-  in_docs && /^[[:space:]]+stale_action[[:space:]]*:/ {
-    sub(/^[[:space:]]+stale_action[[:space:]]*:[[:space:]]*/, "")
-    sub(/[[:space:]]+#.*$/, "")
-    sub(/[[:space:]]*$/, "")
-    # Strip surrounding quotes (YAML allows `stale_action: "skip"`)
-    n = length($0)
-    if (n >= 2) {
-      f = substr($0, 1, 1); l = substr($0, n, 1)
-      if ((f == "\"" && l == "\"") || (f == "\047" && l == "\047")) $0 = substr($0, 2, n - 2)
-    }
-    print; exit
-  }
-' "$PROJECT_ROOT/.koji.yaml" 2>/dev/null | grep -E '^[a-z_]+$' || true)
+# stale_action read via the helper, NOT an inline awk: the skill renderer
+# strips awk `$N`/`$0` field refs, which would break the quote-stripping below
+# and silently fall back to `warn` regardless of the configured value.
+STALE_ACTION=$(~/.claude/skills/koji/bin/koji-doc-status --get-docs-key stale_action 2>/dev/null | grep -E '^[a-z_]+$' || true)
 [ -n "${STALE_ACTION:-}" ] || STALE_ACTION=warn
 ```
 
@@ -573,29 +563,15 @@ TOTAL_TOKENS=$((TOTAL_CHARS / 4))   # standard ~4 chars/token approximation
 
 Also build a per-doc size list (path → chars) — keep it sorted by size descending, used if the budget warning fires.
 
-**Read budget config from `.koji.yaml`** (both keys optional). Keys MUST live inside the top-level `docs:` block to be honored. `budget_silent` accepts `true`/`yes`/`on`/`1` (case-insensitive); anything else is false:
+**Read budget config from `.koji.yaml`** (both keys optional). Keys MUST live inside the top-level `docs:` block to be honored. `budget_silent` accepts `true`/`yes`/`on`/`1` (case-insensitive); anything else is false. Read via the `koji-doc-status` helper — NOT an inline awk. The reader needs a *dynamic* `$0 ~ "..."key"..."` match, and the skill renderer strips awk `$N`/`$0` field refs from this body; inlined, it would syntax-error to empty and the fallbacks below would silently win, ignoring your `.koji.yaml` config (the exact failure mode step 2b's helper-script note warns about):
 
 ```bash
-_koji_read_docs_key() {
-  awk -v key="$1" '
-    /^docs:/ { in_docs=1; next }
-    /^[^[:space:]]/ && !/^docs:/ { in_docs=0 }
-    in_docs && $0 ~ "^[[:space:]]+"key"[[:space:]]*:" {
-      sub(/^[^:]*:[[:space:]]*/, "")
-      sub(/[[:space:]]+#.*$/, "")   # strip trailing comment
-      sub(/[[:space:]]*$/, "")
-      # Strip surrounding quotes
-      if (substr($0,1,1) == "\"" && substr($0,length($0),1) == "\"") $0 = substr($0,2,length($0)-2)
-      if (substr($0,1,1) == "\047" && substr($0,length($0),1) == "\047") $0 = substr($0,2,length($0)-2)
-      print; exit
-    }
-  ' "$PROJECT_ROOT/.koji.yaml" 2>/dev/null
-}
+_kds=~/.claude/skills/koji/bin/koji-doc-status
 
-BUDGET_WARN=$(_koji_read_docs_key budget_warn_tokens | grep -E '^[0-9]+$' || true)
+BUDGET_WARN=$("$_kds" --get-docs-key budget_warn_tokens 2>/dev/null | grep -E '^[0-9]+$' || true)
 [ -n "${BUDGET_WARN:-}" ] || BUDGET_WARN=15000
 
-_budget_silent_raw=$(_koji_read_docs_key budget_silent || true)
+_budget_silent_raw=$("$_kds" --get-docs-key budget_silent 2>/dev/null || true)
 case "$_budget_silent_raw" in
   true|TRUE|True|yes|YES|Yes|on|ON|On|1) BUDGET_SILENT=true ;;
   *) BUDGET_SILENT=false ;;

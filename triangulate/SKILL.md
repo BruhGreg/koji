@@ -1,5 +1,5 @@
 ---
-description: "Multi-side debate on one question — Claude + codex argue in parallel, iterate across rounds as needed to converge. You synthesize the call. Web research per voice."
+description: "Multi-side debate on one question — Claude + codex argue in parallel, iterate across rounds as needed to converge. You synthesize the call. Web research per voice. Also runs per-finding inside a finding-by-finding plan review (e.g. /plan-eng-review) to harden each finding via cross-model debate before you lock it."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools:
@@ -28,6 +28,32 @@ Examples:
 - "triangulate the click-nav hook design"
 
 Don't auto-invoke on generic "let's decide" / "help me think this through" — those should keep using `/duet-plan` (for multi-round consensus) or just normal conversation.
+
+## Composing with a review skill (e.g. /plan-eng-review)
+
+`/triangulate` can run **per finding inside a finding-by-finding plan review** —
+`/plan-eng-review`, `/plan-devex-review` — to harden each architectural call with
+cross-model debate before you lock it. The review skill stays the primary workflow and is
+**unmodified** (it's gstack's); koji composes from the outside.
+
+Trigger: the user invokes the review **"with /triangulate"** (e.g. *"/plan-eng-review the
+locked plan with /triangulate"*). The review surfaces findings one at a time as usual;
+instead of answering its plain decision-prompt for a finding, you run a triangulate on that
+finding and let **its** lock-AUQ be the decision gate, then fold the result into the plan
+and move to the next finding. Because the review runs inline and you invoke `/triangulate`
+at the first finding, this guidance loads then and governs the rest (re-invoking per finding
+keeps it resilient to compaction).
+
+Two adaptations matter; the full loop is in the reference:
+- **Big-picture lens** baked into the voice prompts from finding #1 — enumerate the plan's
+  named downstream phases and ask whether any *absorbs* (makes this moot) or *flips* it.
+- **Cost guard + cadence** — show an up-front estimate (findings × voices × rounds) and
+  checkpoint between review sections. Opt-in; never auto-triggered.
+
+Applies to reviews that surface **discrete findings sequentially**, not holistic ones
+(`/plan-ceo-review`, `/plan-design-review`). Full per-finding loop, voice-prompt template,
+round-2 escape hatch, optional red-team stage, and write-back:
+**[references/review-composition.md](references/review-composition.md)**.
 
 ## Preamble
 
@@ -104,6 +130,13 @@ PROJECT_CONTEXT="(repo: $(basename "$PROJECT_ROOT"); branch: $(git branch --show
 echo "Question: $QUESTION"
 echo "Run dir: $RUN_DIR"
 echo "Round limit: $ROUND_LIMIT, effort: $EFFORT"
+
+# Keep the machine awake while the background voices run (and across rounds), so
+# the user can walk away. Refcounted: when /triangulate is nested per-finding in
+# a review composition (see references/review-composition.md), the composition's
+# outer hold keeps this from flapping off between findings. Self-cleaning, and
+# never kills a caffeinate the user started. Torn down in Step 6.
+~/.claude/skills/koji/bin/koji-keepawake start || true
 ```
 
 ## Step 2 — Round 1 dispatch (both voices in parallel, background)
@@ -632,6 +665,7 @@ if [ "${KEEP:-0}" = "1" ]; then
 else
   rm -rf "$RUN_DIR"
 fi
+~/.claude/skills/koji/bin/koji-keepawake stop || true   # release keep-awake started in Step 1
 ```
 
 ## Step 7 — Report
