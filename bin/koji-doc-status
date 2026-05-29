@@ -551,17 +551,22 @@ loko_history() {
   done <<< "$loko_paths"
 }
 
-# Emit a focus-filtered subset of $DOCS_PATH/lessons.md.
+# Emit a WIDE-RECALL pre-filter over $DOCS_PATH/lessons.md — NOT a ranker.
 # Entries are YYYY-MM-DD-headed, newest-first, possibly multi-line.
-# Scoring: distinct focus-token hits in entry's lowercased text (tokens from
-#   --focus space-split, strip stopwords + <3-char tokens, case-insensitive).
-# Output: top 3 by recency (baseline) ∪ entries with score>0 (sort score desc,
-#   recency desc tie-break), deduped, capped at --limit (default 8).
+# This helper does NO relevance scoring/sorting/discarding: that judgment belongs
+# to the consuming prompt (/kick-off step 2), which ranks the candidates and
+# ignores the noise. Recall is intentionally broad so the prompt never misses a
+# bearing lesson that a keyword index() couldn't have known to keep.
+# Tokens: from --focus, space-split, strip stopwords + <3-char tokens, case-insensitive.
+# Output: newest-first, the UNION of (a) a recent-N baseline (N=3) and (b) EVERY
+#   entry whose lowercased text contains ANY focus token (substring match),
+#   deduped, capped only by --limit (default 40 — a safety bound on a pathological
+#   corpus, not a relevance gate).
 # Cold-start (no --focus): top 10 by recency (pre-v0.5 kick-off fallback).
 lessons_relevant() {
   local lessons_file="$DOCS_PATH/lessons.md"
   local focus="$1"
-  local limit="${2:-8}"
+  local limit="${2:-40}"
   [ -f "$lessons_file" ] || return 0
 
   # BSD awk (macOS default) rejects newlines inside -v assignments; GNU awk
@@ -634,50 +639,96 @@ lessons_relevant() {
         exit
       }
 
-      # Score each entry
+      # Wide-recall pre-filter (NO scoring, NO sort-by-relevance, NO discard).
+      # Mark which entries qualify: the recent-N baseline OR any-token-hit.
+      # Then emit in pure recency order (newest-first = ascending index), the
+      # union of the two sets, deduped, capped only by --limit. The consuming
+      # prompt does the ranking — this is intentionally broad recall.
+      baseline = 3
+
       for (i = 1; i <= ne; i++) {
-        s = 0
-        for (k = 1; k <= n_tok; k++) {
-          if (index(lcs[i], tokens[k]) > 0) s++
+        keep[i] = 0
+        # (a) recent-N baseline (always)
+        if (i <= baseline) keep[i] = 1
+        # (b) any focus-token substring hit
+        if (!keep[i]) {
+          for (k = 1; k <= n_tok; k++) {
+            if (index(lcs[i], tokens[k]) > 0) { keep[i] = 1; break }
+          }
         }
-        scores[i] = s
       }
 
       out = 0
       max_out = limit + 0
-      if (max_out <= 0) max_out = 8
+      if (max_out <= 0) max_out = 40
 
-      # Phase 1: top 3 most recent as baseline (always)
-      for (i = 1; i <= ne && out < 3 && out < max_out; i++) {
-        if (!(i in seen)) {
+      # Emit newest-first (ascending index = recency desc), union deduped by
+      # construction (each index visited once), capped at --limit.
+      for (i = 1; i <= ne && out < max_out; i++) {
+        if (keep[i]) {
           print entries[i]
           print ""
-          seen[i] = 1
           out++
         }
       }
-
-      # Phase 2: matched entries sorted by score desc, tie-break recency desc (smaller index = newer)
-      n_match = 0
-      for (i = 1; i <= ne; i++) {
-        if (scores[i] > 0 && !(i in seen)) matches[++n_match] = i
-      }
-      # Bubble sort by score desc, recency desc (index asc as tie-break)
-      for (i = 1; i <= n_match; i++) {
-        for (j = i + 1; j <= n_match; j++) {
-          if (scores[matches[j]] > scores[matches[i]] || \
-              (scores[matches[j]] == scores[matches[i]] && matches[j] < matches[i])) {
-            t = matches[i]; matches[i] = matches[j]; matches[j] = t
-          }
-        }
-      }
-      for (k = 1; k <= n_match && out < max_out; k++) {
-        print entries[matches[k]]
-        print ""
-        out++
-      }
     }
   ' "$lessons_file"
+}
+
+# --- kick-off FOCUS string ---
+
+# Build the kick-off lessons-focus signal: the "### Notes for Next Session"
+# block(s) from the session file (head-capped at 20 lines) + the top of the
+# TODO file with the "## Completed" section onward dropped (head-capped at 30
+# lines), concatenated with single-space separators in that order.
+#
+# Byte-for-byte port of the former inline /kick-off step-2 block, including its
+# quirks: the Notes awk re-arms on EVERY "### Notes for Next Session" heading
+# (so multiple such blocks all contribute, not just the latest), capture halts
+# at the next "## " or "### " line, and each present segment is prefixed with a
+# leading space (the inline `FOCUS="$FOCUS $NOTES"` / `"$FOCUS $TODOS"` shape).
+# A missing session file contributes nothing (not even the leading space); an
+# empty/absent todo arg likewise contributes nothing. Output carries no trailing
+# newline. The caller prepends any user-typed focus: FOCUS="$USER_FOCUS$(...)".
+#
+# Lives in bin/ (not inline in the SKILL.md bash block) because parser-heavy
+# derivation shouldn't live in a rendered SKILL.md; helpers run via bash
+# directly, so future awk field refs ($0/$N) are safe here regardless of the
+# renderer.
+#
+# Args: <session-file> <todo-file-or-empty>
+kickoff_focus() {
+  local session="$1"
+  local todo="${2:-}"
+  local focus=""
+
+  if [ -f "$session" ]; then
+    # Cap the first 20 captured lines INSIDE awk (line counter + exit) instead
+    # of `awk ... | head -20`. Under `set -euo pipefail`, head closes the pipe
+    # on the 21st line, SIGPIPE-kills the upstream producer (exit 141), and
+    # pipefail fails the whole helper on exactly the long-input case the cap is
+    # for. Any producer-into-head pipe has this hazard (so does a `printf | head`
+    # restage — the printf builtin takes the SIGPIPE too). Capping in awk drops
+    # the pipe entirely: same first-20 bytes, exit 0. `n == 20 { exit }` after
+    # the 20th print mirrors head's early stop without truncating line 20.
+    local notes
+    notes=$(awk '
+      /^### Notes for Next Session[[:space:]]*$/ { capturing=1; next }
+      capturing && /^## |^### / { capturing=0 }
+      capturing { print; if (++n == 20) exit }
+    ' "$session" 2>/dev/null)
+    focus="$focus $notes"
+  fi
+
+  if [ -n "$todo" ] && [ -f "$todo" ]; then
+    # Same SIGPIPE-on-cap hazard as the Notes block: cap the first 30 lines in
+    # awk, not via `| head -30`. `## Completed` still halts capture first.
+    local todos
+    todos=$(awk '/^## Completed/{exit} { print; if (++n == 30) exit }' "$todo" 2>/dev/null)
+    focus="$focus $todos"
+  fi
+
+  printf '%s' "$focus"
 }
 
 # --- dispatch ---
@@ -716,16 +767,20 @@ case "${1:-}" in
   --lessons-relevant)
     shift
     lr_focus=""
-    lr_limit=8
+    lr_limit=40
     while [ $# -gt 0 ]; do
       case "$1" in
         --focus) lr_focus="${2:-}"; shift 2 ;;
-        --limit) lr_limit="${2:-8}"; shift 2 ;;
+        --limit) lr_limit="${2:-40}"; shift 2 ;;
         --) shift; break ;;
         *) shift ;;
       esac
     done
     lessons_relevant "$lr_focus" "$lr_limit"
+    ;;
+  --kickoff-focus)
+    shift
+    kickoff_focus "${1:-}" "${2:-}"
     ;;
   --commits)
     shift
@@ -787,6 +842,14 @@ Usage:
                                          # comment-stripped). Empty if absent.
                                          # Render-safe reader for /kick-off's
                                          # stale_* and budget_* config.
+
+  koji-doc-status --kickoff-focus <session-file> <todo-file-or-empty>
+                                         # build /kick-off's lessons-focus
+                                         # signal: "### Notes for Next Session"
+                                         # block(s) (head 20) + top of TODO sans
+                                         # "## Completed" (head 30), space-joined.
+                                         # No trailing newline. Caller prepends
+                                         # user focus: FOCUS="$USER_FOCUS$(...)".
 
 Output (tab-separated, one record per doc — status modes):
   <path>\t<status>\t<drift>\t<last_commit>\t<covers>\t<missing>

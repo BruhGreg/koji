@@ -56,7 +56,7 @@ Each `<finding>` carries the reviewer-prompt.md schema plus synthesizer-added fi
 |---|---|---|
 | `PASS` | No findings of any severity. | 0 |
 | `PASS-WITH-NOTES` | No `high`, but medium/low present. | 0 |
-| `REJECT` | ≥1 `high` finding where both reviewers agreed — first-pass fingerprint match OR cross-review AGREE-HIGH promotion. | 1 |
+| `REJECT` | ≥1 `high` finding agreed by both reviewers — first-pass exact-fingerprint match OR cross-review AGREE-HIGH promotion. | 1 |
 | `CONTESTED` | ≥1 `high` finding still reviewer-exclusive after cross-review (or before, if cross-review hasn't run yet). | 2 |
 
 **Cross-review can flip the verdict** in either direction:

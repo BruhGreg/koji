@@ -42,11 +42,12 @@ The plan file path comes from the user's invocation. Examples:
 | `let's duet impl what we just planned` | Find most recently modified file in `$DOCS_PATH/plans/` |
 | `duet-impl` (no plan) | AskUserQuestion to pick from `$DOCS_PATH/plans/*.md` |
 
-Flags:
-- `--from-gate <name>` — resume from a specific gate (skip earlier segments; useful for re-runs)
-- `--no-final-review` — skip the end-of-run `/duet-review` (rare; only for partial impl)
-- `--no-promise-audit` — skip the cumulative promise audit (Step 3a). Default off; the audit runs by default. Implied when `--no-final-review` is set.
-- `--retries N` — fix-and-retry budget per gate (default 2)
+**Intent, not flags** — koji skills read natural-language intent; there is no argv to parse. When the user's phrasing signals one of these, set the matching internal variable before Step 1; otherwise the default holds:
+
+- **Resume from a gate** → `FROM_GATE`. By default the walk starts at the first segment. If the user wants to skip earlier work on a re-run ("resume from the handlers gate", "start at gate X", "skip the foundation, pick up at Y"), set `FROM_GATE` to that gate's name.
+- **Skip the final review** → `NO_FINAL_REVIEW`. The run ends with a `/duet-review` by default. If the user only wants a partial implementation with no end-of-run review ("don't run the final review", "skip duet-review", "partial impl only"), set `NO_FINAL_REVIEW=1`.
+- **Skip the promise audit** → `NO_PROMISE_AUDIT`. The cumulative promise audit (Step 3a) runs by default. If the user opts out ("skip the promise audit", "no promise check"), set `NO_PROMISE_AUDIT=1`. It is also implied whenever `NO_FINAL_REVIEW=1`.
+- **Retry budget per gate** → `RETRIES`. Each gate gets 2 fix-and-retry attempts by default. If the user wants a different budget ("one retry per gate", "fail fast", "3 retries"), set `RETRIES` to that number.
 
 **Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens) for each gate review. Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick gates", "lighter review", "use high effort", "save tokens". Don't downgrade for "the gate diff looks small"; only on explicit user signal. Claude inherits the parent session's effort level.
 
@@ -93,6 +94,12 @@ RUN_DIR=$(mktemp -d -t duet-impl-XXXXXX)
 EFFORT="${EFFORT:-xhigh}"
 TIMEOUT="${TIMEOUT:-1800}"
 RETRIES="${RETRIES:-2}"
+# Intent-set vars (see "Intent, not flags" above). Initialized here so the
+# reads below run cleanly under set -u even when no intent was signalled.
+FROM_GATE="${FROM_GATE:-}"           # gate name to resume from (Step 2a)
+FROM_GATE_REACHED="${FROM_GATE_REACHED:-}"  # loop state for the FROM_GATE resume skip (Step 2a)
+NO_FINAL_REVIEW="${NO_FINAL_REVIEW:-}"      # skip end-of-run /duet-review (Step 3b)
+NO_PROMISE_AUDIT="${NO_PROMISE_AUDIT:-}"    # skip the promise audit (Step 3a)
 echo "Start SHA: $START_SHA | Run dir: $RUN_DIR | Effort: $EFFORT | Retries/gate: $RETRIES"
 ```
 
@@ -118,11 +125,11 @@ For each checkpoint that has a codex single-review attached (foundation gate + t
 
 **Keep the task list current.** As you walk each checkpoint: `TaskUpdate` its task to `in_progress` when its segment work begins (2b), and to `completed` when its gate review passes (2d PASS). Mark the final `/duet-review` task `completed` once Step 3's verdict is in. The user is watching this checklist — it must track the real state of the walk.
 
-### 2a. Skip if `--from-gate` says so
+### 2a. Skip earlier gates when resuming (`FROM_GATE`)
 
 ```bash
 if [ -n "$FROM_GATE" ] && [ "$gate_name" != "$FROM_GATE" ] && [ "$FROM_GATE_REACHED" != "1" ]; then
-  echo "Skipping $gate_name (--from-gate=$FROM_GATE)"
+  echo "Skipping $gate_name (resuming from gate: $FROM_GATE)"
   continue
 fi
 FROM_GATE_REACHED=1
@@ -154,11 +161,9 @@ git diff "$SEGMENT_START_SHA" -- > "$SEGMENT_DIFF_FILE"   # working-tree diff si
 GATE_PROMPT_TEMPLATE="$KOJI_SKILLS/duet-impl/references/gate-review-prompt.md"
 PHASE_TEXT="<plan text for this gate — agent extracts from the plan file>"
 
-CODEX_PROMPT="$(awk '/^## Reviewer prompt/,/^## Implementer-side/' "$GATE_PROMPT_TEMPLATE" | sed -n '/^```/,/^```/p' | sed '1d;$d')
-
-(template substitution: replace {gate_name} with $gate_name, {phase_text} with $PHASE_TEXT, {diff} with $(cat $SEGMENT_DIFF_FILE))"
-
-# In practice the agent constructs the prompt inline. Then:
+# The agent reads the "## Reviewer prompt" template from $GATE_PROMPT_TEMPLATE and
+# fills its placeholders to construct $CODEX_PROMPT inline: {gate_name} → $gate_name,
+# {phase_text} → $PHASE_TEXT, {diff} → the contents of $SEGMENT_DIFF_FILE. Then:
 TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
 RAW="$RUN_DIR/codex-${gate_name}-attempt-${attempt}.raw"
 
@@ -204,8 +209,7 @@ fi
 # High findings present
 if [ "$attempt" -lt "$RETRIES" ]; then
   echo "Gate $gate_name: $HIGH_COUNT high finding(s), attempting fix (retry $((attempt+1))/$RETRIES)"
-  # Apply fixes (agent uses Edit tool on each finding's suggested_fix.details)
-  apply_high_findings_via_edit_tool "$FINDINGS"
+  # Apply the fixes (see prose below), then:
   attempt=$((attempt+1))
   # Loop back to 2c
 else
@@ -215,6 +219,8 @@ else
   # Otherwise: escalate via AskUserQuestion
 fi
 ```
+
+When retrying (the `if` branch above), apply each high finding before looping back to 2c: read `$FINDINGS` and, for every finding with `severity == high`, invoke the Edit tool with that finding's `suggested_fix.details` to apply the fix — same mechanism as `/duet-review` Step 5d. This is a tool action, not a shell call; there is no batch helper.
 
 Per the autonomy principle, the consult-codex round is the "agents try together" step *before* escalating to the user. The consult prompt is:
 
@@ -236,12 +242,12 @@ Update `PREV_GATE_SHA` only if option 1 (override) is chosen.
 
 ## Step 3 — Final review phase (promise audit + /duet-review)
 
-After all segments are processed (or `--from-gate` reaches the end), the final review phase has two sub-steps:
+After all segments are processed (or a `FROM_GATE` resume reaches the end), the final review phase has two sub-steps:
 
-- **3a Promise audit** — extracts every explicit contract promise from the locked plan and verifies each one in the cumulative diff. Skipped when `--no-promise-audit` or `--no-final-review`.
-- **3b Final `/duet-review`** — two-reviewer adversarial review on the cumulative diff. Skipped when `--no-final-review`.
+- **3a Promise audit** — extracts every explicit contract promise from the locked plan and verifies each one in the cumulative diff. Skipped when `NO_PROMISE_AUDIT` or `NO_FINAL_REVIEW` is set.
+- **3b Final `/duet-review`** — two-reviewer adversarial review on the cumulative diff. Skipped when `NO_FINAL_REVIEW` is set.
 
-The two sub-steps share `$RUN_DIR/final-diff.patch` (cumulative `$START_SHA..HEAD` diff). Whichever runs first writes it; the other reuses.
+The two sub-steps share `$RUN_DIR/final-diff.patch` (cumulative `$START_SHA..HEAD` diff). Whichever runs first writes it; the other reuses. Alongside the patch, the first writer also captures `$RUN_DIR/final-diff.numstat` — the `koji-diff-numstat "$START_SHA"` add/delete counts at the **final-review snapshot**, BEFORE Step 4 reconciliation and Step 5 convention-doc edits land. Step 6's code-delta ratio reads this snapshot so it measures the reviewed code, not the later bookkeeping edits.
 
 ### Step 3a — Promise audit
 
@@ -253,6 +259,11 @@ else
   PROMISE_AUDIT_RAN=1
   # Compute cumulative diff once for both 3a and 3b.
   git diff "$START_SHA" -- > "$RUN_DIR/final-diff.patch"
+  # Snapshot the code-delta counts at the final-review point, BEFORE Step 4/5
+  # bookkeeping edits, so Step 6's ratio measures the reviewed code. Capture the
+  # helper's exit so a failure is observable (don't silently drop the snapshot).
+  ~/.claude/skills/koji/bin/koji-diff-numstat "$START_SHA" > "$RUN_DIR/final-diff.numstat" \
+    || echo "WARN: final-review numstat snapshot failed; Step 6 will fall back to a live diff" >&2
   echo "Cumulative diff at: $RUN_DIR/final-diff.patch"
 fi
 ```
@@ -282,10 +293,15 @@ fi
 
 ```bash
 if [ "$NO_FINAL_REVIEW" = "1" ]; then
-  echo "Skipping final /duet-review (--no-final-review)"
+  echo "Skipping final /duet-review (NO_FINAL_REVIEW set)"
 else
   # Reuse cumulative diff from 3a if it ran; compute now if not.
   [ -f "$RUN_DIR/final-diff.patch" ] || git diff "$START_SHA" -- > "$RUN_DIR/final-diff.patch"
+  # Snapshot code-delta counts at the final-review point if 3a didn't already
+  # (same rationale: measure reviewed code, before Step 4/5 bookkeeping edits).
+  [ -f "$RUN_DIR/final-diff.numstat" ] \
+    || ~/.claude/skills/koji/bin/koji-diff-numstat "$START_SHA" > "$RUN_DIR/final-diff.numstat" \
+    || echo "WARN: final-review numstat snapshot failed; Step 6 will fall back to a live diff" >&2
   echo "Running /duet-review on the cumulative diff since $START_SHA..."
   echo "Full diff at: $RUN_DIR/final-diff.patch"
 fi
@@ -311,7 +327,7 @@ Re-read the source plan and edit it directly:
   `final-review: <verdict>`. Top blockquote notes: stages executed but
   review surfaced unresolved findings (REJECT) or required escalation
   (ESCALATED) — see the run dir / final-diff for what's outstanding.
-- **Step 3 skipped** (`--no-final-review`): leave `status` alone, add
+- **Step 3 skipped** (`NO_FINAL_REVIEW` set): leave `status` alone, add
   `executed: <today>` + `pending: review`. Blockquote: stages executed,
   review pending.
 
@@ -330,7 +346,7 @@ Auto-fires at end of every run, **only when `$DOCS_PATH/CODEBASE_CONVENTIONS.md`
 
 The `codebase-fit` findings raised across this run's gate reviews and the final `/duet-review` are per-diff observations. Most are one-offs and belong nowhere but the gate report. A few encode a **reusable convention** — a rule the next session would otherwise re-derive or re-litigate. Only those earn a `CODEBASE_CONVENTIONS.md` entry.
 
-1. Collect every `codebase-fit` finding from the run: the gate `findings-*.json` files in `$RUN_DIR`, plus the `codebase-fit` entries in the final `/duet-review`'s `verdict.json` — the `Output JSON:` path captured in Step 3. If `--no-final-review` was set there is no `verdict.json`; use the gate findings alone.
+1. Collect every `codebase-fit` finding from the run: the gate `findings-*.json` files in `$RUN_DIR`, plus the `codebase-fit` entries in the final `/duet-review`'s `verdict.json` — the `Output JSON:` path captured in Step 3. If `NO_FINAL_REVIEW` was set there is no `verdict.json`; use the gate findings alone.
 2. Judge each: is it a *recurring, reusable* convention — would it apply beyond this diff — and is it **not already** recorded in `CODEBASE_CONVENTIONS.md` **or in any doc it lists under `sources:`**? Drop one-off nits, taste, and anything the hub or a linked source already covers.
 3. If none survive, skip silently — no prompt.
 4. For each surviving finding, decide its **home**: if it belongs in a project convention doc listed under `sources:` (e.g. a naming rule that fits `CONTRIBUTING.md`), it is a **suggestion for the user to add there** — koji never edits a source doc itself. Otherwise it is a **hub entry** for `CODEBASE_CONVENTIONS.md` under one of its three sections. Fire **one** `AskUserQuestion` listing every proposal — each tagged with its home (the `sources:` doc, or the hub section), the one-line rule, and the `file:line` exemplar it cites. The user may accept all, a subset, or decline.
@@ -342,18 +358,20 @@ This is the flywheel: `CODEBASE_CONVENTIONS.md` grows from what review actually 
 
 ## Step 6 — Report
 
-Before printing, compute the code-delta ratio from the cumulative diff (whichever of Step 3a/3b wrote `$RUN_DIR/final-diff.patch`). When neither final-review path ran, fall back to a one-shot `git diff $START_SHA --` so the metric still emits. The line counts must match `git diff --shortstat` semantics — count every `+`/`-` content line, subtract only the `+++ b/foo` / `--- a/foo` file headers (not content lines that happen to begin with `--`, like deleted markdown bullets):
+Before printing, compute the code-delta ratio from the **final-review snapshot**. The add/delete counts come from `koji-diff-numstat <start-sha>`, which runs `git diff --numstat "$START_SHA" --` and sums the numeric add/delete columns (machine-readable, locale-independent, and immune to content lines that happen to begin with `--`). Step 3 writes those counts to `$RUN_DIR/final-diff.numstat` at the review point — BEFORE Step 4 reconciliation and Step 5 convention-doc edits — so the ratio reflects the reviewed code, not the later bookkeeping edits. Read from that snapshot when it exists; fall back to a fresh live `koji-diff-numstat "$START_SHA"` only when no snapshot was produced (e.g. `NO_FINAL_REVIEW` with the promise audit also skipped, so neither Step 3 path ran). Either way, capture the helper's exit via command substitution — process substitution would swallow it — so a numstat failure degrades the ratio visibly instead of silently:
 
 ```bash
 ~/.claude/skills/koji/bin/koji-keepawake stop || true   # run concluding — release keep-awake started in Step 2
-DIFF_FOR_RATIO="$RUN_DIR/final-diff.patch"
-[ -f "$DIFF_FOR_RATIO" ] || git diff "$START_SHA" -- > "$DIFF_FOR_RATIO"
-ADDS=$(grep -cE '^[+]' "$DIFF_FOR_RATIO" 2>/dev/null || echo 0)
-SKIP_A=$(grep -cE '^[+]{3} ' "$DIFF_FOR_RATIO" 2>/dev/null || echo 0)
-ADDS=$((ADDS - SKIP_A))
-DELS=$(grep -cE '^[-]' "$DIFF_FOR_RATIO" 2>/dev/null || echo 0)
-SKIP_D=$(grep -cE '^[-]{3} ' "$DIFF_FOR_RATIO" 2>/dev/null || echo 0)
-DELS=$((DELS - SKIP_D))
+if [ -s "$RUN_DIR/final-diff.numstat" ]; then           # -s not -f: an empty snapshot (Step-3 write failed; the `> file` redirect truncates even on helper error) falls through to the live fallback instead of reading a bogus "0 0"
+  read -r ADDS DELS < "$RUN_DIR/final-diff.numstat"   # final-review snapshot (Step 3)
+else
+  # No snapshot (neither Step 3 path ran) — compute live now. Command
+  # substitution preserves the helper's exit; process substitution would not.
+  RATIO_RAW=$(~/.claude/skills/koji/bin/koji-diff-numstat "$START_SHA") \
+    || echo 'WARN: code-delta ratio may be inaccurate (koji-diff-numstat failed)' >&2
+  read -r ADDS DELS <<< "$RATIO_RAW"
+fi
+ADDS="${ADDS:-0}"; DELS="${DELS:-0}"   # guard empty reads so the arithmetic below is safe
 if [ "$DELS" -gt 0 ]; then
   RATIO=$(python3 -c "print(f'{$ADDS/$DELS:.1f}:1')")
 elif [ "$ADDS" -gt 0 ]; then
@@ -388,7 +406,7 @@ If any gate escalated, mention which one and how the user resolved it.
 | Symptom | Cause | Mitigation |
 |---|---|---|
 | Codex review at gate hangs | `--enable web_search_cached` re-introduced, or stdin not closed | Skill explicitly drops both — verify bash not modified |
-| Codex exits 124 at a gate | Gate diff too large or `xhigh` exceeded 30-min wall | Re-run with `--retries 1` (faster fail) and smaller gate scopes |
+| Codex exits 124 at a gate | Gate diff too large or `xhigh` exceeded 30-min wall | Re-run asking for a smaller retry budget (`RETRIES=1`, faster fail) and smaller gate scopes |
 | Implementer-applied fix doesn't compile | Suggested_fix.details was wrong for the actual context | Counts as a retry attempt; codex's next review will flag the new issue. Up to budget |
 | Stuck on a "scope" finding (codex says work overshoots phase) | Plan was ambiguous, or implementer interpreted broadly | Consult round usually resolves; if not, escalate to user |
 | Promise audit (Step 3a) times out, returns prose, or emits unparseable JSON | Auditor agent drift, or transient model issue | Write `[]`, log `WARN: promise audit returned no parseable JSON …`, proceed to Step 3b. Audit is a guardrail, not a gate — `/duet-review` still runs |

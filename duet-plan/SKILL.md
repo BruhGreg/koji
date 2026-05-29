@@ -41,10 +41,11 @@ The topic is whatever the user provided. Examples of how to extract it:
 | "duet-plan: migrate from postgres 14 to 15" | "migrate from postgres 14 to 15" |
 | "duet plan" (no topic) | ask user once via AskUserQuestion |
 
-Flags:
-- `--rounds N` — round limit (default 5)
-- `--slug <name>` — override auto-derived plan slug
-- `--keep` — keep `/tmp/duet-plan-<sha>/` for debugging (default: cleaned)
+**Intent, not flags** — koji skills read natural-language intent; there is no argv to parse. When the user's phrasing signals one of these, set the matching internal variable before Step 1; otherwise the default holds:
+
+- **Round limit** → `ROUNDS`. The dialogue runs up to 5 rounds by default. If the user caps it ("at most 3 rounds", "two rounds max", "one quick round"), set `ROUNDS` to that number.
+- **Slug override** → `SLUG`. The plan's filename slug is auto-derived from the topic. If the user names the file explicitly ("save it as oauth-migration", "call the plan X"), set `SLUG` to that name.
+- **Keep process artifacts** → `KEEP`. The `/tmp` round drafts and critiques are cleaned up at end of run. If the user asks to keep them ("keep the scratch files", "don't clean up", "leave the round drafts for debugging"), set `KEEP=1`.
 
 **Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens). The agent should drop to `high` (~15-min timeout, ~1× tokens) ONLY when the user's invocation phrase signals lighter effort — e.g., "quick check", "lighter pass", "use high effort", "save tokens", "fast pass". Don't downgrade for "the diff looks small" or similar heuristics; only on explicit user signal. Claude inherits the parent session's effort level — set `/effort max` once before running if you want max-tier Claude.
 
@@ -103,11 +104,9 @@ ROUND=1
 CLAUDE_FILE="$RUN_DIR/round-${ROUND}-claude.md"
 CODEX_FILE="$RUN_DIR/round-${ROUND}-codex.md"
 
-CODEX_PROMPT="$(awk '/^## CODEX — every round/,/^## CLAUDE — subsequent/' "$PROMPT_TEMPLATES" | sed -n '/^```/,/^```/p' | sed '1d;$d')
-
-(template substitution: replace {topic}, {project_root}, {claude_plan}, {prior_critique_or_empty})"
-
-# In practice the agent constructs this inline — example shape:
+# The agent reads the "## CODEX — every round" template from $PROMPT_TEMPLATES
+# and fills its {topic}, {project_root}, {claude_plan}, {prior_critique_or_empty}
+# placeholders to construct $CODEX_PROMPT inline — example shape:
 CODEX_PROMPT="You are critiquing a plan drafted by another agent (Claude)...
 
 TOPIC: $TOPIC
@@ -213,7 +212,7 @@ When CONSENSUS=1 (or user picked option 1 or 2 above):
 PLANS_DIR="$DOCS_PATH/plans"
 mkdir -p "$PLANS_DIR"
 
-# Auto-derive slug from topic if not provided via --slug
+# Auto-derive slug from topic unless the user named one (SLUG set)
 SLUG="${SLUG:-$(printf '%s' "$TOPIC" | tr '[:upper:]' '[:lower:]' \
   | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60)}"
 [ -n "$SLUG" ] || SLUG="untitled-plan"
@@ -313,9 +312,9 @@ If the user wants to immediately continue with `/duet-impl`, mention the locked 
 | Symptom | Likely cause | Mitigation |
 |---|---|---|
 | Codex hangs (no output, no timeout) | `--enable web_search_cached` re-introduced, or stdin not closed | Skill explicitly drops both — verify bash blocks not modified. Kill PID and treat as DISAGREE for that round. |
-| Codex exits 124 (timeout) | Round prompt got too long (cumulative context) | Skill writes prior rounds as files, not stuffs them all into one prompt. If still hitting limit: lower `--rounds` or use `high` instead of `xhigh`. |
+| Codex exits 124 (timeout) | Round prompt got too long (cumulative context) | Skill writes prior rounds as files, not stuffs them all into one prompt. If still hitting limit: ask for a lower round limit (`ROUNDS`) or `high` instead of `xhigh`. |
 | Claude (Agent) returns prose without VERDICT line | Prompt drift — agent forgot the marker | Re-invoke the Agent with an explicit reminder: "Your last response was missing the VERDICT line — re-output the same plan with the marker appended." Limit to 1 retry. |
-| Plan saves to wrong slug | Auto-slug from topic | Use `--slug <name>` to override. Existing files get auto-suffixed (`-2`, `-3`). |
+| Plan saves to wrong slug | Auto-slug from topic | Name the file explicitly (sets `SLUG`) to override. Existing files get auto-suffixed (`-2`, `-3`). |
 | `$DOCS_PATH` not set | `/koji-init` never run | Same failure mode as `/wrap` — surface and direct user to `/koji-init`. |
 
 ## Related

@@ -444,9 +444,9 @@ On **"Save as new plan/research"**, set `SAVE_AS` and run the **Save-as-new writ
 # the question/event/session that produced the finding. Fallback to regex
 # over $QUESTION only if agent extraction was skipped.
 if [ -z "${CONTENT_AREA_SLUG:-}" ]; then
-  CONTENT_AREA_SLUG=$(printf '%s' "$QUESTION" | tr '[:upper:]' '[:lower:]' \
-    | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60 | sed 's/-$//')
-  [ -n "$CONTENT_AREA_SLUG" ] || CONTENT_AREA_SLUG="triangulated-decision"
+  # Slug derivation (kebab-case, ≤60 chars, empty → "triangulated-decision")
+  # lives in bin/ — see koji-triangulate-persist.
+  CONTENT_AREA_SLUG=$(~/.claude/skills/koji/bin/koji-triangulate-persist slug "$QUESTION")
 fi
 # Then set SAVE_AS for the chosen kind:
 #   "Save as new plan"     → SAVE_AS="plans/$CONTENT_AREA_SLUG.md"
@@ -466,21 +466,21 @@ On **"Don't save"** → nothing to write; go to Step 6.
 ### Save-as-new write (`--save-as`, or Branch B "save as new")
 
 ```bash
-# Resolve target directory and frontmatter based on kind prefix.
+# Resolve target directory + status from the kind prefix. ($KIND drives the
+# frontmatter's target field too — koji-triangulate-persist emit-frontmatter
+# maps kind → target, so no separate TARGET_FIELD is tracked here.)
 case "$SAVE_AS" in
   plans/*.md)
     KIND="plan"
     REL_PATH="$SAVE_AS"
     TARGET_DIR="$PLANS_DIR"
     STATUS="pending"
-    TARGET_FIELD="implementation"
     ;;
   research/*.md)
     KIND="research"
     REL_PATH="$SAVE_AS"
     TARGET_DIR="$RESEARCH_DIR"
     STATUS="unvalidated"
-    TARGET_FIELD="validation"
     ;;
   *)
     echo "ERROR: --save-as must be 'plans/<slug>.md' or 'research/<slug>.md'"
@@ -507,13 +507,13 @@ while [ -e "$OUT" ]; do
   N=$((N + 1))
 done
 
-TODAY=$(date +%Y-%m-%d)
 {
-  printf -- '---\n'
-  printf 'status: %s\n' "$STATUS"
-  printf 'origin-session: %s\n' "$TODAY"
-  printf 'target: %s\n' "$TARGET_FIELD"
-  printf -- '---\n\n'
+  # Frontmatter for the new file (the only NEW-FILE frontmatter emitter in
+  # /triangulate) is built by koji-triangulate-persist — the field-emitting
+  # printf lives in bin/. It maps $KIND → status/target defaults and accepts
+  # $STATUS as the override; the append/--update paths below never emit
+  # frontmatter, they preserve a file's existing block verbatim.
+  ~/.claude/skills/koji/bin/koji-triangulate-persist emit-frontmatter "$KIND" "$STATUS"
   printf '<!-- triangulated decision from /triangulate -->\n\n'
   printf '# %s\n\n' "$QUESTION"
   printf '## Synthesis\n\n%s\n\n' "$SYNTHESIS_PARAGRAPH"
@@ -566,28 +566,28 @@ $(cat "$RUN_DIR/round-${ROUND}-codex.md")
 EOF
 )
 
-# Two structural cases:
-#   (1) File already has "## Decisions" → insert NEW_SECTION right after that heading
-#       (so the new subsection lands at the TOP of Decisions — newest first).
-#   (2) File has no "## Decisions" → append "## Decisions" + NEW_SECTION at EOF
-#       (an older-format file gets upgraded; H1 + earlier prose stays untouched).
-if grep -q '^## Decisions[[:space:]]*$' "$APPEND_TARGET"; then
-  awk -v newsec="$NEW_SECTION" '
-    /^## Decisions[[:space:]]*$/ && !done {
-      print
-      print newsec
-      done = 1
-      next
-    }
-    { print }
-  ' "$APPEND_TARGET" > "$APPEND_TARGET.tmp" && mv "$APPEND_TARGET.tmp" "$APPEND_TARGET"
+# Insert-or-append surgery lives in bin/ — koji-triangulate-persist decisions-merge:
+#   (1) File already has "## Decisions" → NEW_SECTION inserted right after that
+#       heading (newest subsection on top).
+#   (2) File has no "## Decisions" → "## Decisions" + NEW_SECTION appended at EOF
+#       (an older-format file gets upgraded; H1 + earlier prose stay untouched).
+# The section goes through a temp file (the helper takes <new-section-file>, which
+# also sidesteps BSD awk's "newline in -v" limit). `printf '%s\n'` gives the file
+# the single trailing newline the helper expects.
+NEW_SECTION_FILE=$(mktemp -t triangulate-decsec-XXXXXX)
+printf '%s\n' "$NEW_SECTION" > "$NEW_SECTION_FILE"
+# Capture the helper's exit BEFORE removing the temp. The helper (hardened to
+# fail on a botched merge) leaves the target unchanged on error; reporting
+# "Research appended" anyway would falsely claim success. Only print success
+# when it succeeded; otherwise surface the failure (the helper already printed
+# the specifics to stderr). Render-safe: $? / || only, no awk field refs.
+if ~/.claude/skills/koji/bin/koji-triangulate-persist decisions-merge "$APPEND_TARGET" "$NEW_SECTION_FILE"; then
+  rm -f "$NEW_SECTION_FILE"
+  echo "Research appended: ${APPEND_TARGET#"$PROJECT_ROOT/"} (## Decisions)"
 else
-  {
-    printf '\n## Decisions\n%s\n' "$NEW_SECTION"
-  } >> "$APPEND_TARGET"
+  rm -f "$NEW_SECTION_FILE"
+  echo "ERROR: decisions-merge failed; ${APPEND_TARGET#"$PROJECT_ROOT/"} was NOT updated (see message above)." >&2
 fi
-
-echo "Research appended: ${APPEND_TARGET#"$PROJECT_ROOT/"} (## Decisions)"
 ```
 
 Frontmatter is preserved unchanged on append — `origin-session` tracks file creation; the dated subsection inside `## Decisions` tracks each finding. If the new finding resolves or surfaces open questions, the agent SHOULD also edit the file's `## Open questions` section accordingly. If it surfaces a related topic, append a one-line entry to `## Cross-refs`.
@@ -694,3 +694,4 @@ Saved to: <folded into <anchor> | <new plan/research file> | in-session only>
 - `/duet-review` — two-AI code review (closer to "vet a diff with cross-model perspectives")
 - `.koji/plans/` and `.koji/research/` — destination directories for `--save-as`
 - Plans/research status workflow: `bin/koji-plans-research`
+- Persistence primitives (slug, decisions-merge): `bin/koji-triangulate-persist`

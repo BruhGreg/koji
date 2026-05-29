@@ -15,6 +15,21 @@ references/verdict-format.md.
 The exit code matches the verdict's exit_code field (0/1/2). This lets
 callers (e.g., /duet-impl) gate on the process exit directly.
 
+Consensus model:
+  * First-pass consensus is EXACT-fingerprint only. When both reviewers
+    independently emit the identical fingerprint (file:line:category) —
+    which reviewer-prompt.md instructs them to do for the same bug — the two
+    findings merge into ONE consensus entry (agreed_by=["claude","codex"],
+    severity = max of the two). There is NO fuzzy ±line / category-family
+    matching; coordinate coincidence never auto-merges.
+  * A fingerprint exclusive to one reviewer stays SOLO. A solo HIGH is
+    CONTESTED until the other reviewer AGREE-*s it via cross-review.
+  * Consensus can also be reached in the second pass via explicit
+    cross-review AGREE-* (see Cross-review logic).
+  * After all buckets are populated, a global dedup keyed on fingerprint
+    enforces precedence high_consensus > high_contested > medium > low, so a
+    fingerprint never appears in two buckets at once.
+
 Cross-review logic:
   * First-pass: writes cross_review_required=true if ANY reviewer-exclusive
     finding has severity >= medium (lows skip — not a style committee).
@@ -29,72 +44,6 @@ import sys
 from pathlib import Path
 
 SEV_RANK = {"high": 3, "medium": 2, "low": 1}
-
-# Line-fuzzing window: findings within ±LINE_WINDOW lines + same file +
-# same category family are treated as one. Reviewers naturally drift 1-2
-# lines and pick related-but-different categories for the same bug.
-LINE_WINDOW = 5
-
-# Category families — collapse reviewer-naming variance (e.g., one says
-# "correctness", another "data-loss") without merging unrelated bugs.
-CATEGORY_FAMILY = {
-    "correctness": "correctness",
-    "data-loss": "correctness",
-    "error-handling": "correctness",
-    "race": "correctness",
-    "security": "security",
-    "perf": "perf",
-    "types": "types",
-    "deps": "deps",
-    "deadcode": "deadcode",
-    "style": "style",
-    "codebase-fit": "codebase-fit",
-    "other": "other",
-}
-
-
-def family(cat: str) -> str:
-    return CATEGORY_FAMILY.get(cat, "other")
-
-
-def _line(f: dict) -> int:
-    try:
-        return int(f.get("line", 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-def find_consensus(claude: list, codex: list) -> tuple:
-    """Greedy match: each Claude finding pairs with nearest unmatched Codex
-    finding (same file, same category family, within LINE_WINDOW lines).
-
-    Returns (consensus_pairs, claude_used_idxs, codex_used_idxs).
-    """
-    consensus_pairs = []
-    claude_used = set()
-    codex_used = set()
-    for ci, cf in enumerate(claude):
-        cf_file = cf.get("file", "")
-        cf_line = _line(cf)
-        cf_fam = family(cf.get("category", ""))
-        best_xi = -1
-        best_dist = LINE_WINDOW + 1
-        for xi, xf in enumerate(codex):
-            if xi in codex_used:
-                continue
-            if xf.get("file", "") != cf_file:
-                continue
-            if family(xf.get("category", "")) != cf_fam:
-                continue
-            dist = abs(_line(xf) - cf_line)
-            if dist <= LINE_WINDOW and dist < best_dist:
-                best_xi = xi
-                best_dist = dist
-        if best_xi >= 0:
-            consensus_pairs.append((cf, codex[best_xi]))
-            claude_used.add(ci)
-            codex_used.add(best_xi)
-    return consensus_pairs, claude_used, codex_used
 
 
 def load_findings(path: str) -> list:
@@ -127,17 +76,98 @@ def fingerprint(f: dict) -> str:
     return f"{f.get('file', '')}:{f.get('line', '')}:{f.get('category', '')}"
 
 
-def merge_pair(c: dict, x: dict) -> dict:
-    """Merge two findings with matching fingerprints. Higher severity wins."""
-    sev_c = c.get("severity", "low")
-    sev_x = x.get("severity", "low")
-    sev = max((sev_c, sev_x), key=lambda s: SEV_RANK.get(s, 0))
-    merged = dict(c)
-    merged["severity"] = sev
-    merged["agreed_by"] = ["claude", "codex"]
-    merged["claude_severity"] = sev_c
-    merged["codex_severity"] = sev_x
-    return merged
+def _max_sev(a: str, b: str) -> str:
+    """Return whichever of two severity strings ranks higher by SEV_RANK."""
+    return a if SEV_RANK.get(a, 0) >= SEV_RANK.get(b, 0) else b
+
+
+def first_pass_consensus(claude: list, codex: list) -> tuple:
+    """Exact-fingerprint first-pass merge across the two reviewers.
+
+    A fingerprint emitted by BOTH reviewers (reviewer-prompt.md tells them to
+    canonicalize the same bug to the same fingerprint) collapses to ONE
+    consensus entry: agreed_by=["claude","codex"], severity = max(SEV_RANK) of
+    the two, with both per-reviewer severities recorded. A fingerprint
+    exclusive to one reviewer stays solo for that reviewer.
+
+    This is the ONLY automatic first-pass merge — exact fingerprint, no fuzzy
+    ±line / category-family matching (that coincidence-prone path was removed
+    in the Fork-C rewrite and is intentionally not reintroduced).
+
+    Returns (consensus, claude_solo, codex_solo). Order within each list
+    follows first appearance in the claude-then-codex scan, so output is
+    deterministic. Duplicate fingerprints WITHIN one reviewer's list also
+    collapse (highest severity wins) so a self-duplicate can't double-count.
+    """
+    # Index codex findings by fingerprint (last write wins on intra-reviewer
+    # dup, but we fold severity so the kept entry carries the max severity).
+    codex_by_fp: dict = {}
+    for f in codex:
+        fp = fingerprint(f)
+        if fp in codex_by_fp:
+            codex_by_fp[fp]["severity"] = _max_sev(
+                codex_by_fp[fp].get("severity", "low"), f.get("severity", "low"))
+        else:
+            codex_by_fp[fp] = dict(f)
+
+    consensus: list = []
+    claude_solo: list = []
+    claude_seen: set = set()
+    matched_codex_fps: set = set()
+    for cf in claude:
+        fp = fingerprint(cf)
+        if fp in claude_seen:
+            # Intra-claude duplicate: fold severity into the already-emitted
+            # entry (consensus or solo) rather than emitting a second copy.
+            target = next((e for e in consensus + claude_solo
+                           if fingerprint(e) == fp), None)
+            if target is not None:
+                target["severity"] = _max_sev(
+                    target.get("severity", "low"), cf.get("severity", "low"))
+            continue
+        claude_seen.add(fp)
+        xf = codex_by_fp.get(fp)
+        if xf is not None:
+            matched_codex_fps.add(fp)
+            sev_c = cf.get("severity", "low")
+            sev_x = xf.get("severity", "low")
+            merged = dict(cf)
+            merged["severity"] = _max_sev(sev_c, sev_x)
+            merged["agreed_by"] = ["claude", "codex"]
+            merged["claude_severity"] = sev_c
+            merged["codex_severity"] = sev_x
+            consensus.append(merged)
+        else:
+            claude_solo.append(dict(cf))
+
+    codex_solo: list = []
+    for fp, xf in codex_by_fp.items():
+        if fp not in matched_codex_fps:
+            codex_solo.append(dict(xf))
+
+    return consensus, claude_solo, codex_solo
+
+
+def dedup_buckets(buckets: list) -> None:
+    """Global cross-bucket dedup by fingerprint, IN PLACE.
+
+    `buckets` is an ordered list of (name, list) by descending precedence
+    (high_consensus > high_contested > medium > low). The first occurrence of
+    a fingerprint wins; every later occurrence — in this or a lower bucket —
+    is evicted. This collapses the post-cross-review case where a finding sits
+    in high_consensus AND in a lower contested/medium/low bucket, and also
+    absorbs any residual intra-bucket duplicate.
+    """
+    seen: set = set()
+    for _name, bucket in buckets:
+        kept = []
+        for f in bucket:
+            fp = fingerprint(f)
+            if fp in seen:
+                continue
+            seen.add(fp)
+            kept.append(f)
+        bucket[:] = kept
 
 
 def load_cross_review(path: str) -> dict:
@@ -234,11 +264,11 @@ def main() -> int:
     claude = load_findings(args.claude)
     codex = load_findings(args.codex)
 
-    consensus_pairs, claude_used, codex_used = find_consensus(claude, codex)
-
-    # Separate solo findings (still need cross-review or already received it).
-    claude_solo = [dict(f) for i, f in enumerate(claude) if i not in claude_used]
-    codex_solo = [dict(f) for i, f in enumerate(codex) if i not in codex_used]
+    # First-pass EXACT-fingerprint consensus: a fingerprint emitted by BOTH
+    # reviewers merges to one consensus entry now; the rest stay solo per
+    # reviewer and still need (or already received) cross-review.
+    first_pass_agreed, claude_solo, codex_solo = first_pass_consensus(
+        claude, codex)
 
     # Apply cross-review responses (if any were provided).
     codex_responses_to_claude = load_cross_review(args.codex_cross)
@@ -254,33 +284,42 @@ def main() -> int:
     medium: list = []
     low: list = []
 
-    # 1. Fingerprint-matched consensus pairs (first-pass overlap).
-    for cf, xf in consensus_pairs:
-        merged = merge_pair(cf, xf)
-        bucket = {"high": high_consensus, "medium": medium, "low": low}.get(
-            merged["severity"], low)
-        bucket.append(merged)
-
-    # 2. Cross-review promoted pairs (second-pass overlap via AGREE-*).
-    for f in claude_promoted + codex_promoted:
-        sev = f.get("severity", "low")
-        bucket = {"high": high_consensus, "medium": medium, "low": low}.get(
+    def consensus_bucket(sev: str) -> list:
+        return {"high": high_consensus, "medium": medium, "low": low}.get(
             sev, low)
-        bucket.append(f)
 
-    # 3. Still-solo findings.
+    def contested_bucket(sev: str) -> list:
+        return {"high": high_contested, "medium": medium, "low": low}.get(
+            sev, low)
+
+    # 1. First-pass exact-fingerprint consensus (both reviewers, same bug).
+    #    A consensus HIGH routes to high_consensus -> REJECT.
+    for f in first_pass_agreed:
+        consensus_bucket(f.get("severity", "low")).append(f)
+
+    # 2. Cross-review promoted findings (consensus via AGREE-*).
+    for f in claude_promoted + codex_promoted:
+        consensus_bucket(f.get("severity", "low")).append(f)
+
+    # 3. Still-solo findings (a solo HIGH is CONTESTED, not consensus).
     for f in claude_still_solo:
         f["agreed_by"] = ["claude"]
-        sev = f.get("severity", "low")
-        bucket = {"high": high_contested, "medium": medium, "low": low}.get(
-            sev, low)
-        bucket.append(f)
+        contested_bucket(f.get("severity", "low")).append(f)
     for f in codex_still_solo:
         f["agreed_by"] = ["codex"]
-        sev = f.get("severity", "low")
-        bucket = {"high": high_contested, "medium": medium, "low": low}.get(
-            sev, low)
-        bucket.append(f)
+        contested_bucket(f.get("severity", "low")).append(f)
+
+    # 4. Global cross-bucket dedup. Precedence high_consensus > high_contested
+    #    > medium > low: a fingerprint promoted to consensus evicts its twin
+    #    from every lower bucket, so the same bug is never double-listed and
+    #    Step 5 auto-apply never races a phantom contested entry. Run BEFORE
+    #    totals/verdict so both reflect the deduped buckets.
+    dedup_buckets([
+        ("high_consensus", high_consensus),
+        ("high_contested", high_contested),
+        ("medium", medium),
+        ("low", low),
+    ])
 
     if high_consensus:
         verdict, exit_code = "REJECT", 1

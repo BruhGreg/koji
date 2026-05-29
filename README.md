@@ -90,7 +90,7 @@ Global preferences (`commit_strategy`, `auto_update`) live in `~/.config/koji/co
 
 ## Notable features
 
-**Focus-filtered context at kick-off.** `/kick-off` doesn't dump everything — it loads a focus-filtered subset of `lessons.md` matched against your kick-off arg, last session's notes, open TODO items, plus a top-3 recency baseline. Tag entries `YYYY-MM-DD — [tag1,tag2] — …` to sharpen matching.
+**Focus-filtered context at kick-off.** `/kick-off` doesn't dump everything — it pulls a wide-recall set of *candidate* lessons from `lessons.md` (anything matching your kick-off arg, last session's notes, or open TODOs, plus a recency baseline) and then judges which actually bear on the session, ignoring the noise. The relevance call is the agent's, not a bash keyword score. Tag entries `YYYY-MM-DD — [tag1,tag2] — …` to sharpen matching.
 
 **Load on Kick-Off.** Add a `## Load on Kick-Off` section to `agent-session.md` listing docs to pull into context at session start. `/wrap` proposes adds/removes to keep it aligned with where the project is going — including active plans, which auto-flow into LOKO during their lifecycle and out again when they complete. See [`kick-off/SKILL.md`](kick-off/SKILL.md).
 

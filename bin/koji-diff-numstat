@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# koji-diff-numstat — sum added/deleted lines of a working-tree diff since a SHA.
+#
+# Runs `git diff --numstat <start-sha> --` and sums column 1 (additions) and
+# column 2 (deletions) across all rows, skipping binary files (numstat emits "-"
+# for both columns on a binary). Echoes "<adds> <dels>" (space-separated) on
+# stdout. Used by /duet-impl's Step 6 code-delta ratio.
+#
+# Lives in bin/ on purpose: the column sum needs awk field refs ($1/$2), and the
+# skill renderer silently strips literal $0/$N field refs from inline SKILL awk.
+# This replaces a fragile inline `grep -cE '^[+]'`/`'^[-]'` line-count (which had
+# to special-case `+++`/`---` headers and could miscount content lines starting
+# with `--`). numstat is machine-readable and locale-independent; helpers run via
+# bash directly and are immune to the renderer.
+#
+#   koji-diff-numstat <start-sha>   — echo "<adds> <dels>"
+set -euo pipefail
+
+START_SHA="${1:?Usage: koji-diff-numstat <start-sha>}"
+
+# Capture the diff and check git's exit BEFORE summing. A direct
+# `git diff | awk` pipeline would hide a git failure (bad/invalid SHA): the awk
+# END still prints "0 0", so the caller can't tell "0 delta" from "git failed".
+# Capture first → on git failure, print NOTHING and exit non-zero; only sum +
+# print when git succeeded (a legitimately-empty diff then still prints "0 0").
+DIFF=$(git diff --numstat "$START_SHA" --) || exit $?
+
+# numstat columns are tab/space separated: <adds> <dels> <path>. Binary files
+# emit "-" in both numeric columns — skip those rows so they don't poison the
+# sum. Print "<adds> <dels>" so the caller can split on whitespace.
+printf '%s\n' "$DIFF" \
+  | awk '
+      $1 != "-" && $2 != "-" { adds += $1; dels += $2 }
+      END { printf "%d %d\n", adds, dels }
+    '

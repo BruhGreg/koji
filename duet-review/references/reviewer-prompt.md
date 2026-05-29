@@ -66,4 +66,4 @@ A `codebase-fit` finding is `high` (blocks ship) **only when the misfit becomes 
 
 ## Fingerprint canonicalization
 
-`fingerprint` MUST be `<file>:<line>:<category>` exactly. This is the key the synthesizer uses to detect consensus across reviewers. If you flag the same issue another reviewer flagged, the fingerprints must match — so use exact relative paths and the canonical category name.
+`fingerprint` MUST be `<file>:<line>:<category>` exactly. This is the key the synthesizer uses to dedup identical findings and to match cross-review responses. If you flag the same issue another reviewer flagged, the fingerprints must match — so use exact relative paths and the canonical category name.

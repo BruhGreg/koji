@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# koji-triangulate-persist — persistence primitives for /triangulate.
+#
+#   koji-triangulate-persist slug <text>
+#       Derive a kebab-case slug from <text>: lowercase, collapse every run of
+#       non-[a-z0-9] to a single "-", trim leading/trailing "-", cap at 60 chars,
+#       drop a trailing "-" left by the cap. Empty result falls back to
+#       "triangulated-decision". Echoes the slug on stdout.
+#
+#   koji-triangulate-persist decisions-merge <target-file> <new-section-file>
+#       Insert-or-append surgery for a research topic-file's "## Decisions"
+#       section. If <target-file> already has a "## Decisions" heading, the
+#       contents of <new-section-file> are inserted immediately after it (newest
+#       subsection on top). Otherwise a "## Decisions" heading plus the new
+#       section are appended at EOF (an older-format file is upgraded in place).
+#       Frontmatter, the H1, and all other prose are preserved verbatim; only the
+#       Decisions area changes.
+#
+#   koji-triangulate-persist emit-frontmatter <kind> [<status>]
+#       Emit the YAML frontmatter block for a NEW triangulate plan/research file.
+#       <kind> is "plan" or "research"; it sets the default status + target field
+#       (plan → pending/implementation, research → unvalidated/validation). An
+#       optional <status> overrides the per-kind default. `origin-session` is
+#       today's date (UTC-agnostic `date +%Y-%m-%d`, matching the inline version).
+#       Emits the opening `---`, the three fields, the closing `---`, and the
+#       trailing blank line — byte-identical to triangulate's inline new-file
+#       frontmatter. NEW-FILE creation only: the `--update`/append paths preserve
+#       a file's existing frontmatter verbatim, and any `status:` *change* on an
+#       existing doc must go through koji-plans-research (the sole status mutator).
+#
+# Lives in bin/ on purpose: parser-heavy persistence code shouldn't live in a
+# rendered SKILL.md; helpers run via bash directly, so future awk field refs are
+# safe here. decisions-merge reads the new section from a FILE via awk getline
+# (not a `-v` string) on purpose — BSD awk rejects newlines inside a `-v`
+# assignment, which is exactly the failure the inline version hit; getline is
+# portable across BSD and GNU awk and keeps the insert byte-stable.
+set -euo pipefail
+
+usage() {
+  echo "Usage: koji-triangulate-persist {slug|decisions-merge|emit-frontmatter} ..." >&2
+}
+
+cmd="${1:-}"
+
+case "$cmd" in
+  slug)
+    # Port of the inline kebab pipeline (triangulate/SKILL.md):
+    #   tr → lowercase; sed → collapse non-alnum runs to "-" and trim ends;
+    #   cut → cap at 60 chars; sed → drop a trailing "-" left by the cap.
+    # An empty <text> (or one that reduces to nothing) → "triangulated-decision".
+    text="${2-}"
+    slug=$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]' \
+      | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60 | sed 's/-$//')
+    [ -n "$slug" ] || slug="triangulated-decision"
+    printf '%s\n' "$slug"
+    ;;
+
+  decisions-merge)
+    target="${2:?Usage: koji-triangulate-persist decisions-merge <target-file> <new-section-file>}"
+    newsec_file="${3:?Usage: koji-triangulate-persist decisions-merge <target-file> <new-section-file>}"
+    [ -f "$target" ] || { echo "ERROR: target file not found: $target" >&2; exit 1; }
+    # The new-section file must be readable AND non-empty, not merely present.
+    # A regular-but-unreadable/empty file would let awk's getline read nothing
+    # (or fail with -1) and still promote/append — silently merging nothing or
+    # leaving a partial write on the real target. Fail loud and early instead.
+    [ -r "$newsec_file" ] && [ -s "$newsec_file" ] || {
+      echo "ERROR: new-section file is missing, unreadable, or empty: $newsec_file" >&2
+      echo "ERROR: decisions-merge aborted; $target unchanged" >&2
+      exit 1
+    }
+
+    # Two structural cases (identical semantics to the inline version):
+    #   (1) File already has "## Decisions" → insert the new section right after
+    #       that heading (newest subsection on top).
+    #   (2) File has no "## Decisions" → append "## Decisions" + the new section
+    #       at EOF (an older-format file gets upgraded; H1 + prior prose untouched).
+    if grep -q '^## Decisions[[:space:]]*$' "$target"; then
+      # Same-dir mktemp + promote-on-success, so a failed awk never corrupts the
+      # target. The new section is streamed from the file via getline (BSD-safe).
+      tmp=$(mktemp "${target}.XXXXXX")
+      if awk -v newsec_file="$newsec_file" '
+        /^## Decisions[[:space:]]*$/ && !done {
+          print
+          # Capture getline rc: a read error (rc < 0) must FAIL the merge rather
+          # than silently promote a target with nothing (or only part) inserted.
+          # We are writing to the throwaway $tmp here, so exit 1 simply makes awk
+          # fail; the promote-on-success mv below never runs and $target is left
+          # untouched (the partial $tmp is removed in the else branch).
+          while ((rc = (getline line < newsec_file)) > 0) print line
+          close(newsec_file)
+          if (rc < 0) {
+            print "ERROR: could not read new-section file: " newsec_file > "/dev/stderr"
+            exit 1
+          }
+          done = 1
+          next
+        }
+        { print }
+      ' "$target" > "$tmp"; then
+        mv "$tmp" "$target"
+      else
+        rm -f "$tmp"
+        echo "ERROR: decisions-merge failed; $target unchanged" >&2
+        exit 1
+      fi
+    else
+      # No "## Decisions" yet → upgrade in place by appending the heading + the
+      # new section. Build the FULL new content in a same-dir mktemp and promote
+      # with mv, rather than appending directly to $target: a read failure (e.g.
+      # `cat "$newsec_file"` dies mid-stream) then leaves the throwaway temp
+      # partial and the real target untouched, instead of corrupting $target with
+      # a half-written append. The produced bytes are identical to the old direct
+      # append on success — original target verbatim, then "\n## Decisions\n",
+      # then the new section. <new-section-file> already carries its own single
+      # trailing newline (the caller writes it with `printf '%s\n'`), matching the
+      # inline `printf '\n## Decisions\n%s\n' "$NEW_SECTION"` byte-for-byte.
+      tmp=$(mktemp "${target}.XXXXXX")
+      if {
+        cat "$target"
+        printf '\n## Decisions\n'
+        cat "$newsec_file"
+      } > "$tmp"; then
+        mv "$tmp" "$target"
+      else
+        rm -f "$tmp"
+        echo "ERROR: decisions-merge append failed; $target unchanged" >&2
+        exit 1
+      fi
+    fi
+    ;;
+
+  emit-frontmatter)
+    # Port of the inline new-file frontmatter (triangulate/SKILL.md
+    # "Save-as-new write"). The per-kind defaults mirror the inline
+    # `case "$SAVE_AS"` mapping; an optional 2nd arg overrides the status.
+    kind="${2:?Usage: koji-triangulate-persist emit-frontmatter <kind> [<status>]}"
+    case "$kind" in
+      plan)     def_status="pending";     target_field="implementation" ;;
+      research) def_status="unvalidated"; target_field="validation" ;;
+      *) echo "ERROR: emit-frontmatter <kind> must be 'plan' or 'research'" >&2; exit 1 ;;
+    esac
+    status="${3:-$def_status}"
+    today=$(date +%Y-%m-%d)
+    # Byte-identical to the inline printf block: `--` guards the leading `---`
+    # against being read as printf options; closing `---` is followed by the
+    # blank line the body expects.
+    printf -- '---\n'
+    printf 'status: %s\n' "$status"
+    printf 'origin-session: %s\n' "$today"
+    printf 'target: %s\n' "$target_field"
+    printf -- '---\n\n'
+    ;;
+
+  *)
+    usage
+    exit 2
+    ;;
+esac

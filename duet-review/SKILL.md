@@ -32,9 +32,11 @@ echo "Session: $SESSION_DIR"
 
 ## Arguments
 
-- `--base <ref>` — base ref for diff (default: auto-detect origin/HEAD, then main, then master)
-- `--staged` — review staged diff only (ignore base)
-- `--no-auto-apply` — skip the 4-choice prompt; emit verdict only
+**Intent, not flags** — koji skills read natural-language intent; there is no argv to parse. When the user's phrasing signals one of these, set the matching internal variable in Step 1's setup; otherwise the default holds:
+
+- **Base ref for the diff** → `BASE`. By default the base auto-detects (origin/HEAD, then main, then master). If the user names a base ("review against develop", "diff from the release branch", "base is v1.2"), set `BASE` to that ref.
+- **Review only staged changes** → `STAGED`. By default the review spans `base..HEAD`. If the user wants the staged diff only ("just the staged changes", "review what's staged", "only the index"), set `STAGED=1` (this ignores `BASE`).
+- **Verdict only, no auto-apply** → `NO_AUTO_APPLY`. By default consensus mechanical fixes prompt the 4-choice apply menu. If the user wants the report without any apply prompt ("no auto-apply", "just the verdict", "report only, don't touch my files", "don't apply anything"), set `NO_AUTO_APPLY=1` — the apply step is skipped and the verdict is emitted as-is. (A required cross-review still runs first; see Step 5.)
 
 **Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens). Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick review", "lighter pass", "use high effort", "save tokens", "fast check". Don't downgrade for "the diff looks small" or similar heuristics; only on explicit user signal. Claude inherits the parent session's effort level — set `/effort max` once before running if you want max-tier Claude reviewer.
 
@@ -48,8 +50,11 @@ Parse arguments. Auto-detect base if not supplied. Generate a diff to a tempfile
 RUN_DIR=$(mktemp -d -t duet-XXXXXX)
 DIFF_FILE="$RUN_DIR/diff.patch"
 
-# Parse args (BASE, STAGED, XHIGH, NO_AUTO are bash vars)
-# ... arg parsing logic ...
+# Intent-set vars (see "Intent, not flags" in Arguments). Initialized here so
+# the reads below run cleanly under set -u even when no intent was signalled.
+BASE="${BASE:-}"                     # base ref for the diff (auto-detected below if empty)
+STAGED="${STAGED:-}"                 # "1" → review the staged diff only
+NO_AUTO_APPLY="${NO_AUTO_APPLY:-}"   # "1" → skip the apply prompt, emit verdict only (Step 5)
 
 if [ -z "$BASE" ] && [ "$STAGED" != "1" ]; then
   BASE=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|origin/||')
@@ -327,7 +332,7 @@ If either cross-review times out or returns unparseable JSON, write `[]` for tha
 
 ---
 
-## Step 5 — Auto-apply prompt (skip if `--no-auto-apply`)
+## Step 5 — Auto-apply prompt (skipped when `NO_AUTO_APPLY` is set)
 
 **Gate:** Step 5 refuses to run if `cross_review_required == true && cross_review_done == false`. Check before proceeding:
 
@@ -348,6 +353,20 @@ fi
 ```
 
 Forces Step 4 to run when required, preventing stale CONTESTED summaries.
+
+**Then, and only after that gate has passed, honor `NO_AUTO_APPLY`.** Placement matters: the skip sits *below* the hard cross-review gate above, so it can never short-circuit a pending/required cross-review — a blocked verdict still `exit 1`s at the gate before we ever reach this check.
+
+```bash
+if [ "$NO_AUTO_APPLY" = "1" ]; then
+  echo "NO_AUTO_APPLY set — skipping the apply prompt; emitting verdict only."
+  # No fixes applied: every high_consensus finding stays for manual review.
+  # Leave verdict.json untouched (no auto_applied / user_held mutation) and
+  # go straight to Step 6, which prints the verdict as-is.
+  SKIP_AUTO_APPLY=1
+fi
+```
+
+When `SKIP_AUTO_APPLY=1`, skip the rest of Step 5 (5a–5d) entirely and proceed to Step 6. Otherwise run the apply flow below.
 
 Read `$RUN_DIR/verdict.json`. For each finding in `high_consensus` with `suggested_fix.type == "mechanical"` AND `suggested_fix.scope == "single-file"`:
 
@@ -418,7 +437,7 @@ Then `exit $EXIT_CODE` where exit code comes from `verdict.json`.
 | Symptom | Likely cause | Mitigation |
 |---|---|---|
 | Codex hangs (no output, no timeout fire) | Stdin not closed, or `--enable web_search_cached` re-introduced | This skill explicitly drops both — verify the bash above wasn't modified. Kill `$CODEX_PID` manually. |
-| Codex exits 124 | Hit the timeout. xhigh's 30-min wall isn't enough for very large diffs. | Re-run with smaller scope (`--base`), or `--no-auto-apply` to at least get the report. |
+| Codex exits 124 | Hit the timeout. xhigh's 30-min wall isn't enough for very large diffs. | Re-run with smaller scope (name a closer `BASE`), or ask for verdict-only (`NO_AUTO_APPLY`) to at least get the report. |
 | Agent (Claude) returns prose instead of JSON | Reviewer prompt drift, or model decided to chat. | The prompt body explicitly demands strict JSON; the JSON extractor handles single arrays. If the array is missing → treat as `[]`. |
 | Synthesize crashes | Malformed input (rare; both reviewers were instructed to emit strict JSON) | `koji-duet-synthesize` is defensive: bad input → empty findings → PASS verdict. |
 | User chose "remember for repo" but rule doesn't trigger next session | Likely fingerprint mismatch on the OTHER reviewer (consensus didn't form again). Rules need consensus PLUS category match. | This is intentional — rule does not auto-apply on single-reviewer findings. |

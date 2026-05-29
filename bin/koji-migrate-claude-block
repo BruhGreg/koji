@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# koji-migrate-claude-block — atomically replace the koji block in a CLAUDE.md.
+#
+#   koji-migrate-claude-block <target-CLAUDE.md> <new-block-file>
+#
+# Replaces the "## Session Management (koji)" section in <target-CLAUDE.md> with
+# the contents of <new-block-file> followed by a blank line. Everything from the
+# marker heading up to (but not including) the next "## " heading is dropped; the
+# rest of the file is preserved verbatim.
+#
+# Semantics (promote-only-on-success, NOT rollback): the new content is written
+# to a same-directory mktemp so the final `mv` is atomic on one filesystem. The
+# original is NEVER touched until awk has fully succeeded and the temp is in
+# place — there is no partial write to roll back. On any awk failure the original
+# is left exactly as it was, an error is printed to stderr, and exit is non-zero.
+# Both temp files (the mktemp AND <new-block-file>) are cleaned up on every exit
+# path. The success message is the caller's job — print it only after this helper
+# returns 0 (i.e. after the `mv` has landed).
+#
+# Lives in bin/ on purpose: parser-heavy migration code shouldn't live in a
+# rendered SKILL.md; helpers run via bash directly, so future awk field refs are
+# safe here. The two inline callers — kick-off 0f/0g — were byte-identical; this
+# is the single source of truth for the rewrite mechanics they shared. The marker
+# stays a literal awk regex (both callers use the same one): passing it as a
+# dynamic `-v` string would mangle the `\(koji\)` escapes and break byte-identity.
+set -euo pipefail
+
+TARGET="${1:?Usage: koji-migrate-claude-block <target-CLAUDE.md> <new-block-file>}"
+NEW_BLOCK_FILE="${2:?Usage: koji-migrate-claude-block <target-CLAUDE.md> <new-block-file>}"
+
+# Clean up BOTH temps on every exit path. The mktemp is created below; until then
+# CLAUDE_TMP is empty and `rm -f ""` is a harmless no-op.
+CLAUDE_TMP=""
+cleanup() { rm -f "$CLAUDE_TMP" "$NEW_BLOCK_FILE"; }
+trap cleanup EXIT
+
+# Validate the new-block file BEFORE touching anything: it must be readable AND
+# non-empty. A missing/unreadable/empty block would otherwise let awk's getline
+# fail (return -1) or read nothing, emit a BLANK koji section, still exit 0, and
+# `mv` a corrupted CLAUDE.md over the original. Fail loud and early instead — the
+# original is untouched and no temp has been created yet.
+if [ ! -r "$NEW_BLOCK_FILE" ] || [ ! -s "$NEW_BLOCK_FILE" ]; then
+  echo "ERROR: new-block file is missing, unreadable, or empty: $NEW_BLOCK_FILE" >&2
+  echo "ERROR: migration aborted; CLAUDE.md unchanged" >&2
+  exit 1
+fi
+
+# Same-directory mktemp so `mv` is atomic on the same filesystem as TARGET.
+CLAUDE_TMP=$(mktemp "${TARGET}.XXXXXX")
+
+# Run the rewrite into the temp; mv onto the original ONLY on awk success. The
+# original is untouched until the mv lands (promote-only-on-success). On failure,
+# remove the temp, warn, and exit non-zero — the EXIT trap still cleans both.
+#
+# Defense-in-depth on top of the shell guard above: capture getline's return in
+# `rc` and count lines read. If getline ever returns < 0 (a read error mid-stream)
+# OR zero lines are ultimately read, `exit 1` from awk BEFORE the replacement
+# block can be emitted — so the pipeline fails, the `mv` never runs, and the
+# original CLAUDE.md is left exactly as it was.
+if awk -v new_block_file="$NEW_BLOCK_FILE" '
+  BEGIN {
+    nlines = 0
+    while ((rc = (getline line < new_block_file)) > 0) {
+      # Accumulation kept byte-identical to the original (sentinel is the empty
+      # accumulator, NOT the line count) so a block whose first line is blank
+      # joins exactly as before; nlines is purely the read-success counter.
+      new_block = (new_block == "" ? line : new_block ORS line)
+      nlines++
+    }
+    close(new_block_file)
+    if (rc < 0 || nlines == 0) {
+      print "ERROR: could not read new-block file: " new_block_file > "/dev/stderr"
+      exit 1
+    }
+  }
+  /^## Session Management \(koji\)/ {
+    print new_block
+    print ""
+    in_block=1
+    next
+  }
+  in_block && /^## / { in_block=0 }
+  !in_block { print }
+' "$TARGET" > "$CLAUDE_TMP"; then
+  mv "$CLAUDE_TMP" "$TARGET"
+  CLAUDE_TMP=""   # consumed by mv; nothing left for the trap to remove
+else
+  rm -f "$CLAUDE_TMP"
+  CLAUDE_TMP=""
+  echo "ERROR: migration failed; CLAUDE.md unchanged" >&2
+  exit 1
+fi

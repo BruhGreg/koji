@@ -182,39 +182,25 @@ Options:
 - **B) Skip this time** — ask again next kick-off
 - **C) Decline permanently for this project** — never ask again
 
-**If A**, rewrite the block atomically:
+**If A**, rewrite the block atomically. Build the new block, then hand the
+atomic rewrite to `koji-migrate-claude-block` (same-dir mktemp + the section-
+replace awk + `mv`-on-success; promote-only-on-success, never touching the
+original until the new content is fully written; cleans up both temps on every
+path):
 
 ```bash
 NEW_BLOCK_FILE=$(mktemp)
-CLAUDE_TMP=$(mktemp "$PROJECT_ROOT/CLAUDE.md.XXXXXX")
 cat > "$NEW_BLOCK_FILE" <<EOF
 ## Session Management (koji)
 
 Session docs in \`$DOCS_DIR/\` (handoff, lessons, session log + Load on Kick-Off) and \`$TODO_FILE\` at project root. Use \`/kick-off\` to start a session, \`/wrap\` to end, \`/take-note\` mid-session. For substantial research worth keeping, capture to \`$DOCS_DIR/research/\` — see \`~/.claude/skills/koji/references/research-capture-eval.md\` for criteria.
 EOF
 
-awk -v new_block_file="$NEW_BLOCK_FILE" '
-  BEGIN {
-    while ((getline line < new_block_file) > 0) {
-      new_block = (new_block == "" ? line : new_block ORS line)
-    }
-    close(new_block_file)
-  }
-  /^## Session Management \(koji\)/ {
-    print new_block
-    print ""
-    in_block=1
-    next
-  }
-  in_block && /^## / { in_block=0 }
-  !in_block { print }
-' "$PROJECT_ROOT/CLAUDE.md" > "$CLAUDE_TMP" \
-  && mv "$CLAUDE_TMP" "$PROJECT_ROOT/CLAUDE.md" \
-  || { rm -f "$CLAUDE_TMP" "$NEW_BLOCK_FILE"; echo "ERROR: migration failed; CLAUDE.md unchanged" >&2; return 1 2>/dev/null || exit 1; }
-rm -f "$NEW_BLOCK_FILE"
+~/.claude/skills/koji/bin/koji-migrate-claude-block "$PROJECT_ROOT/CLAUDE.md" "$NEW_BLOCK_FILE" \
+  || { echo "ERROR: migration failed; CLAUDE.md unchanged" >&2; return 1 2>/dev/null || exit 1; }
 ```
 
-Tell the user (only after the `mv` succeeded): `Migrated CLAUDE.md to pointer-only koji block.`
+Tell the user (only after the helper succeeded — i.e. after the `mv` landed): `Migrated CLAUDE.md to pointer-only koji block.`
 
 **If B**: do nothing this session — the check fires again next kick-off.
 
@@ -259,39 +245,24 @@ Options:
 - **B) Skip this time** — ask again next kick-off
 - **C) Decline permanently for this project** — never ask again
 
-**If A**, rewrite the block atomically (same awk pattern as 0f):
+**If A**, rewrite the block atomically. Same shared rewriter as 0f — build the
+new block, then call `koji-migrate-claude-block` (the new block already carries
+the research-capture-eval pointer, so this step and 0f write identical content;
+they differ only in the success message below):
 
 ```bash
 NEW_BLOCK_FILE=$(mktemp)
-CLAUDE_TMP=$(mktemp "$PROJECT_ROOT/CLAUDE.md.XXXXXX")
 cat > "$NEW_BLOCK_FILE" <<EOF
 ## Session Management (koji)
 
 Session docs in \`$DOCS_DIR/\` (handoff, lessons, session log + Load on Kick-Off) and \`$TODO_FILE\` at project root. Use \`/kick-off\` to start a session, \`/wrap\` to end, \`/take-note\` mid-session. For substantial research worth keeping, capture to \`$DOCS_DIR/research/\` — see \`~/.claude/skills/koji/references/research-capture-eval.md\` for criteria.
 EOF
 
-awk -v new_block_file="$NEW_BLOCK_FILE" '
-  BEGIN {
-    while ((getline line < new_block_file) > 0) {
-      new_block = (new_block == "" ? line : new_block ORS line)
-    }
-    close(new_block_file)
-  }
-  /^## Session Management \(koji\)/ {
-    print new_block
-    print ""
-    in_block=1
-    next
-  }
-  in_block && /^## / { in_block=0 }
-  !in_block { print }
-' "$PROJECT_ROOT/CLAUDE.md" > "$CLAUDE_TMP" \
-  && mv "$CLAUDE_TMP" "$PROJECT_ROOT/CLAUDE.md" \
-  || { rm -f "$CLAUDE_TMP" "$NEW_BLOCK_FILE"; echo "ERROR: migration failed; CLAUDE.md unchanged" >&2; return 1 2>/dev/null || exit 1; }
-rm -f "$NEW_BLOCK_FILE"
+~/.claude/skills/koji/bin/koji-migrate-claude-block "$PROJECT_ROOT/CLAUDE.md" "$NEW_BLOCK_FILE" \
+  || { echo "ERROR: migration failed; CLAUDE.md unchanged" >&2; return 1 2>/dev/null || exit 1; }
 ```
 
-Tell the user (only after the `mv` succeeded): `Added research-capture-eval pointer to CLAUDE.md's koji block.`
+Tell the user (only after the helper succeeded — i.e. after the `mv` landed): `Added research-capture-eval pointer to CLAUDE.md's koji block.`
 
 **If B**: do nothing this session — the check fires again next kick-off.
 
@@ -363,34 +334,31 @@ Read these files and internalize the content — do NOT dump them back to the us
 
 1. `$DOCS_PATH/AI_HANDOFF.md` — project state, architecture rules, gotchas
 2. `$TODO_PATH` — open tasks, tech debt, blockers (if `$HAS_TODO` is `true`)
-3. **Lessons (focus-filtered).** Don't read all of `$DOCS_PATH/lessons.md` — load the relevant subset via the helper. Derive a focus string from (a) the user-provided focus arg if any, (b) the last session's "Notes for Next Session" field (read from `$DOCS_PATH/agent-session.md`), and (c) the first 3 open items in `$TODO_PATH` if `$HAS_TODO`. Concatenate with spaces:
+3. **Lessons (focus-filtered).** Prefer the focus-filtered candidate set via the helper; for a small `lessons.md` (≤ ~40 entries) you may read it directly and judge relevance yourself — the pre-filter is an optimization for large corpora, not a wall. Derive a focus string from (a) the user-provided focus arg if any, (b) the last session's "Notes for Next Session" field (read from `$DOCS_PATH/agent-session.md`), and (c) the first 3 open items in `$TODO_PATH` if `$HAS_TODO`. Concatenate with spaces:
 
    ```bash
-   FOCUS=""
-   [ -n "${USER_FOCUS:-}" ] && FOCUS="$USER_FOCUS"
-   if [ -f "$DOCS_PATH/agent-session.md" ]; then
-     # Latest Notes for Next Session (wrap appends at bottom). Bare `print`
-     # (not `buf = buf ORS $0`) keeps this awk free of any literal `$0` token —
-     # the skill renderer strips field refs, which would silently empty NOTES
-     # and degrade the lessons focus signal. Same class as the budget-config bug.
-     NOTES=$(awk '
-       /^### Notes for Next Session[[:space:]]*$/ { capturing=1; next }
-       capturing && /^## |^### / { capturing=0 }
-       capturing { print }
-     ' "$DOCS_PATH/agent-session.md" 2>/dev/null | head -20)
-     FOCUS="$FOCUS $NOTES"
-   fi
-   if [ "$HAS_TODO" = "true" ] && [ -f "$TODO_PATH" ]; then
-     # Top of TODO.md, sans Completed. Template uses heading-style tasks,
-     # so dumb-include (not `grep '^- \[ \]'`) is intentional.
-     TODOS=$(awk '/^## Completed/{exit} 1' "$TODO_PATH" 2>/dev/null | head -30)
-     FOCUS="$FOCUS $TODOS"
-   fi
-   LESSONS=$(~/.claude/skills/koji/bin/koji-doc-status --lessons-relevant --focus "$FOCUS" --limit 8 2>/dev/null)
+   # The Notes-block + top-of-TODO derivation lives in koji-doc-status
+   # (--kickoff-focus): parser-heavy awk shouldn't sit inline in a rendered
+   # SKILL.md. Pass the TODO path only when $HAS_TODO is true (empty arg = no
+   # TODO segment). The helper emits a leading-space-prefixed segment per source
+   # in the same order as the old inline block, with no trailing newline, so
+   # prepending $USER_FOCUS reproduces the former byte-for-byte FOCUS string.
+   FOCUS="${USER_FOCUS:-}"
+   TODO_ARG=""
+   [ "$HAS_TODO" = "true" ] && TODO_ARG="${TODO_PATH:-}"
+   # Capture the focus-extractor's output AND exit separately: inlining the
+   # command substitution into the append would discard its status, so a failed
+   # extraction (Notes/TODO focus existed but the helper errored) would degrade
+   # to cold-start recency with no warning. $FOCUS_EXTRA is empty on failure, so
+   # the happy-path FOCUS string is unchanged.
+   FOCUS_EXTRA=$(~/.claude/skills/koji/bin/koji-doc-status --kickoff-focus "$DOCS_PATH/agent-session.md" "$TODO_ARG" 2>/dev/null)
+   FOCUS_EXIT=$?
+   FOCUS="$FOCUS$FOCUS_EXTRA"
+   LESSONS=$(~/.claude/skills/koji/bin/koji-doc-status --lessons-relevant --focus "$FOCUS" --limit 40 2>/dev/null)
    LESSONS_EXIT=$?
    ```
 
-   Internalize `$LESSONS` — these are the lessons most relevant to this session, plus a recent baseline. **If `$LESSONS_EXIT` is non-zero OR `$LESSONS` is empty when focus signals exist**, fall back to reading the top of `lessons.md` directly (first 10 entries) so kick-off still works without focus context — AND surface one line in the kick-off brief naming the degradation, e.g. `> Note: lessons helper degraded (exit $LESSONS_EXIT) — using recency fallback instead of focus ranking.` The silent-degrade shape is what kept a BSD-awk bug invisible across multiple versions; visibility is cheap insurance. Cold-start (no focus signals — fresh session with no args, empty Notes, no TODO) returns top 10 by recency automatically and is the documented happy path — no warn needed.
+   These are **candidate** lessons — recall is intentionally wide (any focus-token hit, plus a recent baseline). Judge which actually bear on the focus; ignore the rest. Internalize the ones that matter. **If `$FOCUS_EXIT` is non-zero (focus extraction failed), OR `$LESSONS_EXIT` is non-zero, OR `$LESSONS` is empty when focus signals exist**, fall back to reading the top of `lessons.md` directly (first 10 entries) so kick-off still works without focus context — AND surface one line in the kick-off brief naming the degradation, e.g. `> Note: lessons helper degraded (exit $LESSONS_EXIT) — using recency fallback instead of focus ranking.` (or, when `$FOCUS_EXIT` is the nonzero one, `> Note: focus extraction degraded (exit $FOCUS_EXIT) — session-notes/TODO focus may be missing; using recency fallback.`). A nonzero `$FOCUS_EXIT` matters because it means session notes / TODO focus existed but couldn't be read, so the lessons ranking silently lost its focus signal — exactly the silent-degrade shape that kept a BSD-awk bug invisible across multiple versions; visibility is cheap insurance. Cold-start (no focus signals — fresh session with no args, empty Notes, no TODO) returns top 10 by recency automatically and is the documented happy path — no warn needed.
 4. `$DOCS_PATH/agent-session.md` — read the **last** session entry for continuity (what was done, notes for next session)
 
 ### 2b. Gather extended context (tiered)
