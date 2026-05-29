@@ -157,17 +157,11 @@ fi
 #### 2c. Check consensus
 
 ```bash
-extract_verdict() {
-  # Echoes one of: AGREE / PARTIAL / DISAGREE / UNKNOWN
-  grep -iE '^[[:space:]]*VERDICT[[:space:]]*:' "$1" 2>/dev/null \
-    | tail -1 \
-    | sed -E 's/^[[:space:]]*VERDICT[[:space:]]*:[[:space:]]*//I' \
-    | awk '{print toupper($1)}' \
-    | sed 's/:.*$//'
-}
-
-CLAUDE_V=$(extract_verdict "$CLAUDE_FILE")
-CODEX_V=$(extract_verdict "$CODEX_FILE")
+# Verdict parsing lives in a helper: an inline awk `$1` field ref would be
+# silently stripped by the skill renderer, so consensus would never be detected.
+KOJI_VERDICT=~/.claude/skills/koji/bin/koji-duet-verdict
+CLAUDE_V=$("$KOJI_VERDICT" "$CLAUDE_FILE")
+CODEX_V=$("$KOJI_VERDICT" "$CODEX_FILE")
 echo "Round $ROUND verdicts: claude=$CLAUDE_V codex=$CODEX_V"
 
 if [ "$CLAUDE_V" = "AGREE" ] && [ "$CODEX_V" = "AGREE" ]; then

@@ -24,13 +24,13 @@
 #
 # State lives OUTSIDE the repo (koji global state dir), keyed per project so
 # concurrent projects don't collide. Env overrides:
-#   KOJI_STATE_DIR            — state directory (default ~/.koji)
+#   KOJI_STATE_DIR            — state directory (default ~/.config/koji)
 #   KOJI_KEEPAWAKE_BACKSTOP   — backstop seconds (default 14400 = 4h)
 
 set -euo pipefail
 
 BACKSTOP="${KOJI_KEEPAWAKE_BACKSTOP:-14400}"
-STATE_DIR="${KOJI_STATE_DIR:-$HOME/.koji}"
+STATE_DIR="${KOJI_STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/koji}"
 
 # Stable per-project key: git toplevel if available, else cwd.
 PROJ="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P 2>/dev/null || echo global)"

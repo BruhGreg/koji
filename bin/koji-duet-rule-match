@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# koji-duet-rule-match — duet-review auto-apply rule memory (check / add).
+#
+# A "rule" is a finding category the user has whitelisted for silent auto-apply,
+# stored per-repo and/or per-session as JSON: {"auto_apply_categories": [...]}.
+#
+#   koji-duet-rule-match check <category> <rules-file> [<rules-file>...]
+#       exit 0 if <category> is whitelisted in ANY listed file, else 1.
+#   koji-duet-rule-match add   <category> <rules-file>
+#       add <category> to <rules-file> (creating it + parent dirs; idempotent).
+#
+# Lives in bin/ on purpose: the inline versions read positional params ($1/$2),
+# and the skill renderer silently strips literal $N refs from inline SKILL shell
+# — which would blank the category/file and mis-gate auto-apply of code edits.
+# Safety-sensitive (it gates edits to the user's code), so it must be immune to
+# the renderer; helpers run via bash directly and are. Values are passed to
+# python as argv (not string-interpolated), closing the prior injection seam.
+set -euo pipefail
+
+# NB: keep the "{check|add}" braces out of any ${var:?...} default — bash closes
+# the expansion at the first "}", which would leak the usage text into the value.
+usage() {
+  echo "Usage: koji-duet-rule-match {check|add} <category> <rules-file>..." >&2
+}
+
+cmd="${1:-}"
+
+case "$cmd" in
+  check)
+    cat="${2:?Usage: koji-duet-rule-match check <category> <rules-file>...}"
+    shift 2
+    [ "$#" -ge 1 ] || { echo "Usage: koji-duet-rule-match check <category> <rules-file>..." >&2; exit 2; }
+    for f in "$@"; do
+      [ -f "$f" ] || continue
+      if python3 - "$cat" "$f" <<'EOF'
+import json, sys
+cat, path = sys.argv[1], sys.argv[2]
+try:
+    rules = json.load(open(path))
+    sys.exit(0 if cat in rules.get("auto_apply_categories", []) else 1)
+except Exception:
+    sys.exit(1)
+EOF
+      then
+        exit 0
+      fi
+    done
+    exit 1
+    ;;
+
+  add)
+    cat="${2:?Usage: koji-duet-rule-match add <category> <rules-file>}"
+    file="${3:?Usage: koji-duet-rule-match add <category> <rules-file>}"
+    python3 - "$cat" "$file" <<'EOF'
+import json, sys, pathlib
+cat, path = sys.argv[1], sys.argv[2]
+p = pathlib.Path(path)
+data = {}
+if p.exists():
+    try: data = json.loads(p.read_text())
+    except Exception: data = {}
+cats = data.get("auto_apply_categories", [])
+if cat not in cats:
+    cats.append(cat)
+data["auto_apply_categories"] = cats
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(data, indent=2))
+EOF
+    ;;
+
+  *)
+    usage
+    exit 2
+    ;;
+esac

@@ -358,23 +358,12 @@ REPO_RULES="$KOJI_STATE_DIR/repos/$(basename "$PROJECT_ROOT")-$SESSION_HASH/duet
 SESSION_RULES="$SESSION_DIR/duet-rules.json"
 mkdir -p "$(dirname "$REPO_RULES")" "$SESSION_DIR"
 
-# Check if finding.category is already whitelisted at either scope
-matches_rule() {
-  local cat="$1" file="$2"
-  [ -f "$file" ] || return 1
-  python3 -c "
-import json, sys
-try:
-    rules = json.load(open('$file'))
-    cats = rules.get('auto_apply_categories', [])
-    sys.exit(0 if '$cat' in cats else 1)
-except Exception:
-    sys.exit(1)
-"
-}
+# Rule-memory lookup lives in a helper: the inline version read positional
+# params ($1/$2), which the skill renderer silently strips — blanking the
+# category/file and mis-gating auto-apply of code edits (safety-sensitive).
 ```
 
-If `matches_rule $category $REPO_RULES` OR `matches_rule $category $SESSION_RULES` → auto-apply silently (use Edit tool with `suggested_fix.details`). Add to `auto_applied` list in the verdict.
+If `~/.claude/skills/koji/bin/koji-duet-rule-match check "$category" "$REPO_RULES" "$SESSION_RULES"` exits 0 (the category is whitelisted at either scope) → auto-apply silently (use Edit tool with `suggested_fix.details`). Add to `auto_applied` list in the verdict.
 
 ### 5b. Otherwise, prompt with 4 choices
 
@@ -390,29 +379,8 @@ Use `AskUserQuestion`:
 
 ### 5c. Persist rule choice if user picked 3 or 4
 
-```bash
-add_to_rules() {
-  local cat="$1" file="$2"
-  python3 - "$cat" "$file" <<'EOF'
-import json, sys, os, pathlib
-cat, path = sys.argv[1], sys.argv[2]
-p = pathlib.Path(path)
-data = {}
-if p.exists():
-    try: data = json.loads(p.read_text())
-    except Exception: data = {}
-cats = data.get("auto_apply_categories", [])
-if cat not in cats:
-    cats.append(cat)
-data["auto_apply_categories"] = cats
-p.parent.mkdir(parents=True, exist_ok=True)
-p.write_text(json.dumps(data, indent=2))
-EOF
-}
-```
-
-- Choice 3 → `add_to_rules "$category" "$REPO_RULES"`
-- Choice 4 → `add_to_rules "$category" "$SESSION_RULES"`
+- Choice 3 → `~/.claude/skills/koji/bin/koji-duet-rule-match add "$category" "$REPO_RULES"`
+- Choice 4 → `~/.claude/skills/koji/bin/koji-duet-rule-match add "$category" "$SESSION_RULES"`
 
 ### 5d. Apply
 

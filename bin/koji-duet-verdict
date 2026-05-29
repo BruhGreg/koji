@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# koji-duet-verdict — extract the consensus verdict token from a duet round file.
+#
+# Reads the last `VERDICT: <TOKEN> ...` line of <file> and echoes the token,
+# uppercased: AGREE / PARTIAL / DISAGREE (or UNKNOWN when no verdict line).
+# Used by /duet-plan's consensus check (and any duet flow writing VERDICT lines).
+#
+# Lives in bin/ on purpose: the token parse needs an awk field ref ($1), and the
+# skill renderer silently strips literal $0/$N field refs from inline SKILL awk
+# — which blanked the token so consensus was NEVER detected and every duet-plan
+# ran to the round limit before escalating. Helpers run via bash directly and
+# are immune.
+#
+#   koji-duet-verdict <file>   — echo the verdict token (uppercased)
+set -euo pipefail
+
+FILE="${1:?Usage: koji-duet-verdict <file>}"
+
+# grep isolates VERDICT lines (any case). Strip everything up to the first colon
+# — portable, and avoids the BSD-incompatible sed `I` (case-insensitive) flag,
+# since grep already case-folded the match. Then take the first token, uppercase
+# it, and drop any trailing ":reason". A missing/empty verdict yields UNKNOWN.
+verdict=$(
+  grep -iE '^[[:space:]]*VERDICT[[:space:]]*:' "$FILE" 2>/dev/null \
+    | tail -1 \
+    | sed -E 's/^[^:]*:[[:space:]]*//' \
+    | awk '{print toupper($1)}' \
+    | sed 's/:.*$//' \
+    || true
+)
+printf '%s\n' "${verdict:-UNKNOWN}"
