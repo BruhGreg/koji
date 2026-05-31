@@ -41,9 +41,11 @@ Hold the outer keep-awake for the entire review so it doesn't flap off between f
 ~/.claude/skills/koji/bin/koji-keepawake stop  || true   # after the last finding / red-team stage
 ```
 
-Each per-finding `/triangulate` run also calls `start`/`stop` (its own Steps 1/6), but the
-helper is reference-counted — those nest under this outer hold, so the keep-awake stays up
-for the whole review and is torn down exactly once, here.
+Lone `/triangulate` is interactive and manages no keep-awake of its own, so this outer
+bracket is the review's **only** keep-awake — it stays up across the whole finding walk and
+is torn down exactly once, here. Self-cleaning and ownership-safe: it never touches a
+caffeinate you started. (The helper is still reference-counted, so a concurrent koji run in
+the same project shares this one hold rather than fighting it.)
 
 ## The per-finding loop
 

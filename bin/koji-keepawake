@@ -1,23 +1,32 @@
 #!/usr/bin/env bash
 # koji-keepawake — opt-in sleep prevention for long, unattended koji skill runs.
 #
-# Used by /duet-plan, /duet-impl, and /triangulate (incl. its review-skill
-# composition) to keep the machine awake while background AI dispatches run, so
-# the user can walk away. Spawns `caffeinate -i` (Darwin) / `systemd-inhibit`
-# (Linux) at the start of a run and tears it down at the end.
+# Used by /duet-plan and /duet-impl, and by the /plan-eng-review × /triangulate
+# review composition (see references/review-composition.md), to keep the machine
+# awake while background AI dispatches run, so the user can walk away. (Lone
+# /triangulate does NOT call this — it's interactive; see its Step 1.) Spawns
+# `caffeinate -i` (Darwin) / `systemd-inhibit` (Linux) at the start of a run and
+# tears it down at the end.
 #
 #   koji-keepawake start   — ensure the system stays awake; bump a refcount
 #   koji-keepawake stop     — drop the refcount; tear down when it hits 0
-#   koji-keepawake status   — report state (exit 0 if anything is keeping awake)
+#   koji-keepawake status   — report state (exit 0 only if a koji-owned keep-awake is active)
 #
-# Reference-counted on purpose: when /triangulate is invoked per-finding INSIDE
-# a /plan-eng-review composition, the composition holds the outer `start` and
-# each per-finding run nests (start->2, stop->1) — so the keep-awake never
-# flaps off between findings; only the composition's final `stop` kills it.
+# Reference-counted so concurrent koji runs in the same project share ONE
+# keep-awake rather than each spawning its own: whichever starts first spawns,
+# later starts just bump the count (start->2…), and only the final stop (count->0)
+# tears it down. State is keyed per project (git toplevel), so different projects
+# never collide.
 #
 # Ownership is tracked by the spawned PID in a state file. `stop` only ever
-# kills a process THIS tool spawned — a caffeinate the user (or another tool)
-# started is detected via `pgrep` and left strictly alone, never killed.
+# kills a process THIS tool spawned. Any other keep-awake — the user's, Claude
+# Code's, another tool's — is never recorded in the state file, so it is never
+# touched. koji ALWAYS spawns its own and never defers to an ambient one: it
+# must work on hosts with no ambient keep-awake (CI, headless), and an ambient
+# one can't be trusted to outlast an unattended gap (e.g. Claude Code's own
+# caffeinate is activity-scoped — `-t 300` — and self-expires ~5 min into a
+# walk-away, exactly when a long background run still needs the machine awake).
+# Coexisting caffeinates are harmless: each holds an independent power assertion.
 #
 # `-t <backstop>` is a crash safety net: if a run dies before its `stop`, the
 # keep-awake self-expires (default 4h) instead of leaking forever.
@@ -74,32 +83,28 @@ _spawn() {
   esac
 }
 
-# Is some keep-awake process (ours or external) already preventing idle sleep?
-# `pgrep -x caffeinate` is the real gate on Darwin (the user-proposed
-# `pmset | grep PreventUserIdleSystemSleep` always matches the summary line, so
-# it adds nothing). On Linux this is a no-op and the refcount governs nesting.
-_external_awake() { pgrep -x caffeinate >/dev/null 2>&1; }
-
 case "${1:-}" in
   start)
     _read_state
-    # Self-heal: if we recorded a pid but it has died (backstop fired, or it was
-    # killed out from under us), the prior run is over — reset the refcount.
-    if [ "$COUNT" -gt 0 ] && [ -n "$PID" ] && ! _alive "$PID"; then
+    # Self-heal: a prior run that died before its `stop` leaves stale state. Reset
+    # the refcount when the recorded pid is dead OR empty. Empty-with-COUNT>0 is the
+    # pre-0.6.8 deferred state (old versions detected an ambient caffeinate and wrote
+    # COUNT>0 / PID=""); without treating it as stale, that state takes the
+    # "already held" branch below and NEVER spawns koji's own keep-awake — defeating
+    # the always-spawn fix for exactly the users who hit the original bug.
+    if [ "$COUNT" -gt 0 ] && { [ -z "$PID" ] || ! _alive "$PID"; }; then
       COUNT=0; PID=""
     fi
     if [ "$COUNT" -eq 0 ]; then
-      if _external_awake; then
-        PID=""   # someone else owns it — never claim or kill it
-        echo "keep-awake: already active (not koji-owned) — leaving it alone"
+      # Always spawn koji's OWN keep-awake; never defer to an ambient one (see
+      # header). Coexisting caffeinates are harmless — independent power
+      # assertions — and `stop` only ever kills the PID we record here.
+      _spawn
+      PID="$SPAWNED_PID"
+      if [ -n "$PID" ]; then
+        echo "keep-awake: started (pid $PID, ${BACKSTOP}s backstop)"
       else
-        _spawn
-        PID="$SPAWNED_PID"
-        if [ -n "$PID" ]; then
-          echo "keep-awake: started (pid $PID, ${BACKSTOP}s backstop)"
-        else
-          echo "keep-awake: no sleep-prevention tool on this platform — continuing without it"
-        fi
+        echo "keep-awake: no sleep-prevention tool on this platform — continuing without it"
       fi
     else
       echo "keep-awake: already held (refcount $COUNT) — reusing"
@@ -129,9 +134,6 @@ case "${1:-}" in
     _read_state
     if [ "$COUNT" -gt 0 ] && _alive "$PID"; then
       echo "keep-awake: koji-owned active (pid $PID, refcount $COUNT)"
-      exit 0
-    elif _external_awake; then
-      echo "keep-awake: active (not koji-owned)"
       exit 0
     else
       echo "keep-awake: inactive"

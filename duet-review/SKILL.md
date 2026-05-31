@@ -19,7 +19,7 @@ allowed-tools:
 
 Use ONLY when the user explicitly types `/duet-review`, says "duet review", "duet-review", "let's duet review this diff", or similar — the `duet` keyword is required. Do NOT invoke on casual "review this" or "code review" phrases — gstack `/review` handles those.
 
-Two-reviewer adversarial code review. **Reviewer A** is Claude (Agent subagent, fresh context); **Reviewer B** is codex (codex exec, `xhigh` effort by default — drop to `high` only via natural-language signal per the Arguments note). Both run in parallel; results are synthesized into a verdict; reviewer-exclusive findings at severity ≥ medium trigger a cross-review pass with severity-aware AGREE labels; high-consensus mechanical fixes prompt the user with four choices (apply / hold / apply+remember-for-repo / apply+remember-for-session).
+Two-reviewer adversarial code review. **Reviewer A** is Claude (Agent subagent, fresh context — at `/effort max` it fans out into multiple angle reviewers that the main agent consolidates; see Step 2); **Reviewer B** is codex (codex exec, `xhigh` effort by default — drop to `high` only via natural-language signal per the Arguments note). Both run in parallel; results are synthesized into a verdict; reviewer-exclusive findings at severity ≥ medium trigger a cross-review pass with severity-aware AGREE labels; high-consensus mechanical fixes prompt the user with four choices (apply / hold / apply+remember-for-repo / apply+remember-for-session).
 
 ## Preamble
 
@@ -39,6 +39,8 @@ echo "Session: $SESSION_DIR"
 - **Verdict only, no auto-apply** → `NO_AUTO_APPLY`. By default consensus mechanical fixes prompt the 4-choice apply menu. If the user wants the report without any apply prompt ("no auto-apply", "just the verdict", "report only, don't touch my files", "don't apply anything"), set `NO_AUTO_APPLY=1` — the apply step is skipped and the verdict is emitted as-is. (A required cross-review still runs first; see Step 5.)
 
 **Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens). Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick review", "lighter pass", "use high effort", "save tokens", "fast check". Don't downgrade for "the diff looks small" or similar heuristics; only on explicit user signal. Claude inherits the parent session's effort level — set `/effort max` once before running if you want max-tier Claude reviewer.
+
+**Claude reviewer depth: single pass (default) vs angle fan-out (max effort)** → `REVIEW_MODE`. Reviewer A normally runs as ONE holistic pass (`REVIEW_MODE=single`). At `/effort max` — or when the invocation phrase explicitly asks for a full/deep review ("full review", "fan out", "all angles", "deep review") — set `REVIEW_MODE=fanout`: Reviewer A instead fans out into 5 focused angle reviewers that the main agent consolidates (Step 2b fan-out → Step 2e). This is Claude-side only and orthogonal to codex's `xhigh`/`high` knob. It roughly 5×'s the Claude-side cost, so it is gated like every other knob here — read from intent, not a flag — and a "quick review" / "lighter pass" / "save tokens" phrase forces `single` even at max effort. The decision is set at the top of Step 2; single pass is the preserved lightest tier.
 
 ---
 
@@ -80,13 +82,27 @@ if [ "$DIFF_LINES" = "0" ]; then
 fi
 ```
 
-If `DIFF_LINES > 5000`, confirm with the user via `AskUserQuestion` before proceeding (two reviewer passes get expensive).
+If `DIFF_LINES > 5000`, confirm with the user via `AskUserQuestion` before proceeding (two reviewer passes get expensive — and in fan-out mode the Claude side runs ~5 passes over this diff, so the confirmation matters more).
 
 ---
 
 ## Step 2 — Launch reviewers in parallel (both backgrounded)
 
 Both reviewers run as **background tasks**. After launching them, briefly tell the user that the reviewers are running and that they can keep working on other things; you'll resume when both background tasks notify completion. Do NOT block on either reviewer mid-flow.
+
+**First, fix the Claude reviewer depth** (see "Claude reviewer depth" in Arguments). Decide from your runtime effort level + the invocation phrase, then record it:
+
+```bash
+# REVIEW_MODE: "single" (default) or "fanout". Set REVIEW_MODE=fanout BEFORE this
+# block when EITHER the session is at /effort max OR the invocation phrase asks
+# for a full / deep / all-angles / fan-out review. A "quick" / "lighter pass" /
+# "save tokens" phrase forces "single" even at max effort. Render-safe: plain
+# string var, no field refs.
+REVIEW_MODE="${REVIEW_MODE:-single}"
+echo "Claude reviewer mode: $REVIEW_MODE"
+```
+
+Mode wiring: `single` → run 2b (single pass) + the single-mode half of 2d, and SKIP 2e. `fanout` → run 2b (fan-out) + the fan-out half of 2d, then 2e. Step 2a (codex) and Steps 3–6 are identical either way.
 
 ### 2a. Start codex (Reviewer B) in background
 
@@ -127,6 +143,10 @@ Run this Bash block with **`run_in_background: true`**. The harness returns imme
 
 ### 2b. Run Claude reviewer (Reviewer A) via Agent tool — also backgrounded
 
+**Run the subsection matching `REVIEW_MODE`.**
+
+#### 2b — single mode (one holistic pass)
+
 Call the `Agent` tool with **`run_in_background: true`**:
 
 - `subagent_type`: `general-purpose`
@@ -137,11 +157,36 @@ Call the `Agent` tool with **`run_in_background: true`**:
 
 The Agent tool returns immediately with an agent ID; you'll be notified when the subagent completes.
 
+#### 2b — fan-out mode (5 angle reviewers in parallel)
+
+Read `references/reviewer-prompt.md` and `references/claude-angles.md` (the diff is already at `$DIFF_FILE`). Then make **five consecutive `Agent` tool calls in immediate succession** — one per angle — each with **`run_in_background: true`**, BEFORE the Step 2c message and BEFORE returning control.
+
+For each of the five fixed angles, call the `Agent` tool with:
+
+- `subagent_type`: `general-purpose`
+- `description`: the angle number and name, e.g. `Duet review: angle 1 — correctness & safety`
+- `prompt`, assembled in this exact order:
+  1. the **shared framing** paragraph from `claude-angles.md`,
+  2. that angle's **lens block** from `claude-angles.md`,
+  3. the **full text of `reviewer-prompt.md`**,
+  4. then this closer with the diff inlined — *"Now review the diff below. Output ONLY a JSON array. No markdown fences, no preamble, no closing remarks. If no findings, output `[]`."* — followed by a `DIFF:` line and the full contents of `$DIFF_FILE`.
+- `run_in_background`: `true`
+
+The five fixed angles (each writes to its numbered file in Step 2d):
+
+1. correctness & safety → `angle-1.json`
+2. removed-behavior & dead-code → `angle-2.json`
+3. cross-file & caller tracer → `angle-3.json`
+4. reuse / simplification / perf → `angle-4.json`
+5. altitude / design shape → `angle-5.json`
+
+> **Do NOT return control after launching angle 1** — issue all five `Agent` calls first, then go to Step 2c. If you return early, the remaining angles never start (same discipline as `/triangulate`'s parallel dispatch).
+
 ### 2c. Tell the user, then go
 
-After both reviewers are launched, tell the user something like:
+After **all** reviewers are launched (codex + the one Claude reviewer in single mode, or codex + all five angle agents in fan-out mode), tell the user something like:
 
-> *"duet-review running — codex + Claude reviewer both launched in background. I'll come back with the verdict when both complete; in the meantime you can continue with anything else."*
+> *"duet-review running — codex + Claude reviewer(s) launched in background. I'll come back with the verdict when everything completes; in the meantime you can continue with anything else."*
 
 Then **return control**. Do NOT poll, sleep, or proactively check on progress. The harness will re-invoke you with the notification messages.
 
@@ -176,9 +221,35 @@ fi
 echo "codex.json:  $(wc -c < "$RUN_DIR/codex.json") bytes"
 ```
 
-When the Claude reviewer Agent notification arrives, extract the JSON array from its response and write to `$RUN_DIR/claude.json` via the Write tool. If the response contains no parseable array, write `[]` and note it in the summary.
+**Claude side — single mode:** when the Claude reviewer Agent notification arrives, extract the JSON array from its response and write to `$RUN_DIR/claude.json` via the Write tool. If the response contains no parseable array, write `[]` and note it in the summary.
 
-**Proceed to Step 3 only after BOTH notifications have arrived and both `$RUN_DIR/claude.json` and `$RUN_DIR/codex.json` exist.** If one reviewer is still running when you're re-invoked by the other's notification, just confirm collection of the one that finished and return control again — the second notification will re-invoke you.
+**Claude side — fan-out mode:** each angle agent notifies independently. As each notification arrives, extract its JSON array and write it to its numbered file — `$RUN_DIR/angle-1.json` for angle 1 through `$RUN_DIR/angle-5.json` for angle 5 — via the Write tool. If an angle's response has no parseable array, write `[]` to its file and note it (a dead or garbled angle becomes an empty contributor; it never blocks the review). After writing, re-check the all-angles gate:
+
+```bash
+ANGLES_DONE=1
+for f in angle-1 angle-2 angle-3 angle-4 angle-5; do
+  [ -f "$RUN_DIR/$f.json" ] || ANGLES_DONE=0
+done
+echo "angles present: $ANGLES_DONE"
+```
+
+If `ANGLES_DONE=0`, confirm the angle you just collected and return control (the next notification re-invokes you). If `ANGLES_DONE=1`, run **Step 2e** to consolidate the angles into `$RUN_DIR/claude.json`. (If one angle never notifies for an unreasonably long time while all the others are in, treat it as `[]`, write its file, and proceed — do not hang the review.)
+
+**Proceed to Step 3 only after `$RUN_DIR/codex.json` AND `$RUN_DIR/claude.json` both exist** (in fan-out mode `claude.json` is produced by Step 2e, below). codex and the Claude side run independently; whichever finishes last trips Step 3. If something is still running when you're re-invoked by another notification, just confirm what finished and return control again — the next notification re-invokes you.
+
+### 2e. Consolidate angle findings (fan-out mode only)
+
+**Skip this step entirely in single mode** — `claude.json` already exists from Step 2d.
+
+In fan-out mode, once all five `angle-*.json` exist, **you (the main agent) consolidate them into one `$RUN_DIR/claude.json`**. This is judgment work, not a mechanical merge, and you do it yourself — NOT via a subagent — because you hold the diff and the task intent in context. Follow `references/claude-synthesis.md`: pool all angle findings, semantically dedup, treat cross-angle disagreement as signal, verify each survivor against the diff to drop false positives, assign final severity + `suggested_fix`, then write the consolidated JSON array to `$RUN_DIR/claude.json` via the Write tool (`[]` if nothing survives).
+
+Echo a one-line provenance note:
+
+```bash
+echo "claude.json: consolidated from 5 angles → $(python3 -c "import json; print(len(json.load(open('$RUN_DIR/claude.json'))))") findings"
+```
+
+Then fall through to Step 3 exactly as single mode does — `claude.json` now exists and the Step 3 gate passes.
 
 ---
 
@@ -416,7 +487,7 @@ Print a markdown summary to the user:
 ```
 duet-review verdict: <VERDICT>
 
-Reviewers: claude (high effort) + codex (high effort)
+Reviewers: claude (<single pass | fan-out 5 angles>) + codex (<xhigh|high>)
 Diff: <N> lines  base=<base>  head=<sha>
 
 Consensus high (X):   <list — auto-applied / held by user / failed apply>
@@ -441,11 +512,15 @@ Then `exit $EXIT_CODE` where exit code comes from `verdict.json`.
 | Agent (Claude) returns prose instead of JSON | Reviewer prompt drift, or model decided to chat. | The prompt body explicitly demands strict JSON; the JSON extractor handles single arrays. If the array is missing → treat as `[]`. |
 | Synthesize crashes | Malformed input (rare; both reviewers were instructed to emit strict JSON) | `koji-duet-synthesize` is defensive: bad input → empty findings → PASS verdict. |
 | User chose "remember for repo" but rule doesn't trigger next session | Likely fingerprint mismatch on the OTHER reviewer (consensus didn't form again). Rules need consensus PLUS category match. | This is intentional — rule does not auto-apply on single-reviewer findings. |
+| Angle agent (fan-out) returns prose, or never notifies | One of the 5 angle subagents drifted, or its notification was lost | Each angle's collection writes `[]` on an unparseable response; a never-returning angle is treated as `[]` once the others are in (Step 2d). The review completes on the remaining angles — fan-out degrades, never hangs. |
+| Step 2e writes invalid or empty `claude.json` | Synthesis emitted non-array JSON | Downstream is forgiving (non-array → empty → PASS), but Step 2e requires a parseable array and `[]` when nothing survives. Sanity-read your own write before Step 3. |
 
 ## Related
 
 - Autonomy principle: [../references/agent-autonomy.md](../references/agent-autonomy.md)
 - Verdict JSON spec: [references/verdict-format.md](references/verdict-format.md)
 - Reviewer prompt: [references/reviewer-prompt.md](references/reviewer-prompt.md)
+- Angle lenses (fan-out mode): [references/claude-angles.md](references/claude-angles.md)
+- Angle synthesis spec (fan-out mode): [references/claude-synthesis.md](references/claude-synthesis.md)
 - Synthesizer: [koji/bin/koji-duet-synthesize](../bin/koji-duet-synthesize)
 - Cleanup: `/wrap` removes `$SESSION_DIR/duet-rules.json` (session-scoped rules expire at wrap)

@@ -96,7 +96,7 @@ agents:                      # 工作階段條目的標籤
 
 **文件漂移偵測。** 任何文件都可以用 `covers:` frontmatter 標記它所描述的程式碼路徑。當被覆蓋路徑自文件最後編輯以來的提交數超過閾值時,`/kick-off` 會警告。`/inspect-doc-drift` 會稽核整個專案。完全確定性——不需要 LLM。
 
-**Duet 工作流程。** 不會卡住使用者的跨模型代理協作。`/duet-plan` 執行多輪 Claude↔codex 對話直到共識,鎖定計畫。`/duet-impl` 依關卡逐步走過計畫,每關 codex 審查,接著針對鎖定計畫中每一項明確承諾稽核累積 diff——這是與品質審查不同的契約驗證。`/duet-review` 進行雙審查者對抗式檢查,對於審查者間任何 medium/high 不一致皆觸發嚴重程度感知的交叉審查;硬性閘門 + `-PRELIMINARY` 後綴確保交叉審查不會被悄悄略過。三個技能皆以背景任務執行審查者——進行中你可以繼續工作。codex 預設使用 `xhigh` 推理強度;在叫用語句中用自然語言訊號可降回 high。
+**Duet 工作流程。** 不會卡住使用者的跨模型代理協作。`/duet-plan` 執行多輪 Claude↔codex 對話直到共識,鎖定計畫。`/duet-impl` 依關卡逐步走過計畫,每關 codex 審查,接著針對鎖定計畫中每一項明確承諾稽核累積 diff——這是與品質審查不同的契約驗證。`/duet-review` 進行雙審查者對抗式檢查,對於審查者間任何 medium/high 不一致皆觸發嚴重程度感知的交叉審查;硬性閘門 + `-PRELIMINARY` 後綴確保交叉審查不會被悄悄略過。三個技能皆以背景任務執行審查者——進行中你可以繼續工作。codex 預設使用 `xhigh` 推理強度;在叫用語句中用自然語言訊號可降回 high。`/duet-review` 的 Claude 端也會隨功夫調整深度：在 `/effort max`（或明確說「完整審查」、「扇出」、「深度審查」）時，會扇出成五個角度審查者（正確性、移除行為、跨檔呼叫、重用簡化、設計高度），由主代理綜整成單一發現集；較低功夫則跑單次整體審查，而說「快一點」、「省 token」即使在 max 下也會強制單次。
 
 **程式碼契合（codebase fit）。** duet 技能會讓新程式碼契合「這個專案」既有的慣例——檔案結構、命名、慣用寫法、分層——而不只看正確性。`/duet-plan` 會在每份計畫中寫入一段 Codebase Fit Contract,`/duet-impl` 的關卡審查與 `/duet-review` 都帶有 `codebase-fit` 審查視角。共用的參考是 koji 文件目錄中的 `CODEBASE_CONVENTIONS.md`:一個中樞,它透過 `sources:` 清單「指向」（而非複製）專案自己的慣例文件——`CONTRIBUTING.md`、`AGENTS.md`、`.cursorrules`、`STYLE.md`——並從審查實際抓到的問題逐步累積標準範例索引與「已否決模式」紀錄。`/koji-init` 為新專案建立它,`/kick-off` 則把它回填到既有專案。
 
@@ -104,7 +104,7 @@ agents:                      # 工作階段條目的標籤
 
 **三角化(`/triangulate`)。** 當你想要多方論述但希望由「你」當綜合者(而不是讓代理收斂)時:Claude + codex 並行針對單一問題論述,各自可進行網路研究,呈現立場,你權衡與決定。可選擇儲存到 `.koji/plans/` 或 `.koji/research/`,或將綜合段落附加到既有計畫——根據專案目前進行中的項目以對話方式選擇。它也能**與「逐項呈現發現」的計畫審查組合**(例如 `/plan-eng-review`):叫用審查時加上 `/triangulate`,每一項發現在你鎖定前都會先經過一次跨模型論述——並帶入「下游階段是否會吸收或翻轉此決定」的大局視角,還可選擇對審查的 outside voice 加跑一輪 red-team 反駁。
 
-**離線(walk-away)工作階段。** `/duet-plan`、`/duet-impl` 與 `/triangulate` 會在背景 AI 任務執行期間讓機器保持喚醒(`caffeinate` / `systemd-inhibit`),並在結束時釋放——讓你能啟動一段長時間執行後離開。僅這些技能採用(絕不包含一般的 `/kick-off`);採用引用計數(巢狀執行共用同一個喚醒程序),且具擁有權安全:絕不會關閉你自己啟動的喚醒程序。
+**離線(walk-away)工作階段。** `/duet-plan` 與 `/duet-impl`——以及組合進「逐項發現」計畫審查時的 `/triangulate`——會在背景 AI 任務執行期間讓機器保持喚醒(`caffeinate` / `systemd-inhibit`),並在結束時釋放,讓你能啟動一段長時間執行後離開。(單獨的 `/triangulate` 是互動式的——它把每個決定交給你——因此跟 `/duet-review` 一樣略過喚醒。)僅這些流程採用(絕不包含一般的 `/kick-off`);採用引用計數,重疊執行共用同一個喚醒程序,且具擁有權安全:絕不會關閉你自己啟動的喚醒程序。
 
 **計畫與研究工作文件。** `.koji/plans/`(已決定、待實作的工作)與 `.koji/research/`(調查發現,待驗證)。研究檔案以主題為定址單位——新發現會累積進現有主題檔案(`## Decisions` 段落由新到舊),而不是另開以工作階段命名的平行檔案。輕量的 YAML frontmatter(`status:` 欄位,依類型而定:plans 為 pending/in-progress/completed/archived,research 為 unvalidated/validated/archived)。`/kick-off` 會在工作階段開始時列出待辦項目;`/duet-impl` 會在執行結束時將計畫標記為 `completed`;`koji-plans-research --set-status <path> <new>` 可從命令列修改。漂移豁免(不是程式碼覆蓋文件)。
 

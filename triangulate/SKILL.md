@@ -131,12 +131,10 @@ echo "Question: $QUESTION"
 echo "Run dir: $RUN_DIR"
 echo "Round limit: $ROUND_LIMIT, effort: $EFFORT"
 
-# Keep the machine awake while the background voices run (and across rounds), so
-# the user can walk away. Refcounted: when /triangulate is nested per-finding in
-# a review composition (see references/review-composition.md), the composition's
-# outer hold keeps this from flapping off between findings. Self-cleaning, and
-# never kills a caffeinate the user started. Torn down in Step 6.
-~/.claude/skills/koji/bin/koji-keepawake start || true
+# No keep-awake here: lone /triangulate is interactive — it hands you the lock
+# decision at the end, like /duet-review — so the machine stays active while you
+# work. The /plan-eng-review composition, which walks many findings unattended,
+# holds its OWN keep-awake for the whole walk (see references/review-composition.md).
 ```
 
 ## Step 2 — Round 1 dispatch (both voices in parallel, background)
@@ -665,7 +663,6 @@ if [ "${KEEP:-0}" = "1" ]; then
 else
   rm -rf "$RUN_DIR"
 fi
-~/.claude/skills/koji/bin/koji-keepawake stop || true   # release keep-awake started in Step 1
 ```
 
 ## Step 7 — Report
