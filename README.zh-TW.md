@@ -75,7 +75,7 @@ TODO.md                      # 任務追蹤
 
 | 技能 | 功能 |
 |------|------|
-| `/plan-triangulate-review` | 在鎖定的計畫上內聯驅動 gstack 的 `/plan-eng-review`;對每項發現先分流,只有真正有爭議的才跑一輪 Claude↔codex 論述(達成共識即自動鎖定,硬性 3 輪上限),最後以一份勘誤(erratum)批准。設計上保持精簡——不是扇出。僅限明確叫用 |
+| `/plan-triangulate-review` | 在鎖定的計畫上內聯驅動 gstack 的 `/plan-eng-review`;對每項發現先分流,只有真正有爭議的才跑一輪 Claude↔codex 論述(達成共識即自動鎖定,硬性 3 輪上限),最後以一份勘誤(erratum)批准。設計上保持精簡——不是扇出。需以 `triangulate-review` 意圖叫用(非單獨的 `/triangulate`) |
 
 ## 設定
 
@@ -110,7 +110,7 @@ agents:                      # 工作階段條目的標籤
 
 **三角化(`/triangulate`)。** 當你想要多方論述但希望由「你」當綜合者(而不是讓代理收斂)時:Claude + codex 並行針對單一問題論述,各自可進行網路研究,呈現立場,你權衡與決定。可選擇儲存到 `.koji/plans/` 或 `.koji/research/`,或將綜合段落附加到既有計畫——根據專案目前進行中的項目以對話方式選擇。若要對「鎖定的」計畫做*自主*的逐項硬化,這個迴圈現在已成為獨立技能——**`/plan-triangulate-review`**(見下);單獨的 `/triangulate` 維持為純粹的單一問題引擎。
 
-**計畫硬化(`/plan-triangulate-review`)。** 對「鎖定的」計畫做自主、精簡的跨模型硬化。內聯驅動 gstack 的 `/plan-eng-review`;對每項發現先分流——大多數只需讀原始碼就能反駁或記錄,只有真正有爭議的才進入論述(Claude↔codex,達成共識即自動鎖定,硬性 3 輪上限)。最後以一份勘誤批准已鎖定的決定、跨模型讓步與仍有分歧的項目。僅限明確叫用;需要 gstack 與 codex。參考執行在 4 次模型呼叫內硬化了一份鎖定的 ADR——是分流迴圈,不是扇出。
+**計畫硬化(`/plan-triangulate-review`)。** 對「鎖定的」計畫做自主、精簡的跨模型硬化。內聯驅動 gstack 的 `/plan-eng-review`;對每項發現先分流——大多數只需讀原始碼就能反駁或記錄,只有真正有爭議的才進入論述(Claude↔codex,達成共識即自動鎖定,硬性 3 輪上限)。最後以一份勘誤批准已鎖定的決定、跨模型讓步與仍有分歧的項目。需以 `triangulate-review` 意圖叫用(非單獨的 `/triangulate`);需要 gstack 與 codex。參考執行在 4 次模型呼叫內硬化了一份鎖定的 ADR——是分流迴圈,不是扇出。
 
 **離線(walk-away)工作階段。** `/duet-plan`、`/duet-impl` 與 `/plan-triangulate-review` 會在背景 AI 任務執行期間讓機器保持喚醒(`caffeinate` / `systemd-inhibit`),並在結束時釋放,讓你能啟動一段長時間執行後離開。(單獨的 `/triangulate` 是互動式的——它把每個決定交給你——因此跟 `/duet-review` 一樣略過喚醒。)僅這些流程採用(絕不包含一般的 `/kick-off`);採用引用計數,重疊執行共用同一個喚醒程序,且具擁有權安全:絕不會關閉你自己啟動的喚醒程序。
 

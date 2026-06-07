@@ -1,7 +1,7 @@
 ---
-description: "Autonomous, lean, cross-model hardening of a LOCKED plan: drives gstack's /plan-eng-review inline, and for each genuinely contentious finding runs a Claude+codex vote on one proposed resolution that auto-locks on consensus. One end-of-run erratum ratifies — and nothing is written until it does. Explicit invocation only. Requires gstack AND codex."
+description: "Autonomous, lean, cross-model hardening of a LOCKED plan: drives gstack's /plan-eng-review inline, and for each genuinely contentious finding runs a Claude+codex vote on one proposed resolution that auto-locks on consensus. One end-of-run erratum ratifies — and nothing is written until it does. Invocation requires the 'triangulate-review' intent (distinct from bare /triangulate). Requires gstack AND codex."
 user-invocable: true
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools:
   - Bash
   - Read
@@ -26,7 +26,7 @@ It is the first-class home for the hand-driven loop koji ran ad-hoc — made rep
 
 ## When to invoke
 
-ONLY when the user explicitly types `/plan-triangulate-review` (or says "plan-triangulate-review `<plan>`", "triangulate-review this plan", "harden this plan with cross-model review"). **Never auto-trigger** — `disable-model-invocation: true` keeps it off the model's proactive surface. This is the user's deliberate, cost-guarded entry.
+Use when the user types `/plan-triangulate-review`, says "plan-triangulate-review `<plan>`", "triangulate-review this plan", "harden this plan with cross-model review", or similar — the **"triangulate-review" intent is required** (the same way the duet family requires the `duet` keyword). Do NOT route a bare "triangulate" here (that's `/triangulate`, the multi-side debate) or a generic "review this plan" (that's gstack `/plan-eng-review`). This is a deliberate, **cost-guarded** entry: it is model-invocable for a clearly-intended request like the one above, but **never auto-trigger it on a plan just because one exists** — it spends real model calls.
 
 Operates on a **locked** plan (e.g. one `/duet-plan` produced, or any structured plan/ADR). The plan's substeps are **not** relitigated — this pass *hardens* the decisions already made, additively.
 
