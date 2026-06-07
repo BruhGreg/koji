@@ -71,17 +71,22 @@ create_link "duet-plan" "duet-plan"
 create_link "duet-impl" "duet-impl"
 create_link "duet-review" "duet-review"
 create_link "triangulate" "triangulate"
+create_link "plan-triangulate-review" "plan-triangulate-review"
 
 # --- Verify ---
 echo ""
 echo "Installed skills:"
-for skill in wrap take-note kick-off koji-init inspect-doc-drift duet-plan duet-impl duet-review triangulate; do
+for skill in wrap take-note kick-off koji-init inspect-doc-drift duet-plan duet-impl duet-review triangulate plan-triangulate-review; do
   if [ -f "$SKILLS_DIR/$skill/SKILL.md" ]; then
     echo "  /$skill  OK"
   else
     echo "  /$skill  FAILED" >&2
   fi
 done
+
+echo ""
+echo "Self-check (load-bearing skill markers):"
+"$KOJI_DIR/bin/koji-selfcheck" || { echo "  SELF-CHECK FAILED — a skill's load-bearing markers are missing (see above)." >&2; exit 1; }
 
 echo ""
 echo "koji is ready. Run /koji-init in any project to get started."

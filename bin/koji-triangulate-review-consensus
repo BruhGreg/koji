@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# koji-triangulate-review-consensus — decide whether two debate voices reached
+# consensus (both AGREE), for /plan-triangulate-review's autonomous auto-lock.
+#
+#   koji-triangulate-review-consensus <claude-verdict-file> <codex-verdict-file>
+#
+# Each file is a voice's debate output; the voice was told to close with a line
+# `VERDICT: AGREE` or `VERDICT: DISAGREE`. This reads the LAST VERDICT: line from
+# each file and decides:
+#   exit 0  — both voices AGREE        → auto-lock the finding
+#   exit 1  — anything else: a DISAGREE, a missing/empty/failed voice, or no
+#             verdict token            → never auto-lock (carry to another round
+#                                        or escalate)
+#
+# Safe-by-design: a missing / empty / voteless file → no token → not AGREE →
+# exit 1, so a failed or garbled voice never produces a false auto-lock. The
+# verdict is read ANCHORED to the `VERDICT:` token, so prose elsewhere on the
+# line (e.g. "...despite earlier DISAGREEMENT") cannot flip it.
+#
+# Lives in bin/ (not inline in SKILL.md) because token parsing is exactly the
+# kind of logic the skill renderer strips — render-safety. Run via bash here,
+# so this is the safe home for it.
+
+set -euo pipefail
+
+usage() { echo "usage: koji-triangulate-review-consensus <claude-file> <codex-file>" >&2; exit 2; }
+[ "$#" -eq 2 ] || usage
+
+# Read a voice's verdict, ANCHORED to the VERDICT: token. Isolate the
+# "VERDICT: <token>" span of the LAST such line, then read the token from that
+# span ONLY — so "VERDICT: AGREE despite DISAGREEMENT" reads AGREE, and
+# "I AGREE, so VERDICT: DISAGREE" reads DISAGREE. Empty if no verdict / no file.
+_verdict() {
+  f="$1"
+  [ -f "$f" ] || { printf '%s' ""; return; }
+  tok="$(grep -ioE 'VERDICT:[[:space:]]*(AGREE|DISAGREE)' "$f" 2>/dev/null \
+         | tail -n 1 \
+         | grep -ioE '(AGREE|DISAGREE)' \
+         | tail -n 1)"
+  printf '%s' "$tok" | tr '[:lower:]' '[:upper:]'
+}
+
+C_CLAUDE="$(_verdict "$1")"
+C_CODEX="$(_verdict "$2")"
+
+if [ "$C_CLAUDE" = "AGREE" ] && [ "$C_CODEX" = "AGREE" ]; then
+  echo "consensus: both AGREE"
+  exit 0
+fi
+echo "split: claude=${C_CLAUDE:-NONE} codex=${C_CODEX:-NONE}"
+exit 1

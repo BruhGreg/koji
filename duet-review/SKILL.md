@@ -36,11 +36,12 @@ echo "Session: $SESSION_DIR"
 
 - **Base ref for the diff** → `BASE`. By default the base auto-detects (origin/HEAD, then main, then master). If the user names a base ("review against develop", "diff from the release branch", "base is v1.2"), set `BASE` to that ref.
 - **Review only staged changes** → `STAGED`. By default the review spans `base..HEAD`. If the user wants the staged diff only ("just the staged changes", "review what's staged", "only the index"), set `STAGED=1` (this ignores `BASE`).
+- **Review the working tree (uncommitted)** → `WORKTREE`. By default the review spans `base..HEAD` — committed only. If the user wants the uncommitted working-tree changes ("review my working tree", "review uncommitted changes", "review the working tree since `<sha>`"), set `WORKTREE=1` and optionally `SINCE` to the floor ref (default `HEAD`). This ignores `BASE` and `STAGED`. This is the scope `/duet-impl`'s final review uses — its cumulative work lives uncommitted in the working tree (`HEAD` never moves during the walk).
 - **Verdict only, no auto-apply** → `NO_AUTO_APPLY`. By default consensus mechanical fixes prompt the 4-choice apply menu. If the user wants the report without any apply prompt ("no auto-apply", "just the verdict", "report only, don't touch my files", "don't apply anything"), set `NO_AUTO_APPLY=1` — the apply step is skipped and the verdict is emitted as-is. (A required cross-review still runs first; see Step 5.)
 
 **Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens). Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick review", "lighter pass", "use high effort", "save tokens", "fast check". Don't downgrade for "the diff looks small" or similar heuristics; only on explicit user signal. Claude inherits the parent session's effort level — set `/effort max` once before running if you want max-tier Claude reviewer.
 
-**Claude reviewer depth: single pass (default) vs angle fan-out (max effort)** → `REVIEW_MODE`. Reviewer A normally runs as ONE holistic pass (`REVIEW_MODE=single`). At `/effort max` — or when the invocation phrase explicitly asks for a full/deep review ("full review", "fan out", "all angles", "deep review") — set `REVIEW_MODE=fanout`: Reviewer A instead fans out into 5 focused angle reviewers that the main agent consolidates (Step 2b fan-out → Step 2e). This is Claude-side only and orthogonal to codex's `xhigh`/`high` knob. It roughly 5×'s the Claude-side cost, so it is gated like every other knob here — read from intent, not a flag — and a "quick review" / "lighter pass" / "save tokens" phrase forces `single` even at max effort. The decision is set at the top of Step 2; single pass is the preserved lightest tier.
+**Claude reviewer depth: single pass (default) vs angle fan-out (max effort)** → `REVIEW_MODE`. Reviewer A normally runs as ONE holistic pass (`REVIEW_MODE=single`). At `/effort max` — or when the invocation phrase explicitly asks for a full/deep review ("full review", "fan out", "all angles", "deep review") — set `REVIEW_MODE=fanout`: Reviewer A instead fans out into 5 focused angle reviewers that the main agent consolidates (Step 2b fan-out → Step 2e). This is Claude-side only and orthogonal to codex's `xhigh`/`high` knob. It roughly 5×'s the Claude-side cost, so it is gated like every other knob here — read from intent, not a flag — and a "quick review" / "lighter pass" / "save tokens" phrase forces `single` even at max effort. The decision is set at the top of Step 2; single pass is the preserved lightest tier. When `/duet-impl` invokes this skill for its **final review**, treat it as a full review: at `/effort max` run `fanout` — that final pass is meant to be the 5-angle review, never a single pass.
 
 ---
 
@@ -56,15 +57,35 @@ DIFF_FILE="$RUN_DIR/diff.patch"
 # the reads below run cleanly under set -u even when no intent was signalled.
 BASE="${BASE:-}"                     # base ref for the diff (auto-detected below if empty)
 STAGED="${STAGED:-}"                 # "1" → review the staged diff only
+WORKTREE="${WORKTREE:-}"             # "1" → review uncommitted working-tree changes (ignores BASE/STAGED)
+SINCE="${SINCE:-}"                   # floor ref for WORKTREE mode (default HEAD)
 NO_AUTO_APPLY="${NO_AUTO_APPLY:-}"   # "1" → skip the apply prompt, emit verdict only (Step 5)
 
-if [ -z "$BASE" ] && [ "$STAGED" != "1" ]; then
+if [ "$WORKTREE" != "1" ] && [ -z "$BASE" ] && [ "$STAGED" != "1" ]; then
   BASE=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|origin/||')
   [ -z "$BASE" ] && BASE=$(git for-each-ref --format='%(refname:short)' refs/heads/main refs/heads/master 2>/dev/null | head -1)
   [ -z "$BASE" ] && BASE="main"
 fi
 
-if [ "$STAGED" = "1" ]; then
+if [ "$WORKTREE" = "1" ]; then
+  # Uncommitted working-tree review (used by /duet-impl, whose work is never
+  # committed). SINCE floors the diff — default HEAD; /duet-impl passes its
+  # session START_SHA (== HEAD, since it never commits).
+  SINCE="${SINCE:-HEAD}"
+  HEAD_SHA=$(git rev-parse --verify HEAD 2>/dev/null) || { echo "ERROR: no commits to review"; exit 1; }
+  # Validate SINCE up front — WORKTREE is the one mode that takes a user-typed
+  # ref. A bad ref would otherwise make `git diff` fail, the error get swallowed,
+  # and the empty diff read as a false "nothing to review". Surface it loudly.
+  git rev-parse --verify "$SINCE^{commit}" >/dev/null 2>&1 || { echo "ERROR: bad SINCE ref: $SINCE"; exit 1; }
+  git diff "$SINCE" -- > "$DIFF_FILE"   # '--' disambiguates ref-vs-path; no 2>/dev/null so real failures surface
+  BASE="$SINCE"   # label only — feeds the synthesizer's --base
+  echo "Scope: working tree since $SINCE (HEAD $HEAD_SHA)"
+  # Untracked files are NOT in `git diff` until staged — warn so an unstaged new
+  # file isn't silently unreviewed (/duet-impl stages with `git add -A` first).
+  if [ -n "$(git ls-files --others --exclude-standard | head -1)" ]; then
+    echo "WARN: untracked files exist and are NOT in this review — 'git add -A' to include them."
+  fi
+elif [ "$STAGED" = "1" ]; then
   git diff --cached > "$DIFF_FILE"
   echo "Scope: staged diff"
 else

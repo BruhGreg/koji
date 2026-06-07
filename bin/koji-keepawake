@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # koji-keepawake — opt-in sleep prevention for long, unattended koji skill runs.
 #
-# Used by /duet-plan and /duet-impl, and by the /plan-eng-review × /triangulate
-# review composition (see references/review-composition.md), to keep the machine
-# awake while background AI dispatches run, so the user can walk away. (Lone
-# /triangulate does NOT call this — it's interactive; see its Step 1.) Spawns
+# Used by /duet-plan and /duet-impl, and by the autonomous /plan-triangulate-review
+# skill, to keep the machine awake while background AI dispatches run, so the user
+# can walk away. (Lone /triangulate does NOT call this — it's interactive; see its
+# Step 1.) Spawns
 # `caffeinate -i` (Darwin) / `systemd-inhibit` (Linux) at the start of a run and
 # tears it down at the end.
 #

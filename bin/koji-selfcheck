@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# koji-selfcheck — static drift-lint for a skill's load-bearing markers.
+#
+#   koji-selfcheck [skill-name]      (default: plan-triangulate-review)
+#
+# Asserts that a koji skill's SKILL.md still contains the verbatim prose markers
+# that encode its contract. This is a static lint (fixed-string grep), NOT a
+# behavioral test: if an edit guts a marker — removes the round cap, softens the
+# triage rule, drops the gstack-override note — it fails LOUD instead of letting
+# the skill silently drift. Wired into `setup` so a degraded skill cannot install
+# quietly.
+#
+# The default target is plan-triangulate-review: its autonomous loop already
+# regressed once while it lived as loose prose, so the markers exist precisely so
+# that can't happen again. Exit 0 if all present; exit 1 listing each missing one.
+
+set -euo pipefail
+
+KOJI_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SKILL="${1:-plan-triangulate-review}"
+FILE="$KOJI_DIR/$SKILL/SKILL.md"
+
+if [ ! -f "$FILE" ]; then
+  echo "koji-selfcheck: SKILL.md not found: $FILE" >&2
+  exit 1
+fi
+
+# Load-bearing markers, per skill. Each MUST appear verbatim in the SKILL.md;
+# they double as the human-readable contract and the lint target. Authoring a
+# marker into the prose and asserting it here are two halves of one guard.
+case "$SKILL" in
+  plan-triangulate-review)
+    MARKERS=(
+      "consensus (both AGREE) auto-locks"
+      "hard round cap = 3"
+      "Debate is the exception, not the default"
+      "Stream per finding"
+      "substitutes ONE end-of-run ratification"
+      "big-picture lens"
+      "from finding #1"
+      "nothing is written to the plan until you ratify"
+    )
+    ;;
+  *)
+    echo "koji-selfcheck: no markers defined for '$SKILL' — nothing to check."
+    exit 0
+    ;;
+esac
+
+MISSING=0
+for m in "${MARKERS[@]}"; do
+  if ! grep -qF -- "$m" "$FILE"; then
+    echo "MISSING MARKER: $m"
+    MISSING=1
+  fi
+done
+
+if [ "$MISSING" = "1" ]; then
+  echo "koji-selfcheck: $SKILL FAILED — load-bearing markers missing (see above)." >&2
+  exit 1
+fi
+echo "koji-selfcheck: $SKILL OK (${#MARKERS[@]} markers present)"
+exit 0

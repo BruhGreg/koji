@@ -334,7 +334,7 @@ Read these files and internalize the content — do NOT dump them back to the us
 
 1. `$DOCS_PATH/AI_HANDOFF.md` — project state, architecture rules, gotchas
 2. `$TODO_PATH` — open tasks, tech debt, blockers (if `$HAS_TODO` is `true`)
-3. **Lessons (focus-filtered).** Prefer the focus-filtered candidate set via the helper; for a small `lessons.md` (≤ ~40 entries) you may read it directly and judge relevance yourself — the pre-filter is an optimization for large corpora, not a wall. Derive a focus string from (a) the user-provided focus arg if any, (b) the last session's "Notes for Next Session" field (read from `$DOCS_PATH/agent-session.md`), and (c) the first 3 open items in `$TODO_PATH` if `$HAS_TODO`. Concatenate with spaces:
+3. **Lessons (focus-filtered).** Prefer the focus-filtered candidate set via the helper; for a small `lessons.md` (≤ ~40 entries) you may read it directly and judge relevance yourself — the pre-filter is an optimization for large corpora, not a wall. Derive a focus string from (a) the user-provided focus arg if any, (b) the last session's "Notes for Next Session" field (read from `$DOCS_PATH/agent-session.md`), (c) the first 3 open items in `$TODO_PATH` if `$HAS_TODO`, and (d) the **active-plan slugs** — the session's current work, which Notes/TODO often miss (the same blind spot 2b's plan auto-load exists to cover). Concatenate with spaces:
 
    ```bash
    # The Notes-block + top-of-TODO derivation lives in koji-doc-status
@@ -354,6 +354,19 @@ Read these files and internalize the content — do NOT dump them back to the us
    FOCUS_EXTRA=$(~/.claude/skills/koji/bin/koji-doc-status --kickoff-focus "$DOCS_PATH/agent-session.md" "$TODO_ARG" 2>/dev/null)
    FOCUS_EXIT=$?
    FOCUS="$FOCUS$FOCUS_EXTRA"
+   # (d) Fold active-plan slugs into FOCUS — the session's current work, and the
+   # dynamic part of LOKO (active plans auto-flow into Load-on-Kick-Off during
+   # their lifecycle). Notes/TODO often miss them, leaving the lessons filter
+   # blind to the active plan exactly when 2b's plan auto-load has to rescue it.
+   # Hyphens → spaces so slug words match lesson tokens. Render-safe: named-var
+   # read, no $N field refs (same pattern as 2b's records walk). 2b re-fetches
+   # these records independently in its own block (cheap, read-only) — bash vars
+   # do not survive across steps, so each block fetches what it needs.
+   PLAN_SLUGS=""
+   while IFS=$'\t' read -r ap_path ap_rest; do
+     [ -n "$ap_path" ] && PLAN_SLUGS="$PLAN_SLUGS $(basename "$ap_path" .md | tr '-' ' ')"
+   done <<< "$(~/.claude/skills/koji/bin/koji-plans-research --filter active-plan 2>/dev/null || true)"
+   FOCUS="$FOCUS $PLAN_SLUGS"
    LESSONS=$(~/.claude/skills/koji/bin/koji-doc-status --lessons-relevant --focus "$FOCUS" --limit 40 2>/dev/null)
    LESSONS_EXIT=$?
    ```

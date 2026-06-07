@@ -11,6 +11,7 @@ allowed-tools:
   - AskUserQuestion
   - TaskCreate
   - TaskUpdate
+  - Skill(duet-review)
 ---
 
 # /duet-impl
@@ -249,6 +250,14 @@ After all segments are processed (or a `FROM_GATE` resume reaches the end), the 
 
 The two sub-steps share `$RUN_DIR/final-diff.patch` (cumulative `$START_SHA..HEAD` diff). Whichever runs first writes it; the other reuses. Alongside the patch, the first writer also captures `$RUN_DIR/final-diff.numstat` — the `koji-diff-numstat "$START_SHA"` add/delete counts at the **final-review snapshot**, BEFORE Step 4 reconciliation and Step 5 convention-doc edits land. Step 6's code-delta ratio reads this snapshot so it measures the reviewed code, not the later bookkeeping edits.
 
+**Stage the cumulative work first — once, here.** Before any diff is computed, stage everything so a single, complete change-set feeds the promise audit, the code-delta numstat, AND the final `/duet-review`. Untracked new files are invisible to `git diff` until staged, and the review must see them:
+
+```bash
+git add -A   # one staging point; /wrap commits the staged tree later
+```
+
+This makes `final-diff.patch` (3a) and the `/duet-review` WORKTREE scope (3b) describe the **same** set — new files included — so the Step 6 ratio matches exactly what was reviewed.
+
 ### Step 3a — Promise audit
 
 ```bash
@@ -307,7 +316,14 @@ else
 fi
 ```
 
-For MVP, the agent invokes `/duet-review` as the next action (not via subprocess) — user-visible behavior is one continuous run ending with the verdict. When `/duet-review` finishes, **capture the `Output JSON:` path** from its Step 6 summary (its `verdict.json`) — Step 5 reads the final review's `codebase-fit` findings from that file.
+**Invoke the real `/duet-review` skill — do not hand-roll it.** Use the **Skill tool** (`skill: duet-review`) so its `SKILL.md` actually loads into context; the loaded skill owns the reviewer machinery (codex + the Claude angle fan-out, synthesis, cross-review). Do **NOT** rebuild the review from memory with `Agent`/`Bash` — that path silently drops the Claude-side fan-out (Reviewer A runs 1 agent instead of 5). `Skill(duet-review)` is pre-approved in this skill's `allowed-tools`, so the invocation won't stall on a mid-run permission prompt.
+
+Hand it the right **scope** and **depth** in the invocation phrase:
+
+- **Scope → the working tree.** Phrase it as *"review the working tree since `<START_SHA>`"* so `/duet-review` runs in `WORKTREE` mode (`SINCE=$START_SHA`), NOT its default `BASE...HEAD` (which is committed-only and wrong here — `/duet-impl` never commits, so `HEAD == $START_SHA`). `git diff $START_SHA == git diff HEAD ==` the cumulative work. The work was already staged at the top of Step 3, so new files are in scope.
+- **Depth → fan-out at max effort.** This is the *comprehensive* final review: at `/effort max` it must run the 5-angle fan-out (`REVIEW_MODE=fanout`), not `single`. Say so in the invocation ("full review / all angles") so the loaded skill doesn't default to a single pass.
+
+User-visible behavior is one continuous run ending with the verdict. When `/duet-review` finishes, **capture the `Output JSON:` path** from its Step 6 summary (its `verdict.json`) — Step 5 reads the final review's `codebase-fit` findings from that file.
 
 ## Step 4 — Plan reconciliation
 

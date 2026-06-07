@@ -1,5 +1,5 @@
 ---
-description: "Multi-side debate on one question — Claude + codex argue in parallel, iterate across rounds as needed to converge. You synthesize the call. Web research per voice. Also runs per-finding inside a finding-by-finding plan review (e.g. /plan-eng-review) to harden each finding via cross-model debate before you lock it."
+description: "Multi-side debate on one question — Claude + codex argue in parallel, iterate across rounds as needed to converge. You synthesize the call. Web research per voice."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools:
@@ -28,32 +28,6 @@ Examples:
 - "triangulate the click-nav hook design"
 
 Don't auto-invoke on generic "let's decide" / "help me think this through" — those should keep using `/duet-plan` (for multi-round consensus) or just normal conversation.
-
-## Composing with a review skill (e.g. /plan-eng-review)
-
-`/triangulate` can run **per finding inside a finding-by-finding plan review** —
-`/plan-eng-review`, `/plan-devex-review` — to harden each architectural call with
-cross-model debate before you lock it. The review skill stays the primary workflow and is
-**unmodified** (it's gstack's); koji composes from the outside.
-
-Trigger: the user invokes the review **"with /triangulate"** (e.g. *"/plan-eng-review the
-locked plan with /triangulate"*). The review surfaces findings one at a time as usual;
-instead of answering its plain decision-prompt for a finding, you run a triangulate on that
-finding and let **its** lock-AUQ be the decision gate, then fold the result into the plan
-and move to the next finding. Because the review runs inline and you invoke `/triangulate`
-at the first finding, this guidance loads then and governs the rest (re-invoking per finding
-keeps it resilient to compaction).
-
-Two adaptations matter; the full loop is in the reference:
-- **Big-picture lens** baked into the voice prompts from finding #1 — enumerate the plan's
-  named downstream phases and ask whether any *absorbs* (makes this moot) or *flips* it.
-- **Cost guard + cadence** — show an up-front estimate (findings × voices × rounds) and
-  checkpoint between review sections. Opt-in; never auto-triggered.
-
-Applies to reviews that surface **discrete findings sequentially**, not holistic ones
-(`/plan-ceo-review`, `/plan-design-review`). Full per-finding loop, voice-prompt template,
-round-2 escape hatch, optional red-team stage, and write-back:
-**[references/review-composition.md](references/review-composition.md)**.
 
 ## Preamble
 
@@ -133,8 +107,8 @@ echo "Round limit: $ROUND_LIMIT, effort: $EFFORT"
 
 # No keep-awake here: lone /triangulate is interactive — it hands you the lock
 # decision at the end, like /duet-review — so the machine stays active while you
-# work. The /plan-eng-review composition, which walks many findings unattended,
-# holds its OWN keep-awake for the whole walk (see references/review-composition.md).
+# work. (The autonomous /plan-triangulate-review skill, which walks many findings
+# unattended, holds its OWN keep-awake for the whole walk.)
 ```
 
 ## Step 2 — Round 1 dispatch (both voices in parallel, background)
@@ -341,7 +315,7 @@ After the user picks "Lock the decision" in Step 3, the synthesis needs a home. 
 
 > **Is this triangulation a sub-decision of an existing doc?**
 
-- **Yes — there is a clear anchor doc.** Signals: a review (e.g. `/plan-eng-review`) surfaced this question *from* a specific doc; the conversation has been iterating on a specific plan/research doc; the user explicitly tied the question to a doc. → **Branch A.**
+- **Yes — there is a clear anchor doc.** Signals: a review or planning pass surfaced this question *from* a specific doc; the conversation has been iterating on a specific plan/research doc; the user explicitly tied the question to a doc. → **Branch A.**
 - **No, or unclear.** Signals: no doc is in play; a doc merely *exists* in `.koji/plans/` but this synthesis is not a sub-decision of it; the question is topically near a doc without being part of it; two or more docs are plausible and none clearly wins. → **Branch B.**
 
 The bar for "anchored" is high — only a doc your recent context **clearly names**. Any doubt resolves to Branch B. This is deliberate: Branch B always prompts, so an unanchored synthesis is never silently dropped — the worst case is one prompt you did not strictly need, never a lost decision.
@@ -689,6 +663,7 @@ Saved to: <folded into <anchor> | <new plan/research file> | in-session only>
 
 - `/duet-plan` — multi-round agent consensus (closer to "let the agents figure it out and lock a plan")
 - `/duet-review` — two-AI code review (closer to "vet a diff with cross-model perspectives")
+- `/plan-triangulate-review` — autonomous per-finding hardening of a locked plan; reuses this debate *method* + `bin/koji-triangulate-persist` (it does not invoke `/triangulate`)
 - `.koji/plans/` and `.koji/research/` — destination directories for `--save-as`
 - Plans/research status workflow: `bin/koji-plans-research`
 - Persistence primitives (slug, decisions-merge): `bin/koji-triangulate-persist`

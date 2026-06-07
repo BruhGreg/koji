@@ -4,7 +4,7 @@ Repo-local memory layer for AI coding agents. Like a fermentation starter — se
 
 AI coding agents forget. Every new chat starts cold — yesterday's decisions, fixes, and gotchas don't survive. koji writes project state into plain markdown in your repo, so the next session (and the next agent) reads it and picks up where you left off.
 
-Nine skills covering session lifecycle, doc-drift tracking, and adversarial cross-model planning/review. Pure bash + markdown, no build step.
+Ten skills covering session lifecycle, doc-drift tracking, and adversarial cross-model planning/review. Pure bash + markdown, no build step.
 
 ## Install
 
@@ -59,7 +59,7 @@ TODO.md                      # task tracking
 |-------|-------------|
 | `/duet-plan` | Multi-round Claude↔codex planning dialogue. Locks plan to `$DOCS_PATH/plans/<slug>.md` on consensus |
 | `/duet-impl` | Walks a locked plan gate-by-gate, tracking progress as a task list. Implements each phase, codex single-reviews at `<!-- gate: NAME -->`, runs `/duet-review` at the end |
-| `/duet-review` | 2-reviewer adversarial code review. Claude + codex run in parallel as **background tasks** — keep working while they run — cross-review on disagreement, prompt to apply high-confidence fixes |
+| `/duet-review` | 2-reviewer adversarial code review. Claude + codex run in parallel as **background tasks** — keep working while they run — cross-review on disagreement, prompt to apply high-confidence fixes. Scopes `base..HEAD`, staged, or the uncommitted **working tree** |
 
 All duet skills follow the [agent-autonomy principle](references/agent-autonomy.md): agents resolve technical questions together; users see prompts only for deadlocks and policy choices.
 
@@ -70,6 +70,12 @@ All duet skills follow the [agent-autonomy principle](references/agent-autonomy.
 | `/triangulate` | Claude + codex argue in parallel on one question with web research per voice. You synthesize the call. Optional save to `.koji/plans/` or `.koji/research/`, or update an existing plan — picked conversationally based on what's active in the project |
 
 Different shape from `/duet-*`: where the duet skills converge AI voices to consensus, `/triangulate` keeps **you** as a third reference point and the synthesizer.
+
+**Plan hardening** — autonomous cross-model review of a locked plan (requires gstack and codex).
+
+| Skill | What it does |
+|-------|-------------|
+| `/plan-triangulate-review` | Drives gstack's `/plan-eng-review` inline over a locked plan; triages each finding and runs a Claude↔codex debate only on the contentious ones (auto-locks on consensus, hard 3-round cap), then one erratum ratifies. Lean by design — not a fan-out. Explicit invocation only |
 
 ## Configuration
 
@@ -102,9 +108,11 @@ Global preferences (`commit_strategy`, `auto_update`) live in `~/.config/koji/co
 
 **Dead-code sweep.** `/duet-review` and `/duet-impl` gate reviewers actively flag code paths the diff makes unreachable — superseded helpers, dead branches, never-called arms — as `deadcode` findings. Carve-outs cover test scaffolding, generated files, and forward-compat / migration-bridge code so additive substrate phases pass cleanly. `/duet-impl`'s end-of-run report also surfaces a code-delta ratio (e.g. `+2310 / −267 (ratio 8.6:1)`) alongside the promise audit — a substrate-vs-refactor meta-signal that pairs with the deadcode findings.
 
-**Triangulation (`/triangulate`).** When you want multi-side debate but YOU should be the synthesizer (not the agents): Claude + codex argue in parallel on one question with web research per voice, present their positions, and you weigh and decide. Optional save to `.koji/plans/` or `.koji/research/`, or append a synthesis section to an existing plan — picked conversationally based on what's active in the project. It also **composes with a finding-by-finding plan review** (e.g. `/plan-eng-review`): invoke the review *with* `/triangulate` and each finding gets hardened by a cross-model debate — carrying a downstream-absorb lens, plus an optional red-team pass over the review's outside voice — before you lock it.
+**Triangulation (`/triangulate`).** When you want multi-side debate but YOU should be the synthesizer (not the agents): Claude + codex argue in parallel on one question with web research per voice, present their positions, and you weigh and decide. Optional save to `.koji/plans/` or `.koji/research/`, or append a synthesis section to an existing plan — picked conversationally based on what's active in the project. For *autonomous* per-finding hardening of a locked plan, that loop is now its own skill — **`/plan-triangulate-review`** (below); lone `/triangulate` stays a pure one-question engine.
 
-**Walk-away sessions.** `/duet-plan` and `/duet-impl` — plus `/triangulate` when composed into a finding-by-finding plan review — keep the machine awake (`caffeinate` / `systemd-inhibit`) while their background AI dispatches run, then release it at the end, so you can start a long run and step away. (Lone `/triangulate` is interactive — it hands you each decision — so it skips keep-awake, like `/duet-review`.) Opt-in only (never plain `/kick-off`); reference-counted so overlapping runs share one keep-awake, and ownership-safe — a keep-awake you started yourself is never touched.
+**Plan hardening (`/plan-triangulate-review`).** Autonomous, lean cross-model hardening of a *locked* plan. Drives gstack's `/plan-eng-review` inline; per finding it triages — refute or record most by reading the source, debate only the genuinely contentious ones (Claude↔codex, auto-lock on consensus, hard 3-round cap). One end-of-run erratum ratifies the decisions, cross-model concessions, and anything still split. Explicit invocation only; requires gstack and codex. The reference run hardened a locked ADR in 4 model calls — a triage loop, not a fan-out.
+
+**Walk-away sessions.** `/duet-plan`, `/duet-impl`, and `/plan-triangulate-review` keep the machine awake (`caffeinate` / `systemd-inhibit`) while their background AI dispatches run, then release it at the end, so you can start a long run and step away. (Lone `/triangulate` is interactive — it hands you each decision — so it skips keep-awake, like `/duet-review`.) Opt-in only (never plain `/kick-off`); reference-counted so overlapping runs share one keep-awake, and ownership-safe — a keep-awake you started yourself is never touched.
 
 **Plans + research working docs.** `.koji/plans/` (decided work, ready to implement) and `.koji/research/` (investigation findings, pending validation). Research files are topic-addressable — new findings accumulate into existing topic-files (`## Decisions` newest-first) rather than spawning parallel session-named files. Lightweight YAML frontmatter (`status:` field, kind-aware: pending/in-progress/completed/archived for plans, unvalidated/validated/archived for research). `/kick-off` surfaces pending entries; `/duet-impl` marks plans `completed` at end of run; `koji-plans-research --set-status <path> <new>` mutates from the command line. Drift-exempt (not code-coverage docs).
 
@@ -114,6 +122,7 @@ The README is intentionally short. SKILL.md files have the details:
 - [`kick-off/SKILL.md`](kick-off/SKILL.md), [`wrap/SKILL.md`](wrap/SKILL.md), [`take-note/SKILL.md`](take-note/SKILL.md), [`koji-init/SKILL.md`](koji-init/SKILL.md), [`inspect-doc-drift/SKILL.md`](inspect-doc-drift/SKILL.md)
 - [`duet-plan/SKILL.md`](duet-plan/SKILL.md), [`duet-impl/SKILL.md`](duet-impl/SKILL.md), [`duet-review/SKILL.md`](duet-review/SKILL.md)
 - [`triangulate/SKILL.md`](triangulate/SKILL.md) — Claude + codex + you = 3 reference points on one decision
+- [`plan-triangulate-review/SKILL.md`](plan-triangulate-review/SKILL.md) — autonomous per-finding hardening of a locked plan (drives `/plan-eng-review` + per-finding debate)
 - [`references/agent-autonomy.md`](references/agent-autonomy.md) — shared principle for the duet skills
 
 ## FAQ
