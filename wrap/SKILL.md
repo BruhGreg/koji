@@ -94,7 +94,24 @@ If project state or architecture rules changed (new decisions, gotchas, phase ch
 
 Review the session for task-related changes: completed work, new tasks discovered, new tech debt, changed blockers.
 
-**If nothing task-related changed this session**, skip this step entirely.
+**Run the completion-reconcile check first** — it is deterministic and runs even when you think nothing changed, so shipped work can no longer silently miss the archive:
+
+```bash
+if [ "$HAS_TODO" = "true" ] && [ "$TODO_COMPLETED" = "archive" ]; then
+  UNARCHIVED=$(grep -nE '^[[:space:]]*([-*]|[0-9]+[.)])[[:space:]]+(\[[xX]\]|✅|DONE[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2})' "$TODO_PATH" 2>/dev/null | grep -viE '\[archived[^]]*\][[:space:]]*$' || true)
+  UNARCHIVED_COUNT=$(printf '%s' "$UNARCHIVED" | grep -c '[^[:space:]]' || true)
+  [ "${UNARCHIVED_COUNT:-0}" -gt 0 ] && printf '%s\n' "$UNARCHIVED"
+  echo "Unarchived completed items: ${UNARCHIVED_COUNT:-0}"
+fi
+```
+
+`archive` mode moves a completed item *out* to `COMPLETED_TASKS.md`, so a done-marked list item still in `$TODO_FILE` without a trailing `[archived]` tag is unreconciled. (`inline` mode keeps completed items in-file by design, so the check no-ops — and koji's own default is `inline`.)
+
+The grep is a **best-effort hint, not the authority**: it catches checkbox-style markers (`- [x]`, `1. [x]`, `✅`, `DONE <date>`) but will miss prose-status TODOs (e.g. the default template's `**Status**: Done`) and isn't section-aware. So in `archive` mode the floor is an explicit check, not the count:
+
+- **In `archive` mode you may not finish this step without confirming archival from your own memory of what shipped this session** — not just the grep. Close with one line: `archived N` or `nothing to archive`.
+- Each item you archive (grep-flagged or found yourself): write its summary per the `archive` rule below, or — if it isn't truly done (e.g. merged-vs-still-on-`develop` ambiguity) — log a one-line defer reason. Ignore anything already under a `## Completed` / `## Done` heading — that's the archive area, not unreconciled work.
+- Skip the rest of this step only when there's genuinely no completed work **and** nothing else task-related changed this session. Otherwise continue below — `inline` mode skips the archive reconcile but still marks completed items and updates tasks. (In `archive` mode, still emit the one-line confirmation above before skipping.)
 
 **If task-related changes exist:**
 
@@ -103,7 +120,7 @@ Review the session for task-related changes: completed work, new tasks discovere
    - Add new tasks or tech debt discovered during the session
    - For completed tasks:
      - **If `$TODO_COMPLETED` is `inline`:** move to `## Completed` section, add `(YYYY-MM-DD)`
-     - **If `$TODO_COMPLETED` is `archive`:** move to `$DOCS_PATH/COMPLETED_TASKS.md` (create if needed, with header: `> Archive of completed work. For active work, see [TODO.md](../TODO.md).`), remove from TODO file
+     - **If `$TODO_COMPLETED` is `archive`:** author a summary into `$DOCS_PATH/COMPLETED_TASKS.md` (create if needed, with header: `> Archive of completed work. For active work, see [TODO.md](../TODO.md).`), then **remove the item from `$TODO_FILE`** — *unless* it belongs to an open milestone batch whose done items give context to the still-open ones; then keep it inline and append the exact literal `[archived]` at the **end** of its line (no date or text inside the brackets — those go in the summary; the reconcile check only honors a trailing `[archived]`). Author the summary (mechanism, gates, the numbers that matter, a plan pointer) — don't just copy the TODO line.
    - Do NOT rewrite unchanged sections.
 
 2. **If `$HAS_TODO` is `false`:** This project doesn't have a TODO file yet. Create one at the **project root** (`$PROJECT_ROOT/$TODO_FILE`):
@@ -112,6 +129,12 @@ Review the session for task-related changes: completed work, new tasks discovere
    - If `$DOCS_PATH/AI_HANDOFF.md` contains roadmap items, task lists, or "Blocked On" sections, migrate them into the new TODO file and remove them from the handoff (keeps handoff under ~80 lines)
    - Update `AI_HANDOFF.md` header to link to the new TODO file
    - Tell the user: `Created $TODO_FILE at project root — task tracking is now separate from the handoff.`
+
+**Flip status on shipped work — run this whenever a plan or research doc's work shipped this session, even if no TODO line changed** (a plan can ship without a TODO edit). Step 2c *reads* plan status but never *sets* it — close that gap here:
+
+- `~/.claude/skills/koji/bin/koji-plans-research --filter active` lists active plans **and** research (tab-separated; field 1 is the path, field 2 is `plan` or `research`).
+- For each **plan** whose work shipped: `~/.claude/skills/koji/bin/koji-plans-research --set-status <path> completed`. Whether it shipped is your judgment; the helper does the write; the file stays in place (the archive points *at* it — only the `status:` field flips).
+- For each **research** doc whose validation condition clearly fired this session: `~/.claude/skills/koji/bin/koji-plans-research --set-status <path> validated`. If it's ambiguous, leave it and note it. No auto-validation on a hunch.
 
 ---
 
