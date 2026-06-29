@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # koji-selfcheck — static drift-lint for a skill's load-bearing markers.
 #
-#   koji-selfcheck [skill-name]      (default: plan-triangulate-review)
+#   koji-selfcheck [skill-name]      (no arg: check every skill with markers)
 #
 # Asserts that a koji skill's SKILL.md still contains the verbatim prose markers
 # that encode its contract. This is a static lint (fixed-string grep), NOT a
@@ -10,14 +10,30 @@
 # the skill silently drift. Wired into `setup` so a degraded skill cannot install
 # quietly.
 #
-# The default target is plan-triangulate-review: its autonomous loop already
-# regressed once while it lived as loose prose, so the markers exist precisely so
-# that can't happen again. Exit 0 if all present; exit 1 listing each missing one.
+# A no-arg run checks every skill listed in ALL_WITH_MARKERS below — the single
+# source of truth `setup` relies on. Each contract here regressed at least once
+# while it lived as loose prose (plan-triangulate-review's autonomous loop; the
+# duet cross-review gate), so the markers exist precisely so that can't recur.
+# Exit 0 if all present; exit 1 listing each missing one.
 
 set -euo pipefail
 
 KOJI_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SKILL="${1:-plan-triangulate-review}"
+
+# Skills that carry load-bearing markers (defined in the case below). A no-arg
+# run checks them ALL; adding a newly-pinned skill here is all it takes to wire
+# it into install-time lint (setup calls this script with no argument).
+ALL_WITH_MARKERS=(plan-triangulate-review duet-review duet-impl)
+
+if [ -z "${1:-}" ]; then
+  rc=0
+  for s in "${ALL_WITH_MARKERS[@]}"; do
+    "$0" "$s" || rc=1
+  done
+  exit "$rc"
+fi
+
+SKILL="$1"
 FILE="$KOJI_DIR/$SKILL/SKILL.md"
 
 if [ ! -f "$FILE" ]; then
@@ -39,6 +55,19 @@ case "$SKILL" in
       "big-picture lens"
       "from finding #1"
       "nothing is written to the plan until you ratify"
+    )
+    ;;
+  duet-review)
+    MARKERS=(
+      "before you assess, triage, or apply ANY finding"
+      "There is no verdict without the synthesizer"
+      "Fan-out priming trap"
+    )
+    ;;
+  duet-impl)
+    MARKERS=(
+      "Verify the embedded review actually ran its cross-review"
+      "caller-side structural backstop"
     )
     ;;
   *)

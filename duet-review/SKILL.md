@@ -258,6 +258,13 @@ If `ANGLES_DONE=0`, confirm the angle you just collected and return control (the
 
 **Proceed to Step 3 only after `$RUN_DIR/codex.json` AND `$RUN_DIR/claude.json` both exist** (in fan-out mode `claude.json` is produced by Step 2e, below). codex and the Claude side run independently; whichever finishes last trips Step 3. If something is still running when you're re-invoked by another notification, just confirm what finished and return control again — the next notification re-invokes you.
 
+> **STOP — the synthesizer is the gate; do not triage by hand.** With both files written, your ONLY next action is **Step 3** (`koji-duet-synthesize`). **You MUST run `koji-duet-synthesize` before you assess, triage, or apply ANY finding.** Reading the raw findings and deciding what to fix yourself — skipping Step 3 — is the single most common failure of this skill. It is not a faster path to the same verdict; it is a *different, worse* one:
+>
+> - The synthesizer computes `high_consensus` — **which findings both reviewers actually agree on.** Hand-triage fabricates that judgment from one model reading the other's output.
+> - The synthesizer arms the cross-review gate (`cross_review_required`). Skip it and a reviewer-exclusive HIGH — exactly the case where one model flags a bug the other cleared — ships on a single model's word, with no second-model check. That cross-review is the whole reason this skill runs two reviewers.
+>
+> **There is no verdict without the synthesizer.** Do not write a summary, do not open the Edit tool, do not "just apply the obvious ones." Run Step 3.
+
 ### 2e. Consolidate angle findings (fan-out mode only)
 
 **Skip this step entirely in single mode** — `claude.json` already exists from Step 2d.
@@ -272,9 +279,13 @@ echo "claude.json: consolidated from 5 angles → $(python3 -c "import json; pri
 
 Then fall through to Step 3 exactly as single mode does — `claude.json` now exists and the Step 3 gate passes.
 
+> **Fan-out priming trap.** You just hand-consolidated five angles in 2e — that was the **last** manual-judgment step in this run. 2e produces `claude.json`; it does **not** decide what to fix. Do not let "I already did the synthesis myself" bleed into hand-triaging the verdict — the Step 2d STOP guard applies here unchanged. Run **Step 3** (`koji-duet-synthesize`) next; it, not you, computes consensus and arms the cross-review.
+
 ---
 
 ## Step 3 — Synthesize
+
+> You reach this step by running the synthesizer, never around it (see the Step 2d **STOP** guard). With findings collected, `koji-duet-synthesize` is your next action — not triage, not the Edit tool.
 
 ```bash
 ~/.claude/skills/koji/bin/koji-duet-synthesize \

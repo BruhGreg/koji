@@ -325,6 +325,42 @@ Hand it the right **scope** and **depth** in the invocation phrase:
 
 User-visible behavior is one continuous run ending with the verdict. When `/duet-review` finishes, **capture the `Output JSON:` path** from its Step 6 summary (its `verdict.json`) — Step 5 reads the final review's `codebase-fit` findings from that file.
 
+### Step 3b-gate — Verify the embedded review actually ran its cross-review
+
+`/duet-review` owns its own cross-review gate — but that gate is computed by its synthesizer (`koji-duet-synthesize`) and only fires *if that tool runs*. When `/duet-review` executes **inline** (as it just did here), the orchestrator is the one walking its steps, and that skill's single most common failure is reaching its apply step by hand-triaging findings — never running the synthesizer, so no `verdict.json` is produced and the cross-review never fires. From the caller, that bypass is invisible unless we check. So before trusting the verdict, **assert the post-condition** (skip only when `NO_FINAL_REVIEW` made the review legitimately absent):
+
+```bash
+if [ "$NO_FINAL_REVIEW" != "1" ]; then
+  VERDICT_JSON="<Output JSON path captured from /duet-review's Step 6 summary>"
+  GATE=$(python3 -c "
+import json, sys
+try:
+    v = json.load(open('$VERDICT_JSON'))
+except Exception:
+    print('NO-VERDICT'); sys.exit(0)
+req  = v.get('cross_review_required')
+done = v.get('cross_review_done')
+# Fail CLOSED: a finalized verdict ALWAYS carries both booleans (the synthesizer
+# always writes them). Missing/non-bool means the file is not a trustworthy
+# verdict — treat as a bypass, never as a pass.
+if not isinstance(req, bool) or not isinstance(done, bool):
+    print('MALFORMED-VERDICT'); sys.exit(0)
+print('GATE-OPEN' if (req and not done) else 'OK')
+" 2>/dev/null || echo "NO-VERDICT")
+
+  if [ "$GATE" != "OK" ]; then
+    echo "BLOCKED: the embedded /duet-review did not finalize its cross-review gate ($GATE)."
+    echo "         A missing/malformed verdict.json, or cross_review_required without"
+    echo "         cross_review_done, means the inline review skipped koji-duet-synthesize"
+    echo "         and/or its Step 4 — its findings went un-cross-reviewed. Re-run /duet-review"
+    echo "         (see below); do NOT proceed to Step 4/5 with this result."
+    exit 1   # hard stop — same structural force as /duet-review's own Step 5 gate
+  fi
+fi
+```
+
+The block **hard-exits (`exit 1`) on any non-`OK` state** — missing, malformed, or gate-open — and **fails closed** (a verdict lacking the two boolean keys is treated as a bypass, never waved through), so the stop is a real signal rather than prose the agent might skim past. To recover, **re-invoke `Skill(duet-review)`** on the same working-tree scope and depth (Step 3b above) and let it run all the way through `koji-duet-synthesize` and its Step 4 cross-review to a finalized `verdict.json` (`cross_review_done = true`, no `-PRELIMINARY` suffix). Only a finalized verdict feeds Step 4 reconciliation and Step 5 conventions capture. This is the **caller-side structural backstop**: `/duet-review`'s own gate protects a clean in-skill run; this re-check protects the orchestrator-becomes-executor path, where the gate can be walked around. It mirrors how `/plan-triangulate-review` asserts its own write-gate after driving gstack inline, rather than trusting the sub-process to have stopped.
+
 ## Step 4 — Plan reconciliation
 
 Auto-fires at end of every run. Keep the plan file in sync with what
