@@ -112,7 +112,7 @@ agents:                      # 工作階段條目的標籤
 
 **計畫硬化(`/plan-triangulate-review`)。** 對「鎖定的」計畫做自主、精簡的跨模型硬化。內聯驅動 gstack 的 `/plan-eng-review`;對每項發現先分流——大多數只需讀原始碼就能反駁或記錄,只有真正有爭議的才進入論述(Claude↔codex,達成共識即自動鎖定,硬性 3 輪上限)。最後以一份勘誤批准已鎖定的決定、跨模型讓步與仍有分歧的項目。需以 `triangulate-review` 意圖叫用(非單獨的 `/triangulate`);需要 gstack 與 codex。參考執行在 4 次模型呼叫內硬化了一份鎖定的 ADR——是分流迴圈,不是扇出。
 
-**離線(walk-away)工作階段。** `/duet-plan`、`/duet-impl` 與 `/plan-triangulate-review` 會在背景 AI 任務執行期間讓機器保持喚醒(`caffeinate` / `systemd-inhibit`),並在結束時釋放,讓你能啟動一段長時間執行後離開。(單獨的 `/triangulate` 是互動式的——它把每個決定交給你——因此跟 `/duet-review` 一樣略過喚醒。)僅這些流程採用(絕不包含一般的 `/kick-off`);採用引用計數,重疊執行共用同一個喚醒程序,且具擁有權安全:絕不會關閉你自己啟動的喚醒程序。
+**離線(walk-away)工作階段。** `/duet-plan`、`/duet-impl` 與 `/plan-triangulate-review` 會在背景 AI 任務執行期間讓機器保持喚醒(`caffeinate` / `systemd-inhibit`),並在結束時釋放,讓你能啟動一段長時間執行後離開。(單獨的 `/triangulate` 是互動式的——它把每個決定交給你——因此跟 `/duet-review` 一樣略過喚醒。)僅這些流程採用(絕不包含一般的 `/kick-off`);採用引用計數,重疊執行共用同一個喚醒程序,且具擁有權安全:絕不會關閉你自己啟動的喚醒程序。`/duet-impl` 天生就適合無人值守:遇到卡住的關卡絕不凍結。某個關卡在用盡重試後仍無法通過時,會被記錄成 `deferred-findings.md` 中的延後項目——待你回來時一次全部呈現——並繼續往下走,而不是卡在彈窗提示上。而 codex 的配額/速率限制回覆也不再被誤讀為「零發現→通過」:執行會退避約 15 分鐘,並在 codex 的 5 小時視窗內自動恢復,因此配額耗盡只會讓該關卡暫停,而非默默記下一次不實的通過審查。
 
 **計畫與研究工作文件。** `.koji/plans/`(已決定、待實作的工作)與 `.koji/research/`(調查發現,待驗證)。研究檔案以主題為定址單位——新發現會累積進現有主題檔案(`## Decisions` 段落由新到舊),而不是另開以工作階段命名的平行檔案。輕量的 YAML frontmatter(`status:` 欄位,依類型而定:plans 為 pending/in-progress/completed/archived,research 為 unvalidated/validated/archived)。`/kick-off` 會在工作階段開始時列出待辦項目;`/duet-impl` 會在執行結束時將計畫標記為 `completed`;`koji-plans-research --set-status <path> <new>` 可從命令列修改。漂移豁免(不是程式碼覆蓋文件)。
 

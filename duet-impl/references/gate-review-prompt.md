@@ -83,12 +83,8 @@ The diff since the previous gate:
 
 - **No `high` findings** → PASS. Proceed to next gate.
 - **`high` findings present, suggested_fix is mechanical** → apply fix, re-run codex review. Up to 2 retries.
-- **`high` findings present, suggested_fix is complex/conceptual** → consult codex once for clarification, apply, re-run. If still failing after retry → escalate to user.
+- **`high` findings present, suggested_fix is complex/conceptual** → consult codex once for clarification, apply, re-run. If still failing after retry → record a deferral and proceed.
 - **`medium` findings only** → log to gate-report, proceed.
 - **`low` findings only** → ignore.
 
-Per the [agent-autonomy principle](../../references/agent-autonomy.md), escalation to the user happens only when:
-1. The 2-retry budget is exhausted AND
-2. A consult round with codex did not resolve the disagreement.
-
-Otherwise the implementer keeps trying.
+Per the [agent-autonomy principle](../../references/agent-autonomy.md), the loop never blocks on the user. When (1) the 2-retry budget is exhausted AND (2) a consult round with codex did not resolve the disagreement, the unresolved HIGH is recorded as a deferral (`deferred-findings.md` + the end-of-run report) and the walk proceeds — the end-of-run `/duet-review` re-examines the deferred code.

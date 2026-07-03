@@ -20,7 +20,7 @@ allowed-tools:
 
 ## When to invoke
 
-Use ONLY when the user explicitly types `/duet-impl`, says "duet impl", "duet-impl", "let's duet implement", or similar — the `duet` keyword is required. Do NOT invoke on casual "let's implement" phrases. On review fail: fix-and-retry up to 2 times, then consult codex once, then escalate to user.
+Use ONLY when the user explicitly types `/duet-impl`, says "duet impl", "duet-impl", "let's duet implement", or similar — the `duet` keyword is required. Do NOT invoke on casual "let's implement" phrases. On review fail: fix-and-retry up to 2 times, then consult codex once, then record a deferral and proceed — the loop never blocks on a modal prompt.
 
 Walks a saved plan from `/duet-plan` (or any structured plan). **Total reviewer passes = 1 foundation gate (codex single) + N post-foundation reviews, where the Nth IS the final `/duet-review`** — never schedule a codex single immediately before the duet-review (it already runs codex + cross-review; a back-to-back single is duplicate work). N is typically 1 (small/mechanical) or 2 (medium, default); rarely 3 (large/dense). See **Review checkpoint strategy** below for placement.
 
@@ -49,6 +49,9 @@ The plan file path comes from the user's invocation. Examples:
 - **Skip the final review** → `NO_FINAL_REVIEW`. The run ends with a `/duet-review` by default. If the user only wants a partial implementation with no end-of-run review ("don't run the final review", "skip duet-review", "partial impl only"), set `NO_FINAL_REVIEW=1`.
 - **Skip the promise audit** → `NO_PROMISE_AUDIT`. The cumulative promise audit (Step 3a) runs by default. If the user opts out ("skip the promise audit", "no promise check"), set `NO_PROMISE_AUDIT=1`. It is also implied whenever `NO_FINAL_REVIEW=1`.
 - **Retry budget per gate** → `RETRIES`. Each gate gets 2 fix-and-retry attempts by default. If the user wants a different budget ("one retry per gate", "fail fast", "3 retries"), set `RETRIES` to that number.
+- **Codex quota back-off** → `QUOTA_BACKOFF` (interval seconds, default 900) / `QUOTA_MAX_WAITS` (cap, default 20 ≈ 5h). A codex quota/rate-limit reply is **not** zero findings (Step 2c); the run backs off `QUOTA_BACKOFF`s and retries up to `QUOTA_MAX_WAITS` times — auto-resuming when the 5-hour window restores — then treats codex as unavailable (records a deferral and proceeds). Tune via intent ("retry every 10 minutes", "give up after an hour", "wait all night").
+
+**Stuck gates never block (default, no toggle).** When a gate can't clear after `RETRIES` + the consult round, the unresolved HIGH is recorded as a **deferral** — appended to `$RUN_DIR/deferred-findings.md` and the Step 6 report — and the walk proceeds. The deferred code stays in the cumulative diff, so the end-of-run `/duet-review` re-examines it. This is the only posture: `/duet-impl` runs are unattended-safe by design and never freeze on a modal prompt. Nothing is silently dropped — every deferral is a documented decision surfaced at end-of-run.
 
 **Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens) for each gate review. Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick gates", "lighter review", "use high effort", "save tokens". Don't downgrade for "the gate diff looks small"; only on explicit user signal. Claude inherits the parent session's effort level.
 
@@ -101,6 +104,8 @@ FROM_GATE="${FROM_GATE:-}"           # gate name to resume from (Step 2a)
 FROM_GATE_REACHED="${FROM_GATE_REACHED:-}"  # loop state for the FROM_GATE resume skip (Step 2a)
 NO_FINAL_REVIEW="${NO_FINAL_REVIEW:-}"      # skip end-of-run /duet-review (Step 3b)
 NO_PROMISE_AUDIT="${NO_PROMISE_AUDIT:-}"    # skip the promise audit (Step 3a)
+QUOTA_BACKOFF="${QUOTA_BACKOFF:-900}"        # codex quota back-off interval (s), default 15 min
+QUOTA_MAX_WAITS="${QUOTA_MAX_WAITS:-20}"     # cap on quota back-off retries per gate (~5h)
 echo "Start SHA: $START_SHA | Run dir: $RUN_DIR | Effort: $EFFORT | Retries/gate: $RETRIES"
 ```
 
@@ -180,22 +185,21 @@ fi
 echo $? > "$RAW.exit"
 ```
 
-Run this Bash block with **`run_in_background: true`**. Tell the user: *"Gate '$gate_name' attempt $((attempt+1)): codex reviewing in the background."* Then return control. When the notification arrives, proceed to JSON extraction:
+Run this Bash block with **`run_in_background: true`**. Tell the user: *"Gate '$gate_name' attempt $((attempt+1)): codex reviewing in the background."* Then return control. When the notification arrives, **classify** the result (per-gate loop-state `QUOTA_WAITS`, initialized to `0` alongside `attempt=0` at the top of each gate; orthogonal to `RETRIES`):
 
 ```bash
-# Extract findings JSON
-python3 -c "
-import re, json, sys
-raw = open('$RAW').read()
-m = re.search(r'\[.*\]', raw, re.DOTALL)
-if m:
-    try: json.loads(m.group(0)); sys.stdout.write(m.group(0)); sys.exit(0)
-    except: pass
-sys.stdout.write('[]')
-" > "$RUN_DIR/findings-${gate_name}-attempt-${attempt}.json"
+FINDINGS="$RUN_DIR/findings-${gate_name}-attempt-${attempt}.json"
+STATE=$(~/.claude/skills/koji/bin/koji-codex-classify "$RAW" "$RAW.err" "$RAW.exit" --json-out "$FINDINGS")
+echo "Gate $gate_name attempt $((attempt+1)): codex state = $STATE"
 ```
 
-### 2d. Decide PASS / FIX / ESCALATE
+Branch on `$STATE`:
+
+- **`OK`** → findings written; proceed to 2d.
+- **`EMPTY` / `TIMEOUT` / `ERROR`** → **a quota reply is not an empty findings array**, but these three are treated as empty: log `WARN: codex $STATE — treating as empty findings this attempt` and run `echo "[]" > "$FINDINGS"` (the classifier writes `[]` for `EMPTY` but not for `TIMEOUT`/`ERROR`, so guarantee the file exists before 2d's `json.load`), then proceed to 2d. *(Scope: timeout/error keep the prior treat-as-empty semantics; only `QUOTA` gets the back-off path.)*
+- **`QUOTA`** → do **not** write a PASS. If `QUOTA_WAITS < QUOTA_MAX_WAITS`: tell the user *"Gate '$gate_name': codex quota/rate-limit — backing off ${QUOTA_BACKOFF}s, retry $((QUOTA_WAITS+1))/${QUOTA_MAX_WAITS}"*, then dispatch a backgrounded block that sleeps and re-runs the **same** codex invocation from 2c (`sleep "$QUOTA_BACKOFF"; <codex exec …> > "$RAW" 2> "$RAW.err"; echo $? > "$RAW.exit"`) with `run_in_background: true`, increment `QUOTA_WAITS`, and return control; re-classify on the next notification. If `QUOTA_WAITS` has reached `QUOTA_MAX_WAITS`, codex is **unavailable** → record a deferral (reason *"codex unavailable — quota, $QUOTA_MAX_WAITS back-offs"*) and proceed to the next gate.
+
+### 2d. Decide PASS / FIX / DEFER
 
 ```bash
 FINDINGS="$RUN_DIR/findings-${gate_name}-attempt-${attempt}.json"
@@ -215,31 +219,41 @@ if [ "$attempt" -lt "$RETRIES" ]; then
   # Loop back to 2c
 else
   echo "Gate $gate_name: retry budget exhausted, consulting codex once"
-  # Consult round: ask codex to re-examine its findings given that 2 fixes didn't satisfy
-  # If consult resolves it (codex agrees fixes are now fine), PASS
-  # Otherwise: escalate via AskUserQuestion
+  # Consult round: ask codex to re-examine its findings given that 2 fixes didn't satisfy.
+  # If consult resolves it (codex agrees fixes are now fine), PASS.
+  # Otherwise the loop never blocks: it is a recorded deferral, not a blocking prompt.
+  # Record it and proceed — the only posture, unattended-safe by design.
+  echo "Gate $gate_name: recording $HIGH_COUNT unresolved high finding(s) as deferred, proceeding"
+  # Append the unresolved HIGH(s) to $RUN_DIR/deferred-findings.md (template below).
+  PREV_GATE_SHA=$(git rev-parse HEAD)   # deferred code stays in the cumulative diff
+  continue   # to next segment
 fi
+```
+
+The **codex-unavailable** terminal from Step 2c (`QUOTA_WAITS` cap reached) is handled the same way: record a deferral with reason *"codex unavailable — quota"* and proceed to the next gate.
+
+**Deferral artifact (`$RUN_DIR/deferred-findings.md`).** Written with the Write tool — create-with-header on the first deferral of the run, append a `## Gate:` block on each subsequent one (text formatting, so prose-templated, not a helper). Record the finding + *why 2 rounds couldn't resolve it* + the gate:
+
+```markdown
+# Deferred findings — /duet-impl run
+Plan: <PLAN_FILE>   Run dir: <RUN_DIR>   Start SHA: <START_SHA>
+Recorded because the gate could not resolve within RETRIES + consult, or codex was
+unavailable. The loop never blocks — it defers and proceeds. Code remains in the
+cumulative diff — the end-of-run /duet-review re-examines it.
+
+---
+## Gate: <gate_name>
+- Why deferred: <RETRIES + consult exhausted | codex unavailable — quota, N back-offs>
+- Findings (<HIGH_COUNT>):
+  - `<file>:<line>` [<category>] <description>
+    fix: <suggested_fix.details>
 ```
 
 When retrying (the `if` branch above), apply each high finding before looping back to 2c: read `$FINDINGS` and, for every finding with `severity == high`, invoke the Edit tool with that finding's `suggested_fix.details` to apply the fix — same mechanism as `/duet-review` Step 5d. This is a tool action, not a shell call; there is no batch helper.
 
-Per the autonomy principle, the consult-codex round is the "agents try together" step *before* escalating to the user. The consult prompt is:
+Per the autonomy principle, the consult-codex round is the "agents try together" step *before* recording a deferral. The consult prompt is:
 
 > *"You flagged these high findings on gate '$gate_name'. The implementer made 2 fix attempts that you still flagged. Either: (a) reconfirm with specific code-level guidance the implementer can apply, or (b) acknowledge if your earlier findings may have been mistaken given the work as-is."*
-
-### 2e. Escalate
-
-If retries exhausted AND consult didn't resolve, use `AskUserQuestion`:
-
-```
-Question: "Gate '$gate_name' stuck after $RETRIES retries + 1 consult. How to proceed?"
-Options:
-  1. "Override — accept the gate and continue"
-  2. "Manual fix — pause /duet-impl; user will fix and ask to resume"
-  3. "Abort the run"
-```
-
-Update `PREV_GATE_SHA` only if option 1 (override) is chosen.
 
 ## Step 3 — Final review phase (promise audit + /duet-review)
 
@@ -374,20 +388,25 @@ Re-read the source plan and edit it directly:
   Add a top blockquote with the reviewer-pass tally (1 foundation gate + `N` post-foundation reviews) + verdict + `git log $START_SHA..HEAD`.
   Append `## Deviations from this plan` only if material drift happened —
   skip on a clean run.
-- **Step 3 ran with REJECT or ESCALATED**: leave `status` alone (the
-  implementation is not complete). Add `executed: <today>`,
-  `final-review: <verdict>`. Top blockquote notes: stages executed but
-  review surfaced unresolved findings (REJECT) or required escalation
-  (ESCALATED) — see the run dir / final-diff for what's outstanding.
+- **Step 3 ran with REJECT**: leave `status` alone (the implementation is
+  not complete). Add `executed: <today>`, `final-review: <verdict>`. Top
+  blockquote notes: stages executed but the review surfaced unresolved
+  findings — see the run dir / final-diff for what's outstanding.
 - **Step 3 skipped** (`NO_FINAL_REVIEW` set): leave `status` alone, add
   `executed: <today>` + `pending: review`. Blockquote: stages executed,
   review pending.
 
-**Promise audit annotation** — whenever Step 3a ran (`PROMISE_AUDIT_RAN=1`) AND `PROMISE_AUDIT_GAPS > 0`, append one line to the top blockquote (regardless of PASS / REJECT / ESCALATED / pending status):
+**Promise audit annotation** — whenever Step 3a ran (`PROMISE_AUDIT_RAN=1`) AND `PROMISE_AUDIT_GAPS > 0`, append one line to the top blockquote (regardless of PASS / REJECT / pending status):
 
 > Promise audit: `$PROMISE_AUDIT_GAPS` gaps in `$PROMISE_AUDIT_TOTAL` promises — see `$RUN_DIR/promise-audit.json`
 
 The line is informational, not a status change. A clean PASS with promise gaps still records `status: completed` — the gaps are documented as a known deviation, not a blocker (the user already saw them in Step 6 and chose to ship). Skip the line when the audit didn't run or found zero gaps.
+
+**Deferral annotation** — whenever `$RUN_DIR/deferred-findings.md` exists and is non-empty, append one line to the top blockquote (regardless of status):
+
+> Deferred: `<N>` unresolved HIGH across `<M>` gate(s) — see `$RUN_DIR/deferred-findings.md`
+
+Same rule as the promise line: informational, **not a status change**. A clean final `/duet-review` PASS with deferrals still records `status: completed` — the final review is the authority on the cumulative diff (which still contains the deferred code), and the deferrals are documented known-deviations the user triages on return.
 
 On a re-run, replace any prior `/duet-impl` annotation. The edit lands in
 the working tree; `/wrap` commits it.
@@ -436,13 +455,15 @@ fi
 Then print a markdown summary:
 
 ```
-duet-impl: <PASS | REJECT | ESCALATED>
+duet-impl: <PASS | REJECT>
 Plan:      <plan-path>
-Gates:     <gate-1> ✓ → <gate-2> ✓ → <gate-3> ✓ (retries: 0, 1, 0)
+Gates:     <gate-1> ✓ → <gate-2> ⚠deferred → <gate-3> ✓ (retries: 0, 2, 0)
 Code delta: +<ADDS> / −<DELS> (ratio <RATIO>)
 Promise audit: <PROMISE_AUDIT_TOTAL> promises checked, <PROMISE_AUDIT_GAPS> gaps
   §<plan-location>: <promise> — no evidence in diff
   §<plan-location>: <promise> — no evidence in diff
+Deferred: <N> unresolved high finding(s) — see <RUN_DIR>/deferred-findings.md
+  Gate <g>: <file>:<line> [<cat>] <desc>  (why: <reason>)
 Final review: <verdict from /duet-review>
 Run dir:   <RUN_DIR> (kept for inspection)
 ```
@@ -451,7 +472,7 @@ The `Promise audit:` line prints only when Step 3a ran (`PROMISE_AUDIT_RAN=1`). 
 
 The `Code delta:` line is a meta-signal, not a status change. High ratios (≥ 5:1) are normal for substrate-shipping phases where "add the new path alongside the old one" is the intended pattern — pair it with the `/duet-review` deadcode findings to decide whether the additivity is a foundation play or a smell. A "cleanup" or "refactor" run producing a high ratio is worth a second look. Informational; do not adjust the verdict on the metric alone.
 
-If any gate escalated, mention which one and how the user resolved it.
+The `Deferred:` block prints only when `$RUN_DIR/deferred-findings.md` is non-empty (one indented line per unresolved HIGH, read from that file). Like promise gaps it is surfaced alongside the verdict, not folded into it — the user triages all deferrals at once on return. Annotate each deferred gate on the `Gates:` line with `⚠deferred`.
 
 ## Failure modes
 
@@ -459,8 +480,10 @@ If any gate escalated, mention which one and how the user resolved it.
 |---|---|---|
 | Codex review at gate hangs | `--enable web_search_cached` re-introduced, or stdin not closed | Skill explicitly drops both — verify bash not modified |
 | Codex exits 124 at a gate | Gate diff too large or `xhigh` exceeded 30-min wall | Re-run asking for a smaller retry budget (`RETRIES=1`, faster fail) and smaller gate scopes |
+| Codex quota/rate-limit at a gate | 5-hour session limit depleted mid-run | `koji-codex-classify` returns `QUOTA` (not `[]`) → back off `QUOTA_BACKOFF`s and auto-retry up to `QUOTA_MAX_WAITS`, never a silent PASS. Cap reached → records a deferral and proceeds |
+| Gate unresolved after retries + consult | Genuine hard finding | Recorded to `$RUN_DIR/deferred-findings.md`, walk proceeds (never blocks); deferred code stays in the cumulative diff so the end-of-run `/duet-review` re-examines it |
 | Implementer-applied fix doesn't compile | Suggested_fix.details was wrong for the actual context | Counts as a retry attempt; codex's next review will flag the new issue. Up to budget |
-| Stuck on a "scope" finding (codex says work overshoots phase) | Plan was ambiguous, or implementer interpreted broadly | Consult round usually resolves; if not, escalate to user |
+| Stuck on a "scope" finding (codex says work overshoots phase) | Plan was ambiguous, or implementer interpreted broadly | Consult round usually resolves; if not, record a deferral and proceed |
 | Promise audit (Step 3a) times out, returns prose, or emits unparseable JSON | Auditor agent drift, or transient model issue | Write `[]`, log `WARN: promise audit returned no parseable JSON …`, proceed to Step 3b. Audit is a guardrail, not a gate — `/duet-review` still runs |
 | Promise audit reports gaps but `/duet-review` PASSes | Reviewers didn't share the audit's specific-contract checklist (the failure mode this audit exists for) | Gaps appear in Step 6 summary and Step 4 reconciliation blockquote. User decides to fix or accept as known deviation |
 | `$DOCS_PATH` not set | `/koji-init` never run | Same as `/wrap` |

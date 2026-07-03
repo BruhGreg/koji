@@ -62,12 +62,15 @@ case "$SKILL" in
       "before you assess, triage, or apply ANY finding"
       "There is no verdict without the synthesizer"
       "Fan-out priming trap"
+      "codex quota is not zero findings"
     )
     ;;
   duet-impl)
     MARKERS=(
       "Verify the embedded review actually ran its cross-review"
       "caller-side structural backstop"
+      "recorded deferral, not a blocking prompt"
+      "quota reply is not an empty findings array"
     )
     ;;
   *)

@@ -60,6 +60,8 @@ STAGED="${STAGED:-}"                 # "1" → review the staged diff only
 WORKTREE="${WORKTREE:-}"             # "1" → review uncommitted working-tree changes (ignores BASE/STAGED)
 SINCE="${SINCE:-}"                   # floor ref for WORKTREE mode (default HEAD)
 NO_AUTO_APPLY="${NO_AUTO_APPLY:-}"   # "1" → skip the apply prompt, emit verdict only (Step 5)
+QUOTA_BACKOFF="${QUOTA_BACKOFF:-900}"      # codex quota back-off interval (s), default 15 min
+QUOTA_MAX_WAITS="${QUOTA_MAX_WAITS:-20}"   # cap on codex quota back-off retries (~5h)
 
 if [ "$WORKTREE" != "1" ] && [ -z "$BASE" ] && [ "$STAGED" != "1" ]; then
   BASE=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|origin/||')
@@ -216,29 +218,18 @@ Then **return control**. Do NOT poll, sleep, or proactively check on progress. T
 When the codex Bash notification arrives, extract its JSON:
 
 ```bash
-CODEX_EXIT=$(cat "$RUN_DIR/codex.exit")
-if [ "$CODEX_EXIT" = "124" ]; then
-  echo "WARN: codex timed out at ${TIMEOUT}s. Treating as empty findings."
-  echo "[]" > "$RUN_DIR/codex.json"
-elif [ "$CODEX_EXIT" != "0" ]; then
-  echo "WARN: codex exit $CODEX_EXIT. See $RUN_DIR/codex.err"
-  echo "[]" > "$RUN_DIR/codex.json"
-else
-  python3 -c "
-import re, json, sys
-raw = open('$RUN_DIR/codex.raw').read()
-m = re.search(r'\[.*\]', raw, re.DOTALL)
-if m:
-    try:
-        json.loads(m.group(0))
-        sys.stdout.write(m.group(0))
-        sys.exit(0)
-    except Exception:
-        pass
-sys.stdout.write('[]')
-" > "$RUN_DIR/codex.json"
-fi
+CODEX_STATE=$(~/.claude/skills/koji/bin/koji-codex-classify \
+  "$RUN_DIR/codex.raw" "$RUN_DIR/codex.err" "$RUN_DIR/codex.exit" --json-out "$RUN_DIR/codex.json")
+echo "codex state: $CODEX_STATE"
+```
 
+Branch on `$CODEX_STATE` (per-run loop-state `CODEX_WAITS`, default `0`) — **codex quota is not zero findings**:
+
+- **`OK` / `EMPTY`** → `codex.json` written; proceed.
+- **`TIMEOUT` / `ERROR`** → `WARN: codex $CODEX_STATE — treating as empty findings`; write `echo "[]" > "$RUN_DIR/codex.json"`; proceed (safe degrade, as before).
+- **`QUOTA`** → do **not** treat as findings. If `CODEX_WAITS < QUOTA_MAX_WAITS`: tell the user *"codex quota/rate-limit — backing off ${QUOTA_BACKOFF}s, retry $((CODEX_WAITS+1))/${QUOTA_MAX_WAITS}"*, dispatch a backgrounded `sleep "$QUOTA_BACKOFF"; <the Step 2a codex exec …>` (`run_in_background: true`), increment `CODEX_WAITS`, return control; re-classify on notification. If the cap is reached: `echo "WARN: codex unavailable (quota) after $QUOTA_MAX_WAITS back-offs — this review ran Claude-only (degraded, NOT a true duet)"`, set `CODEX_UNAVAILABLE=1`, write `echo "[]" > "$RUN_DIR/codex.json"`, and proceed. The degraded state surfaces in the Step 6 header so it is never a silent pass.
+
+```bash
 echo "codex.json:  $(wc -c < "$RUN_DIR/codex.json") bytes"
 ```
 
@@ -411,7 +402,7 @@ Output STRICT JSON ONLY — array of {fingerprint, verdict, rationale}. No markd
 
 ### 4c. Collect both responses, re-synthesize
 
-When BOTH notifications arrive, extract JSON arrays and write to `$RUN_DIR/codex.cross.json` and `$RUN_DIR/claude.cross.json` (same JSON-extraction pattern as Step 2d). Then re-run the synthesizer with the new inputs:
+When BOTH notifications arrive, extract JSON arrays and write to `$RUN_DIR/codex.cross.json` and `$RUN_DIR/claude.cross.json`. For the **codex** cross leg use `koji-codex-classify` (as in Step 2d): a `QUOTA` state backs off + retries up to `QUOTA_MAX_WAITS` before falling to the 4d safe-degrade — never read a quota reply as an empty cross-review. Then re-run the synthesizer with the new inputs:
 
 ```bash
 ~/.claude/skills/koji/bin/koji-duet-synthesize \
@@ -431,7 +422,7 @@ echo "Post-cross-review verdict: $FINAL_VERDICT"
 
 ### 4d. Failure-mode fallback
 
-If either cross-review times out or returns unparseable JSON, write `[]` for that side and proceed — original solo findings stay solo (safe degradation).
+If either cross-review times out or returns unparseable JSON, write `[]` for that side and proceed — original solo findings stay solo (safe degradation). A codex quota reply falls here too, but only *after* its back-off retries exhaust (Step 4c) — and it is logged as `codex unavailable (quota)`, distinct from a timeout, so a degraded cross-review is never a silent pass.
 
 ---
 
@@ -519,7 +510,7 @@ Print a markdown summary to the user:
 ```
 duet-review verdict: <VERDICT>
 
-Reviewers: claude (<single pass | fan-out 5 angles>) + codex (<xhigh|high>)
+Reviewers: claude (<single pass | fan-out 5 angles>) + codex (<xhigh|high | UNAVAILABLE — quota>)
 Diff: <N> lines  base=<base>  head=<sha>
 
 Consensus high (X):   <list — auto-applied / held by user / failed apply>
@@ -531,6 +522,8 @@ Output JSON: <RUN_DIR>/verdict.json
 Exit code: <0|1|2>
 ```
 
+When `CODEX_UNAVAILABLE=1` (quota back-off cap reached), print `codex (UNAVAILABLE — quota)` on the Reviewers line and add a one-line banner above the verdict — *"⚠ Degraded: codex was unavailable; this verdict reflects the Claude reviewer only, not a two-reviewer duet."* — so the degradation is explicit, never a silent single-reviewer pass.
+
 Then `exit $EXIT_CODE` where exit code comes from `verdict.json`.
 
 ---
@@ -541,6 +534,7 @@ Then `exit $EXIT_CODE` where exit code comes from `verdict.json`.
 |---|---|---|
 | Codex hangs (no output, no timeout fire) | Stdin not closed, or `--enable web_search_cached` re-introduced | This skill explicitly drops both — verify the bash above wasn't modified. Kill `$CODEX_PID` manually. |
 | Codex exits 124 | Hit the timeout. xhigh's 30-min wall isn't enough for very large diffs. | Re-run with smaller scope (name a closer `BASE`), or ask for verdict-only (`NO_AUTO_APPLY`) to at least get the report. |
+| Codex quota/rate-limit reply | 5-hour session limit depleted | `koji-codex-classify` returns `QUOTA` (not `[]`) → back off `QUOTA_BACKOFF`s and auto-retry to `QUOTA_MAX_WAITS`; cap reached → Claude-only degraded verdict with an explicit banner (`CODEX_UNAVAILABLE`), never a silent single-reviewer pass. |
 | Agent (Claude) returns prose instead of JSON | Reviewer prompt drift, or model decided to chat. | The prompt body explicitly demands strict JSON; the JSON extractor handles single arrays. If the array is missing → treat as `[]`. |
 | Synthesize crashes | Malformed input (rare; both reviewers were instructed to emit strict JSON) | `koji-duet-synthesize` is defensive: bad input → empty findings → PASS verdict. |
 | User chose "remember for repo" but rule doesn't trigger next session | Likely fingerprint mismatch on the OTHER reviewer (consensus didn't form again). Rules need consensus PLUS category match. | This is intentional — rule does not auto-apply on single-reviewer findings. |

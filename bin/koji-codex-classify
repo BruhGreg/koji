@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# koji-codex-classify — classify a completed `codex exec` result into one state.
+#
+# Closes the quota→false-pass hole: the duet skills used to regex a `[...]` from
+# codex stdout and, finding none, write `[]` — which downstream reads as "codex
+# reviewed, zero findings → PASS". A depleted 5-hour quota returns a rate-limit
+# message (no findings JSON), so that path silently banks a clean review. This
+# helper makes a quota reply its OWN state, distinct from empty findings.
+#
+#   koji-codex-classify <raw> <err> <exit> [--json-out <file>]
+#
+# Prints ONE state token to stdout: OK | QUOTA | TIMEOUT | ERROR | EMPTY
+#   OK      — a valid findings JSON array was extracted (may be `[]`); exit 0.
+#             Written to --json-out. A valid array means codex actually reviewed,
+#             even if a finding's TEXT mentions "rate limit" (precedence guard
+#             against false-QUOTA that would waste a back-off).
+#   QUOTA   — no valid array AND a quota/rate-limit marker present (any exit code).
+#             Caller backs off + retries; never a PASS. No findings written.
+#   TIMEOUT — no array, no markers, exit 124.
+#   ERROR   — no array, no markers, non-zero exit.
+#   EMPTY   — no array, no markers, exit 0 (genuine drift: prose reply). Writes `[]`.
+set -euo pipefail
+
+RAW="${1:?Usage: koji-codex-classify <raw> <err> <exit> [--json-out <file>]}"
+ERR="${2:?}"
+EXITF="${3:?}"
+JSON_OUT=""
+[ "${4:-}" = "--json-out" ] && JSON_OUT="${5:?--json-out needs a path}"
+
+EXIT="$(cat "$EXITF" 2>/dev/null || echo 1)"
+
+# 1. Try to extract a valid JSON array from raw stdout (same shape the reviewers
+#    are told to emit). A valid array == codex responded with a review.
+ARRAY="$(python3 -c "
+import re, sys
+raw = open('$RAW').read() if __import__('os').path.exists('$RAW') else ''
+import json
+m = re.search(r'\[.*\]', raw, re.DOTALL)
+if m:
+    try:
+        json.loads(m.group(0)); sys.stdout.write(m.group(0)); sys.exit(0)
+    except Exception:
+        pass
+sys.exit(1)
+" 2>/dev/null)" && HAVE_ARRAY=1 || HAVE_ARRAY=0
+
+if [ "$HAVE_ARRAY" = "1" ] && [ "$EXIT" = "0" ]; then
+  [ -n "$JSON_OUT" ] && printf '%s' "$ARRAY" > "$JSON_OUT"
+  echo OK; exit 0
+fi
+
+# 2. No usable array — is this a quota/rate-limit reply? Scan stdout+stderr.
+HAYSTACK="$( { cat "$RAW" "$ERR"; } 2>/dev/null | tr 'A-Z' 'a-z' )"
+for m in 'usage limit' 'rate limit' 'rate_limit' '429' 'too many requests' \
+         'quota' 'no tokens' 'insufficient_quota' 'resource_exhausted'; do
+  case "$HAYSTACK" in *"$m"*) echo QUOTA; exit 0 ;; esac
+done
+
+# 3. Not quota — timeout / error / genuine-empty.
+if [ "$EXIT" = "124" ]; then echo TIMEOUT; exit 0; fi
+if [ "$EXIT" != "0" ]; then echo ERROR; exit 0; fi
+[ -n "$JSON_OUT" ] && printf '[]' > "$JSON_OUT"
+echo EMPTY
