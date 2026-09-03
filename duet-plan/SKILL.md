@@ -122,16 +122,26 @@ $(cat "$CLAUDE_FILE")
 
 End with VERDICT line."
 
+# Prompt goes to a file and codex reads it from stdin (`-`): a plan plus prior
+# rounds can exceed the argv ceiling (macOS ARG_MAX ≈ 1 MB shared with env), and
+# an E2BIG never starts codex — empty .raw, which downstream reads as "no
+# critique". printf is a builtin, so writing the file has no such limit. A
+# redirect from a regular file EOFs immediately, preserving the old
+# `< /dev/null` guarantee that codex never blocks waiting on stdin. `-` must be
+# the ONLY positional: a prompt arg plus piped stdin changes codex's framing.
+PROMPT_TXT="$CODEX_FILE.prompt"
+printf '%s\n' "$CODEX_PROMPT" > "$PROMPT_TXT"
+
 if [ -n "$TO" ]; then
-  "$TO" "$TIMEOUT" codex exec "$CODEX_PROMPT" \
+  "$TO" "$TIMEOUT" codex exec - \
     -C "$PROJECT_ROOT" -s read-only \
     -c "model_reasoning_effort=\"$EFFORT\"" \
-    < /dev/null > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
+    < "$PROMPT_TXT" > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
 else
-  codex exec "$CODEX_PROMPT" \
+  codex exec - \
     -C "$PROJECT_ROOT" -s read-only \
     -c "model_reasoning_effort=\"$EFFORT\"" \
-    < /dev/null > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
+    < "$PROMPT_TXT" > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
 fi
 echo $? > "$CODEX_FILE.exit"
 ```

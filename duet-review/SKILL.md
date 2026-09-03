@@ -138,7 +138,13 @@ TIMEOUT="${TIMEOUT:-1800}"
 TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
 PROMPT_FILE="$KOJI_SKILLS/duet-review/references/reviewer-prompt.md"
 
-# Compose prompt inline (the prompt + diff together — codex reads it as one positional arg)
+# Compose prompt inline (the prompt + diff together), write it to a file, and let
+# codex read it from stdin (`-`). A large diff can exceed the argv ceiling (macOS
+# ARG_MAX ≈ 1 MB shared with env); an E2BIG never starts codex, leaving an empty
+# .raw that classifies as ERROR → "[]" → a false PASS. printf is a builtin, so the
+# file write has no such limit. A redirect from a regular file EOFs immediately,
+# preserving the old `< /dev/null` guarantee that codex never blocks on stdin.
+# `-` must be the ONLY positional: a prompt arg plus piped stdin changes framing.
 CODEX_PROMPT="$(cat "$PROMPT_FILE")
 
 ---
@@ -147,17 +153,19 @@ Now review the diff below. Output STRICT JSON only — no markdown fences, no pr
 
 DIFF:
 $(cat "$DIFF_FILE")"
+PROMPT_TXT="$RUN_DIR/codex.prompt"
+printf '%s\n' "$CODEX_PROMPT" > "$PROMPT_TXT"
 
 if [ -n "$TO" ]; then
-  "$TO" "$TIMEOUT" codex exec "$CODEX_PROMPT" \
+  "$TO" "$TIMEOUT" codex exec - \
     -C "$PROJECT_ROOT" -s read-only \
     -c "model_reasoning_effort=\"$EFFORT\"" \
-    < /dev/null > "$RUN_DIR/codex.raw" 2> "$RUN_DIR/codex.err"
+    < "$PROMPT_TXT" > "$RUN_DIR/codex.raw" 2> "$RUN_DIR/codex.err"
 else
-  codex exec "$CODEX_PROMPT" \
+  codex exec - \
     -C "$PROJECT_ROOT" -s read-only \
     -c "model_reasoning_effort=\"$EFFORT\"" \
-    < /dev/null > "$RUN_DIR/codex.raw" 2> "$RUN_DIR/codex.err"
+    < "$PROMPT_TXT" > "$RUN_DIR/codex.raw" 2> "$RUN_DIR/codex.err"
 fi
 echo $? > "$RUN_DIR/codex.exit"
 ```
@@ -227,7 +235,7 @@ Branch on `$CODEX_STATE` (per-run loop-state `CODEX_WAITS`, default `0`) — **c
 
 - **`OK` / `EMPTY`** → `codex.json` written; proceed.
 - **`TIMEOUT` / `ERROR`** → `WARN: codex $CODEX_STATE — treating as empty findings`; write `echo "[]" > "$RUN_DIR/codex.json"`; proceed (safe degrade, as before).
-- **`QUOTA`** → do **not** treat as findings. If `CODEX_WAITS < QUOTA_MAX_WAITS`: tell the user *"codex quota/rate-limit — backing off ${QUOTA_BACKOFF}s, retry $((CODEX_WAITS+1))/${QUOTA_MAX_WAITS}"*, dispatch a backgrounded `sleep "$QUOTA_BACKOFF"; <the Step 2a codex exec …>` (`run_in_background: true`), increment `CODEX_WAITS`, return control; re-classify on notification. If the cap is reached: `echo "WARN: codex unavailable (quota) after $QUOTA_MAX_WAITS back-offs — this review ran Claude-only (degraded, NOT a true duet)"`, set `CODEX_UNAVAILABLE=1`, write `echo "[]" > "$RUN_DIR/codex.json"`, and proceed. The degraded state surfaces in the Step 6 header so it is never a silent pass.
+- **`QUOTA`** → do **not** treat as findings. If `CODEX_WAITS < QUOTA_MAX_WAITS`: tell the user *"codex quota/rate-limit — backing off ${QUOTA_BACKOFF}s, retry $((CODEX_WAITS+1))/${QUOTA_MAX_WAITS}"*, dispatch a backgrounded `sleep "$QUOTA_BACKOFF"; <the Step 2a codex exec …>` reading the **same `$PROMPT_TXT` already on disk** — an identical retry, no prompt rebuild (`run_in_background: true`), increment `CODEX_WAITS`, return control; re-classify on notification. If the cap is reached: `echo "WARN: codex unavailable (quota) after $QUOTA_MAX_WAITS back-offs — this review ran Claude-only (degraded, NOT a true duet)"`, set `CODEX_UNAVAILABLE=1`, write `echo "[]" > "$RUN_DIR/codex.json"`, and proceed. The degraded state surfaces in the Step 6 header so it is never a silent pass.
 
 ```bash
 echo "codex.json:  $(wc -c < "$RUN_DIR/codex.json") bytes"
@@ -371,17 +379,20 @@ CLAUDE'S FINDINGS TO ASSESS (JSON):
 $(cat "$RUN_DIR/codex-cross-targets.json")
 
 Output STRICT JSON only — array of {\"fingerprint\": \"...\", \"verdict\": \"AGREE-HIGH\"|..., \"rationale\": \"one line\"}. No markdown fences. Empty array if nothing to assess."
+# Same stdin-file pattern as Step 2a (argv ceiling → false PASS); `-` is the only positional.
+CROSS_PROMPT_TXT="$RUN_DIR/codex.cross.prompt"
+printf '%s\n' "$CROSS_PROMPT" > "$CROSS_PROMPT_TXT"
 
 if [ -n "$TO" ]; then
-  "$TO" "$TIMEOUT" codex exec "$CROSS_PROMPT" \
+  "$TO" "$TIMEOUT" codex exec - \
     -C "$PROJECT_ROOT" -s read-only \
     -c "model_reasoning_effort=\"$EFFORT\"" \
-    < /dev/null > "$RUN_DIR/codex.cross.raw" 2> "$RUN_DIR/codex.cross.err"
+    < "$CROSS_PROMPT_TXT" > "$RUN_DIR/codex.cross.raw" 2> "$RUN_DIR/codex.cross.err"
 else
-  codex exec "$CROSS_PROMPT" \
+  codex exec - \
     -C "$PROJECT_ROOT" -s read-only \
     -c "model_reasoning_effort=\"$EFFORT\"" \
-    < /dev/null > "$RUN_DIR/codex.cross.raw" 2> "$RUN_DIR/codex.cross.err"
+    < "$CROSS_PROMPT_TXT" > "$RUN_DIR/codex.cross.raw" 2> "$RUN_DIR/codex.cross.err"
 fi
 echo $? > "$RUN_DIR/codex.cross.exit"
 ```

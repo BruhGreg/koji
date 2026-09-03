@@ -173,14 +173,22 @@ PHASE_TEXT="<plan text for this gate — agent extracts from the plan file>"
 TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
 RAW="$RUN_DIR/codex-${gate_name}-attempt-${attempt}.raw"
 
+# Prompt → file → codex stdin (`-`). A gate diff can exceed the argv ceiling
+# (macOS ARG_MAX ≈ 1 MB shared with env); an E2BIG never starts codex, leaving an
+# empty .raw that classifies ERROR → "[]" → a false PASS at the gate. printf is a
+# builtin (no argv). A regular-file redirect EOFs immediately, so codex never
+# blocks on stdin (the old `< /dev/null` property). `-` must be the ONLY positional.
+PROMPT_TXT="$RAW.prompt"
+printf '%s\n' "$CODEX_PROMPT" > "$PROMPT_TXT"
+
 if [ -n "$TO" ]; then
-  "$TO" "$TIMEOUT" codex exec "$CODEX_PROMPT" \
+  "$TO" "$TIMEOUT" codex exec - \
     -C "$PROJECT_ROOT" -s read-only \
     -c "model_reasoning_effort=\"$EFFORT\"" \
-    < /dev/null > "$RAW" 2> "$RAW.err"
+    < "$PROMPT_TXT" > "$RAW" 2> "$RAW.err"
 else
-  codex exec "$CODEX_PROMPT" -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" < /dev/null > "$RAW" 2> "$RAW.err"
+  codex exec - -C "$PROJECT_ROOT" -s read-only \
+    -c "model_reasoning_effort=\"$EFFORT\"" < "$PROMPT_TXT" > "$RAW" 2> "$RAW.err"
 fi
 echo $? > "$RAW.exit"
 ```
@@ -197,7 +205,7 @@ Branch on `$STATE`:
 
 - **`OK`** → findings written; proceed to 2d.
 - **`EMPTY` / `TIMEOUT` / `ERROR`** → **a quota reply is not an empty findings array**, but these three are treated as empty: log `WARN: codex $STATE — treating as empty findings this attempt` and run `echo "[]" > "$FINDINGS"` (the classifier writes `[]` for `EMPTY` but not for `TIMEOUT`/`ERROR`, so guarantee the file exists before 2d's `json.load`), then proceed to 2d. *(Scope: timeout/error keep the prior treat-as-empty semantics; only `QUOTA` gets the back-off path.)*
-- **`QUOTA`** → do **not** write a PASS. If `QUOTA_WAITS < QUOTA_MAX_WAITS`: tell the user *"Gate '$gate_name': codex quota/rate-limit — backing off ${QUOTA_BACKOFF}s, retry $((QUOTA_WAITS+1))/${QUOTA_MAX_WAITS}"*, then dispatch a backgrounded block that sleeps and re-runs the **same** codex invocation from 2c (`sleep "$QUOTA_BACKOFF"; <codex exec …> > "$RAW" 2> "$RAW.err"; echo $? > "$RAW.exit"`) with `run_in_background: true`, increment `QUOTA_WAITS`, and return control; re-classify on the next notification. If `QUOTA_WAITS` has reached `QUOTA_MAX_WAITS`, codex is **unavailable** → record a deferral (reason *"codex unavailable — quota, $QUOTA_MAX_WAITS back-offs"*) and proceed to the next gate.
+- **`QUOTA`** → do **not** write a PASS. If `QUOTA_WAITS < QUOTA_MAX_WAITS`: tell the user *"Gate '$gate_name': codex quota/rate-limit — backing off ${QUOTA_BACKOFF}s, retry $((QUOTA_WAITS+1))/${QUOTA_MAX_WAITS}"*, then dispatch a backgrounded block that sleeps and re-runs the **same** codex invocation from 2c, reading the `$PROMPT_TXT` already on disk — an identical retry, no prompt rebuild (`sleep "$QUOTA_BACKOFF"; <codex exec - …> < "$PROMPT_TXT" > "$RAW" 2> "$RAW.err"; echo $? > "$RAW.exit"`) with `run_in_background: true`, increment `QUOTA_WAITS`, and return control; re-classify on the next notification. If `QUOTA_WAITS` has reached `QUOTA_MAX_WAITS`, codex is **unavailable** → record a deferral (reason *"codex unavailable — quota, $QUOTA_MAX_WAITS back-offs"*) and proceed to the next gate.
 
 ### 2d. Decide PASS / FIX / DEFER
 
