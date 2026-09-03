@@ -30,6 +30,7 @@ Walks a saved plan from `/duet-plan` (or any structured plan). **Total reviewer 
 source <(~/.claude/skills/koji/bin/koji-detect)
 echo "=== koji duet-impl ==="
 echo "Project: $PROJECT_NAME"
+echo "Gate reviewer: ${DUET_REVIEWER:-codex} (claude model: ${DUET_CLAUDE_MODEL:-inherit}, codex effort: ${DUET_CODEX_EFFORT:-xhigh})"
 ```
 
 ## Arguments / plan-path resolution
@@ -46,14 +47,15 @@ The plan file path comes from the user's invocation. Examples:
 **Intent, not flags** — koji skills read natural-language intent; there is no argv to parse. When the user's phrasing signals one of these, set the matching internal variable before Step 1; otherwise the default holds:
 
 - **Resume from a gate** → `FROM_GATE`. By default the walk starts at the first segment. If the user wants to skip earlier work on a re-run ("resume from the handlers gate", "start at gate X", "skip the foundation, pick up at Y"), set `FROM_GATE` to that gate's name.
-- **Skip the final review** → `NO_FINAL_REVIEW`. The run ends with a `/duet-review` by default. If the user only wants a partial implementation with no end-of-run review ("don't run the final review", "skip duet-review", "partial impl only"), set `NO_FINAL_REVIEW=1`.
+- **Skip the final review** → `NO_FINAL_REVIEW`. The run ends with a `/duet-review` by default. If the user only wants a partial implementation with no end-of-run review ("don't run the final review", "skip duet-review", "partial impl only"), set `NO_FINAL_REVIEW=1`. Note: the last intermediate gate then becomes the run's de-facto final review, yet it still follows the gate rule (a codex quota substitutes a fresh-context Claude reviewer). If you skip the duet-review, the run's last verdict may carry no codex signal — the Step 6 report says which backend reviewed each gate.
 - **Skip the promise audit** → `NO_PROMISE_AUDIT`. The cumulative promise audit (Step 3a) runs by default. If the user opts out ("skip the promise audit", "no promise check"), set `NO_PROMISE_AUDIT=1`. It is also implied whenever `NO_FINAL_REVIEW=1`.
 - **Retry budget per gate** → `RETRIES`. Each gate gets 2 fix-and-retry attempts by default. If the user wants a different budget ("one retry per gate", "fail fast", "3 retries"), set `RETRIES` to that number.
-- **Codex quota back-off** → `QUOTA_BACKOFF` (interval seconds, default 900) / `QUOTA_MAX_WAITS` (cap, default 20 ≈ 5h). A codex quota/rate-limit reply is **not** zero findings (Step 2c); the run backs off `QUOTA_BACKOFF`s and retries up to `QUOTA_MAX_WAITS` times — auto-resuming when the 5-hour window restores — then treats codex as unavailable (records a deferral and proceeds). Tune via intent ("retry every 10 minutes", "give up after an hour", "wait all night").
+- **Codex quota back-off** → `QUOTA_BACKOFF` (interval seconds, default 900) / `QUOTA_MAX_WAITS` (cap, default 20 ≈ 5h). These govern **only the final gate** — the embedded `/duet-review` — which backs off and auto-resumes when the 5-hour window restores. At gates 1..N-1 a codex quota reply (or a start failure) does **not** wait: the gate is re-reviewed immediately by a fresh-context Claude subagent and the next gate tries codex again (Step 2c). Tune via intent ("retry every 10 minutes", "give up after an hour", "wait all night") — carry the phrase into the final `/duet-review` invocation.
+- **Gate reviewer backend** (config, not intent) → `GATE_BACKEND`. Resolved from `.koji.yaml` `duet.reviewer` via `koji-duet-backend impl-gate`: `codex` (default) → codex single-reviews at gates 1..N-1; `claude` or `claude-rounds+codex-final` → a **fresh-context Claude subagent** reviews those gates instead. Gate N is the embedded `/duet-review`, which re-sources `koji-detect` and resolves its own Reviewer B (the hybrid value → codex there: the final gate is the cross-model one). See [`../references/reviewer-backend.md`](../references/reviewer-backend.md).
 
 **Stuck gates never block (default, no toggle).** When a gate can't clear after `RETRIES` + the consult round, the unresolved HIGH is recorded as a **deferral** — appended to `$RUN_DIR/deferred-findings.md` and the Step 6 report — and the walk proceeds. The deferred code stays in the cumulative diff, so the end-of-run `/duet-review` re-examines it. This is the only posture: `/duet-impl` runs are unattended-safe by design and never freeze on a modal prompt. Nothing is silently dropped — every deferral is a documented decision surfaced at end-of-run.
 
-**Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens) for each gate review. Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick gates", "lighter review", "use high effort", "save tokens". Don't downgrade for "the gate diff looks small"; only on explicit user signal. Claude inherits the parent session's effort level.
+**Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (or the `.koji.yaml` `duet.codex_effort` value; ~30-min timeout, ~2.5× tokens) for each codex gate review. Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick gates", "lighter review", "use high effort", "save tokens". Don't downgrade for "the gate diff looks small"; only on explicit user signal. Claude inherits the parent session's effort level.
 
 ## Review checkpoint strategy
 
@@ -94,19 +96,24 @@ PLAN_FILE="<resolved-path>"
 START_SHA=$(git rev-parse --verify HEAD 2>/dev/null) || { echo "ERROR: no commits yet"; exit 1; }
 RUN_DIR=$(mktemp -d -t duet-impl-XXXXXX)
 
-# Effort: see "Codex effort" in Flags above for the opt-down rule.
-EFFORT="${EFFORT:-xhigh}"
+# Effort: see "Codex effort" in Flags above for the opt-down rule. The NL signal
+# (EFFORT set before this block) wins; otherwise .koji.yaml duet.codex_effort.
+EFFORT="${EFFORT:-${DUET_CODEX_EFFORT:-xhigh}}"
 TIMEOUT="${TIMEOUT:-1800}"
 RETRIES="${RETRIES:-2}"
+# Gate reviewer backend (gates 1..N-1 only; gate N is the embedded /duet-review).
+GATE_BACKEND=$(~/.claude/skills/koji/bin/koji-duet-backend impl-gate)   # codex | claude
+CLAUDE_MODEL="${DUET_CLAUDE_MODEL:-inherit}"   # Claude-leg reviewer model; inherit → omit the Agent `model` param
 # Intent-set vars (see "Intent, not flags" above). Initialized here so the
 # reads below run cleanly under set -u even when no intent was signalled.
 FROM_GATE="${FROM_GATE:-}"           # gate name to resume from (Step 2a)
 FROM_GATE_REACHED="${FROM_GATE_REACHED:-}"  # loop state for the FROM_GATE resume skip (Step 2a)
 NO_FINAL_REVIEW="${NO_FINAL_REVIEW:-}"      # skip end-of-run /duet-review (Step 3b)
 NO_PROMISE_AUDIT="${NO_PROMISE_AUDIT:-}"    # skip the promise audit (Step 3a)
-QUOTA_BACKOFF="${QUOTA_BACKOFF:-900}"        # codex quota back-off interval (s), default 15 min
-QUOTA_MAX_WAITS="${QUOTA_MAX_WAITS:-20}"     # cap on quota back-off retries per gate (~5h)
-echo "Start SHA: $START_SHA | Run dir: $RUN_DIR | Effort: $EFFORT | Retries/gate: $RETRIES"
+QUOTA_BACKOFF="${QUOTA_BACKOFF:-900}"        # codex quota back-off interval (s) — final gate (/duet-review) only
+QUOTA_MAX_WAITS="${QUOTA_MAX_WAITS:-20}"     # cap on quota back-off retries — final gate only (~5h)
+B_RETRIED="${B_RETRIED:-0}"                  # Claude-leg malformed-reply retry used at this gate attempt (0/1)
+echo "Start SHA: $START_SHA | Run dir: $RUN_DIR | Effort: $EFFORT | Retries/gate: $RETRIES | Gate reviewer: $GATE_BACKEND"
 ```
 
 Then **read the plan** (via the `Read` tool), identify the natural checkpoint boundaries per the strategy above, and announce the proposed plan in one sentence before Step 2 begins. State explicitly: foundation gate (yes/no), `N`, the positions, and the total reviewer-pass count. Example:
@@ -158,7 +165,9 @@ Concretely the agent should:
 
 Recommendation: stage changes (`git add -A`) after segment work so diff computation in 2c is deterministic.
 
-### 2c. Codex single-review at this gate (background)
+### 2c. Single-review at this gate (background)
+
+Compute the gate diff and fill the reviewer prompt — common to both legs:
 
 ```bash
 SEGMENT_DIFF_FILE="$RUN_DIR/diff-${gate_name}.patch"
@@ -166,12 +175,25 @@ git diff "$SEGMENT_START_SHA" -- > "$SEGMENT_DIFF_FILE"   # working-tree diff si
 
 GATE_PROMPT_TEMPLATE="$KOJI_SKILLS/duet-impl/references/gate-review-prompt.md"
 PHASE_TEXT="<plan text for this gate — agent extracts from the plan file>"
+RAW="$RUN_DIR/codex-${gate_name}-attempt-${attempt}.raw"
+FINDINGS="$RUN_DIR/findings-${gate_name}-attempt-${attempt}.json"
+# Record which backend reviews this attempt BEFORE dispatch — the only durable
+# record across Bash blocks (each block is a fresh shell). A run dir with no
+# backend file (pre-v0.8.0) means codex.
+printf '%s\n' "$GATE_BACKEND" > "$RUN_DIR/gate-${gate_name}-attempt-${attempt}-backend.txt"
 
 # The agent reads the "## Reviewer prompt" template from $GATE_PROMPT_TEMPLATE and
 # fills its placeholders to construct $CODEX_PROMPT inline: {gate_name} → $gate_name,
-# {phase_text} → $PHASE_TEXT, {diff} → the contents of $SEGMENT_DIFF_FILE. Then:
+# {phase_text} → $PHASE_TEXT, {diff} → the contents of $SEGMENT_DIFF_FILE.
+# The SAME filled text feeds either leg below — the backend never changes the prompt.
+```
+
+**Run the leg matching `GATE_BACKEND`.** Both legs end in `$FINDINGS`; 2d reads that file and nothing else, so it is untouched by the backend choice (the same-file-slot rule in [`../references/reviewer-backend.md`](../references/reviewer-backend.md)).
+
+#### 2c — codex leg (`GATE_BACKEND=codex`)
+
+```bash
 TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
-RAW="$RUN_DIR/codex-${gate_name}-attempt-${attempt}.raw"
 
 # Prompt → file → codex stdin (`-`). A gate diff can exceed the argv ceiling
 # (macOS ARG_MAX ≈ 1 MB shared with env); an E2BIG never starts codex, leaving an
@@ -193,10 +215,9 @@ fi
 echo $? > "$RAW.exit"
 ```
 
-Run this Bash block with **`run_in_background: true`**. Tell the user: *"Gate '$gate_name' attempt $((attempt+1)): codex reviewing in the background."* Then return control. When the notification arrives, **classify** the result (per-gate loop-state `QUOTA_WAITS`, initialized to `0` alongside `attempt=0` at the top of each gate; orthogonal to `RETRIES`):
+Run this Bash block with **`run_in_background: true`**. Tell the user: *"Gate '$gate_name' attempt $((attempt+1)): codex reviewing in the background."* Then return control. When the notification arrives, **classify** the result:
 
 ```bash
-FINDINGS="$RUN_DIR/findings-${gate_name}-attempt-${attempt}.json"
 STATE=$(~/.claude/skills/koji/bin/koji-codex-classify "$RAW" "$RAW.err" "$RAW.exit" --json-out "$FINDINGS")
 echo "Gate $gate_name attempt $((attempt+1)): codex state = $STATE"
 ```
@@ -204,8 +225,36 @@ echo "Gate $gate_name attempt $((attempt+1)): codex state = $STATE"
 Branch on `$STATE`:
 
 - **`OK`** → findings written; proceed to 2d.
-- **`EMPTY` / `TIMEOUT` / `ERROR`** → **a quota reply is not an empty findings array**, but these three are treated as empty: log `WARN: codex $STATE — treating as empty findings this attempt` and run `echo "[]" > "$FINDINGS"` (the classifier writes `[]` for `EMPTY` but not for `TIMEOUT`/`ERROR`, so guarantee the file exists before 2d's `json.load`), then proceed to 2d. *(Scope: timeout/error keep the prior treat-as-empty semantics; only `QUOTA` gets the back-off path.)*
-- **`QUOTA`** → do **not** write a PASS. If `QUOTA_WAITS < QUOTA_MAX_WAITS`: tell the user *"Gate '$gate_name': codex quota/rate-limit — backing off ${QUOTA_BACKOFF}s, retry $((QUOTA_WAITS+1))/${QUOTA_MAX_WAITS}"*, then dispatch a backgrounded block that sleeps and re-runs the **same** codex invocation from 2c, reading the `$PROMPT_TXT` already on disk — an identical retry, no prompt rebuild (`sleep "$QUOTA_BACKOFF"; <codex exec - …> < "$PROMPT_TXT" > "$RAW" 2> "$RAW.err"; echo $? > "$RAW.exit"`) with `run_in_background: true`, increment `QUOTA_WAITS`, and return control; re-classify on the next notification. If `QUOTA_WAITS` has reached `QUOTA_MAX_WAITS`, codex is **unavailable** → record a deferral (reason *"codex unavailable — quota, $QUOTA_MAX_WAITS back-offs"*) and proceed to the next gate.
+- **`QUOTA` / `ERROR` / `TIMEOUT` / `EMPTY`** → **a codex reply that is not a findings array is not a review — substitute, never `[]`.** Gates 1..N-1 are not final, so there is no back-off here: log `⚠ codex $STATE — gate $gate_name reviewed by fresh-context Claude`, overwrite the backend record — `printf 'codex-quota-substituted\n'` for `QUOTA`, `printf 'codex-error-substituted\n'` for the other three — into `$RUN_DIR/gate-${gate_name}-attempt-${attempt}-backend.txt`, `rm -f "$FINDINGS"` (the classifier writes `[]` on `EMPTY`; a stale `[]` would read as PASS if the substitute then failed), and run the **Claude leg below** for this same attempt with the same filled prompt. Substitution is per-review, not a mode switch: the next gate tries codex again, since the 5-hour window may have restored. Only gate N — the embedded `/duet-review` — backs off and waits on quota (its own Step 2d); a v0.7.4 run dir that paused a mid-gate on quota would now substitute instead.
+
+#### 2c — Claude leg (`GATE_BACKEND=claude`, or a codex substitution)
+
+Record the tree state first — the Claude backend has no `-s read-only` sandbox, only an instruction, so the run detects (not prevents) a reviewer that edits:
+
+```bash
+: "${RAW:?RAW unset — re-substitute it in this block}"   # an empty prefix would write ".fp" into the repo root
+~/.claude/skills/koji/bin/koji-tree-fingerprint > "$RAW.fp"   # compared on collection
+```
+
+**Call the `Agent` tool** — a literal tool call; do not narrate "spawning a reviewer" and write the findings yourself. The reviewer runs in a **fresh Agent context, never a fork** — a fork inherits the implementer's view of the segment, which is exactly the blind spot a gate review exists to catch.
+
+- `subagent_type`: `general-purpose`
+- `description`: `Duet-impl gate '<gate_name>' attempt <attempt+1>: Claude review`
+- `model`: **omit this parameter** when `$CLAUDE_MODEL` is `inherit`; otherwise pass its value (`fable` / `opus` / `sonnet`)
+- `prompt`: the filled `gate-review-prompt.md` "Reviewer prompt" text — byte-for-byte what `$CODEX_PROMPT` holds — followed by the **read-only clause** from `../references/reviewer-backend.md`
+- `run_in_background`: `true`
+
+Tell the user: *"Gate '$gate_name' attempt $((attempt+1)): Claude reviewing in the background."* Then return control. When the notification arrives, extract the JSON array from the response and **Write it to `$FINDINGS`** (the same slot the codex leg fills); also Write the raw response to `$RAW.claude.txt` so a bad extraction can be debugged. **Do not run `koji-codex-classify` on it** — its quota-marker scan over review prose would misfire — and there is no `.exit` file to read. Then compare the tree fingerprint:
+
+```bash
+FP_NOW=$(~/.claude/skills/koji/bin/koji-tree-fingerprint)
+[ "$FP_NOW" = "$(cat "$RAW.fp" 2>/dev/null)" ] \
+  || echo "⚠ working tree changed while a read-only reviewer was in flight (reviewer or concurrent work) — review snapshot may be stale"
+```
+
+If the response has **no parseable array**: when `B_RETRIED=0`, set `B_RETRIED=1` and re-dispatch the same Agent call once with the reminder *"Your last response was not a JSON array — re-output your findings as ONLY a JSON array, `[]` if none."* On a second failure the gate reviewer is **unavailable**: `rm -f "$FINDINGS"`, record a deferral (reason *"reviewer unavailable — malformed reply ×2"*, template below) and proceed to the next gate — do **not** run 2d, do **not** write `[]`. Reset `B_RETRIED=0` at the top of each gate attempt.
+
+Then proceed to 2d.
 
 ### 2d. Decide PASS / FIX / DEFER
 
@@ -226,9 +275,10 @@ if [ "$attempt" -lt "$RETRIES" ]; then
   attempt=$((attempt+1))
   # Loop back to 2c
 else
-  echo "Gate $gate_name: retry budget exhausted, consulting codex once"
-  # Consult round: ask codex to re-examine its findings given that 2 fixes didn't satisfy.
-  # If consult resolves it (codex agrees fixes are now fine), PASS.
+  echo "Gate $gate_name: retry budget exhausted, consulting the gate reviewer once"
+  # Consult round: ask the gate reviewer (same backend/leg as this gate) to re-examine
+  # its findings given that 2 fixes didn't satisfy. If consult resolves it (the
+  # reviewer agrees fixes are now fine), PASS.
   # Otherwise the loop never blocks: it is a recorded deferral, not a blocking prompt.
   # Record it and proceed — the only posture, unattended-safe by design.
   echo "Gate $gate_name: recording $HIGH_COUNT unresolved high finding(s) as deferred, proceeding"
@@ -238,20 +288,20 @@ else
 fi
 ```
 
-The **codex-unavailable** terminal from Step 2c (`QUOTA_WAITS` cap reached) is handled the same way: record a deferral with reason *"codex unavailable — quota"* and proceed to the next gate.
+The **reviewer-unavailable** terminal from Step 2c (the Claude leg returned no parseable array twice — after a codex substitution, or in `claude` mode) is handled the same way: record a deferral with reason *"reviewer unavailable — malformed reply ×2"* and proceed to the next gate. Gates 1..N-1 never wait on quota any more (2c substitutes), so there is no quota-cap terminal at a gate.
 
 **Deferral artifact (`$RUN_DIR/deferred-findings.md`).** Written with the Write tool — create-with-header on the first deferral of the run, append a `## Gate:` block on each subsequent one (text formatting, so prose-templated, not a helper). Record the finding + *why 2 rounds couldn't resolve it* + the gate:
 
 ```markdown
 # Deferred findings — /duet-impl run
 Plan: <PLAN_FILE>   Run dir: <RUN_DIR>   Start SHA: <START_SHA>
-Recorded because the gate could not resolve within RETRIES + consult, or codex was
-unavailable. The loop never blocks — it defers and proceeds. Code remains in the
-cumulative diff — the end-of-run /duet-review re-examines it.
+Recorded because the gate could not resolve within RETRIES + consult, or the gate
+reviewer was unavailable. The loop never blocks — it defers and proceeds. Code remains
+in the cumulative diff — the end-of-run /duet-review re-examines it.
 
 ---
 ## Gate: <gate_name>
-- Why deferred: <RETRIES + consult exhausted | codex unavailable — quota, N back-offs>
+- Why deferred: <RETRIES + consult exhausted | reviewer unavailable — malformed reply ×2>
 - Findings (<HIGH_COUNT>):
   - `<file>:<line>` [<category>] <description>
     fix: <suggested_fix.details>
@@ -259,7 +309,7 @@ cumulative diff — the end-of-run /duet-review re-examines it.
 
 When retrying (the `if` branch above), apply each high finding before looping back to 2c: read `$FINDINGS` and, for every finding with `severity == high`, invoke the Edit tool with that finding's `suggested_fix.details` to apply the fix — same mechanism as `/duet-review` Step 5d. This is a tool action, not a shell call; there is no batch helper.
 
-Per the autonomy principle, the consult-codex round is the "agents try together" step *before* recording a deferral. The consult prompt is:
+Per the autonomy principle, the consult-the-reviewer round is the "agents try together" step *before* recording a deferral. It goes to the same backend that reviewed the gate — the codex leg's `codex exec -` block, or the Claude leg's `Agent` dispatch (fresh context, never a fork), with the reviewer's own findings inlined. The consult prompt is:
 
 > *"You flagged these high findings on gate '$gate_name'. The implementer made 2 fix attempts that you still flagged. Either: (a) reconfirm with specific code-level guidance the implementer can apply, or (b) acknowledge if your earlier findings may have been mistaken given the work as-is."*
 
@@ -344,6 +394,8 @@ Hand it the right **scope** and **depth** in the invocation phrase:
 
 - **Scope → the working tree.** Phrase it as *"review the working tree since `<START_SHA>`"* so `/duet-review` runs in `WORKTREE` mode (`SINCE=$START_SHA`), NOT its default `BASE...HEAD` (which is committed-only and wrong here — `/duet-impl` never commits, so `HEAD == $START_SHA`). `git diff $START_SHA == git diff HEAD ==` the cumulative work. The work was already staged at the top of Step 3, so new files are in scope.
 - **Depth → fan-out at max effort.** This is the *comprehensive* final review: at `/effort max` it must run the 5-angle fan-out (`REVIEW_MODE=fanout`), not `single`. Say so in the invocation ("full review / all angles") so the loaded skill doesn't default to a single pass.
+
+- **Backend → not yours to pass.** The loaded `/duet-review` re-sources `koji-detect` in its own preamble and resolves its Reviewer B from `.koji.yaml` itself (`koji-duet-backend review-b`: `claude-rounds+codex-final` → codex there, because the final gate is the cross-model one). Do not try to pass `DUET_REVIEWER`, `GATE_BACKEND` or a backend name through the invocation phrase — only the quota-intent words (e.g. "retry every 10 minutes") travel, since that skill's back-off is what governs the final gate.
 
 User-visible behavior is one continuous run ending with the verdict. When `/duet-review` finishes, **capture the `Output JSON:` path** from its Step 6 summary (its `verdict.json`) — Step 5 reads the final review's `codebase-fit` findings from that file.
 
@@ -465,6 +517,7 @@ Then print a markdown summary:
 ```
 duet-impl: <PASS | REJECT>
 Plan:      <plan-path>
+Reviewer:  <GATE_BACKEND> gates (<none | substituted: gate-2 codex-quota>) → <codex | claude-B> final
 Gates:     <gate-1> ✓ → <gate-2> ⚠deferred → <gate-3> ✓ (retries: 0, 2, 0)
 Code delta: +<ADDS> / −<DELS> (ratio <RATIO>)
 Promise audit: <PROMISE_AUDIT_TOTAL> promises checked, <PROMISE_AUDIT_GAPS> gaps
@@ -482,13 +535,19 @@ The `Code delta:` line is a meta-signal, not a status change. High ratios (≥ 5
 
 The `Deferred:` block prints only when `$RUN_DIR/deferred-findings.md` is non-empty (one indented line per unresolved HIGH, read from that file). Like promise gaps it is surfaced alongside the verdict, not folded into it — the user triages all deferrals at once on return. Annotate each deferred gate on the `Gates:` line with `⚠deferred`.
 
+The `Reviewer:` line reads the `gate-*-backend.txt` files: the configured gate backend, every gate whose record says `codex-quota-substituted` / `codex-error-substituted`, and the final review's Reviewer B from its own header. When any gate ran on a Claude substitute, or `GATE_BACKEND=claude`, append the same-model caveat from `/duet-review`'s Step 6 in one line. Repeat any `⚠ working tree changed …` line that fired during a Claude-leg gate.
+
 ## Failure modes
 
 | Symptom | Cause | Mitigation |
 |---|---|---|
 | Codex review at gate hangs | `--enable web_search_cached` re-introduced, or stdin not closed | Skill explicitly drops both — verify bash not modified |
 | Codex exits 124 at a gate | Gate diff too large or `xhigh` exceeded 30-min wall | Re-run asking for a smaller retry budget (`RETRIES=1`, faster fail) and smaller gate scopes |
-| Codex quota/rate-limit at a gate | 5-hour session limit depleted mid-run | `koji-codex-classify` returns `QUOTA` (not `[]`) → back off `QUOTA_BACKOFF`s and auto-retry up to `QUOTA_MAX_WAITS`, never a silent PASS. Cap reached → records a deferral and proceeds |
+| Codex quota/rate-limit (or ERROR/TIMEOUT/EMPTY) at gates 1..N-1 | 5-hour session limit depleted mid-run, or codex failed to start / reply | `koji-codex-classify` returns a non-`OK` state (never `[]` for quota) → the gate is re-reviewed immediately by a fresh-context Claude subagent (Step 2c Claude leg), recorded as `codex-*-substituted`; the next gate tries codex again. Never a silent PASS, never a wait |
+| Codex quota at the final gate (embedded `/duet-review`) | Same, at the cross-model review | That skill's own back-off: `QUOTA_BACKOFF`s × `QUOTA_MAX_WAITS`, auto-resuming; cap → its degraded banner. The final gate is never substituted |
+| Claude-leg gate reviewer returns prose / no array | Prompt drift on the substitute or `claude`-mode reviewer | Retry once with the format reminder; second failure → deferral "reviewer unavailable — malformed reply ×2", `$FINDINGS` removed, walk proceeds. Never `[]`, never `koji-codex-classify` on Claude output |
+| `⚠ working tree changed while a read-only reviewer was in flight` | Claude-leg reviewer edited despite the read-only clause, or the user kept working | Unattributed by design. `git status`; if the reviewer edited, discard its edits and re-run the gate |
+| `duet.reviewer` typo in `.koji.yaml` | Enum validation in `koji-detect` | Warns on stderr, falls back to `codex` — check the preamble's `Gate reviewer:` line |
 | Gate unresolved after retries + consult | Genuine hard finding | Recorded to `$RUN_DIR/deferred-findings.md`, walk proceeds (never blocks); deferred code stays in the cumulative diff so the end-of-run `/duet-review` re-examines it |
 | Implementer-applied fix doesn't compile | Suggested_fix.details was wrong for the actual context | Counts as a retry attempt; codex's next review will flag the new issue. Up to budget |
 | Stuck on a "scope" finding (codex says work overshoots phase) | Plan was ambiguous, or implementer interpreted broadly | Consult round usually resolves; if not, record a deferral and proceed |
@@ -499,6 +558,7 @@ The `Deferred:` block prints only when `$RUN_DIR/deferred-findings.md` is non-em
 ## Related
 
 - Autonomy principle: [../references/agent-autonomy.md](../references/agent-autonomy.md)
+- Reviewer backend (codex | claude | hybrid; substitution rule; read-only clause): [../references/reviewer-backend.md](../references/reviewer-backend.md)
 - Gate review prompt: [references/gate-review-prompt.md](references/gate-review-prompt.md)
 - Promise audit prompt: [references/promise-audit-prompt.md](references/promise-audit-prompt.md)
 - Upstream producer: `/duet-plan` saves the plan files `/duet-impl` consumes

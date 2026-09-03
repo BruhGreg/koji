@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# koji-amendable — is HEAD safe to `git commit --amend` onto?
+#
+# Usage: eval "$(~/.claude/skills/koji/bin/koji-amendable)"
+#
+# Emits four sourceable assignments (printf %q, like koji-detect):
+#
+#   AMENDABLE=true|false      amend is safe / is not
+#   REASON=<token>            `ok`, or the FIRST failed check (see below)
+#   HEAD_SUBJECT=<subject>    HEAD's subject line ('' when there is no HEAD)
+#   HEAD_AGE_SECONDS=<n>      now − HEAD commit time (0 when there is no HEAD)
+#
+# Always exits 0 — a `false` verdict is an answer, not an error, and callers
+# source this. Read AMENDABLE, never the exit status.
+#
+# AMENDABLE=true only when ALL of these hold. They are checked in this order
+# and the first failure becomes REASON, so the token names the earliest reason
+# the caller has to stop:
+#
+#   no-sentinel          $SESSION_START_FILE is missing, or holds something
+#                        `git rev-parse --verify` won't accept
+#   detached             HEAD is not on a branch
+#   merge-commit         HEAD has 2+ parents  (amending one rewrites a merge)
+#   root-commit          HEAD has no parents  (nothing to amend onto)
+#   no-session-commits   HEAD is still the session's starting rev — the commit
+#                        below us predates this session; amending steals it
+#   sentinel-not-ancestor  the session start isn't in HEAD's history (rebase,
+#                        reset, branch switch since /kick-off)
+#   other-author         HEAD's committer email != git config user.email
+#   older-than-session   HEAD is older than the sentinel FILE's mtime
+#   pushed               HEAD is published: it is an ancestor of @{u}, or some
+#                        remote-tracking branch contains it
+#
+# Never fetches. `pushed` is decided from refs already on disk, so it can only
+# be stale in the safe direction if the caller has never fetched... and in the
+# unsafe direction never, because a rev we have not seen pushed cannot be
+# reported as pushed. Callers that care about the remote must fetch first.
+#
+# Requires $SESSION_START_FILE (from koji-detect); self-sources when unset.
+set -euo pipefail
+
+if [ -z "${SESSION_START_FILE:-}" ]; then
+  eval "$(~/.claude/skills/koji/bin/koji-detect)"
+fi
+
+_emit() { printf '%s=%q\n' "$1" "$2"; }
+
+# Portable mtime. Probed once, not tried per call: GNU `stat -f` means
+# --file-system (the format string becomes a filename), so the BSD-first
+# `stat -f %m f || stat -c %Y f` idiom prints garbage on stdout on GNU before
+# it fails. Probing with `-c` is unambiguous — BSD stat has no -c at all.
+if stat -c %Y . >/dev/null 2>&1; then
+  _mtime() { stat -c %Y "$1"; }
+else
+  _mtime() { stat -f %m "$1"; }
+fi
+
+_verdict() {
+  printf '%s' "$1"   # reason token; "ok" means amendable
+}
+
+# --- gather ---
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  _emit AMENDABLE "false"
+  _emit REASON "nogit"
+  _emit HEAD_SUBJECT ""
+  _emit HEAD_AGE_SECONDS "0"
+  exit 0
+fi
+
+HEAD_REV="$(git rev-parse --verify -q HEAD 2>/dev/null || true)"
+HEAD_SUBJECT=""
+HEAD_AGE=0
+if [ -n "$HEAD_REV" ]; then
+  HEAD_SUBJECT="$(git log -1 --format=%s 2>/dev/null || true)"
+  HEAD_CT="$(git log -1 --format=%ct 2>/dev/null || echo 0)"
+  HEAD_AGE=$(( $(date +%s) - HEAD_CT ))
+  [ "$HEAD_AGE" -ge 0 ] || HEAD_AGE=0   # clock skew / commit dated in the future
+else
+  HEAD_CT=0
+fi
+
+# --- checks, in order; first failure wins ---
+
+REASON="ok"
+
+_check() {
+  # 1. sentinel exists and names a real commit
+  local sentinel_raw sentinel_rev
+  if [ ! -f "${SESSION_START_FILE:-}" ]; then
+    _verdict "no-sentinel"; return
+  fi
+  sentinel_raw="$(head -1 "$SESSION_START_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [ -z "$sentinel_raw" ]; then
+    _verdict "no-sentinel"; return
+  fi
+  sentinel_rev="$(git rev-parse --verify -q "${sentinel_raw}^{commit}" 2>/dev/null || true)"
+  if [ -z "$sentinel_rev" ]; then
+    _verdict "no-sentinel"; return
+  fi
+
+  # 2. HEAD is attached
+  if ! git symbolic-ref -q HEAD >/dev/null 2>&1; then
+    _verdict "detached"; return
+  fi
+
+  # 3. exactly one parent
+  if [ -z "$HEAD_REV" ]; then
+    _verdict "root-commit"; return
+  fi
+  local parents nparents
+  parents="$(git rev-list --parents -n 1 HEAD 2>/dev/null || true)"
+  # shellcheck disable=SC2086
+  set -- $parents
+  nparents=$(( $# - 1 ))
+  if [ "$nparents" -gt 1 ]; then
+    _verdict "merge-commit"; return
+  fi
+  if [ "$nparents" -lt 1 ]; then
+    _verdict "root-commit"; return
+  fi
+
+  # 4. the session actually produced a commit
+  if [ "$HEAD_REV" = "$sentinel_rev" ]; then
+    _verdict "no-session-commits"; return
+  fi
+
+  # 5. the session start is still in our history
+  if ! git merge-base --is-ancestor "$sentinel_rev" HEAD 2>/dev/null; then
+    _verdict "sentinel-not-ancestor"; return
+  fi
+
+  # 6. HEAD is ours. Committer (not author) — that is the identity an amend
+  #    would silently overwrite.
+  local head_email me
+  head_email="$(git log -1 --format=%ce 2>/dev/null || true)"
+  me="$(git config user.email 2>/dev/null || true)"
+  if [ -z "$me" ] || [ "$head_email" != "$me" ]; then
+    _verdict "other-author"; return
+  fi
+
+  # 7. HEAD was made after this session started. The sentinel FILE's mtime is
+  #    the session clock (its CONTENT is the starting rev, checked above).
+  local sentinel_mtime
+  sentinel_mtime="$(_mtime "$SESSION_START_FILE" 2>/dev/null || echo 0)"
+  if [ -z "$sentinel_mtime" ] || [ "$HEAD_CT" -le "$sentinel_mtime" ]; then
+    _verdict "older-than-session"; return
+  fi
+
+  # 8. not published. Two independent signals, either one is disqualifying:
+  #    upstream contains HEAD, or any remote-tracking ref does.
+  local upstream
+  if upstream="$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null)" && [ -n "$upstream" ]; then
+    if git merge-base --is-ancestor HEAD "$upstream" 2>/dev/null; then
+      _verdict "pushed"; return
+    fi
+  fi
+  if [ -n "$(git branch -r --contains HEAD 2>/dev/null || true)" ]; then
+    _verdict "pushed"; return
+  fi
+
+  _verdict "ok"
+}
+
+REASON="$(_check)"
+
+if [ "$REASON" = "ok" ]; then
+  _emit AMENDABLE "true"
+else
+  _emit AMENDABLE "false"
+fi
+_emit REASON "$REASON"
+_emit HEAD_SUBJECT "$HEAD_SUBJECT"
+_emit HEAD_AGE_SECONDS "$HEAD_AGE"

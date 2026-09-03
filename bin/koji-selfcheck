@@ -10,10 +10,20 @@
 # the skill silently drift. Wired into `setup` so a degraded skill cannot install
 # quietly.
 #
+# Two kinds of pin:
+#   MARKERS  — must appear at least once (presence).
+#   COUNTED  — (min-count, marker) pairs; the marker must appear at least
+#              min-count times. Used for phrases that live at EVERY dispatch
+#              site (e.g. the Claude-backend "Call the `Agent` tool" block), so
+#              dropping one site fails even though the phrase still exists
+#              elsewhere. Counted with `grep -oF | wc -l` (occurrences, not
+#              lines — two sites on one line count twice).
+#
 # A no-arg run checks every skill listed in ALL_WITH_MARKERS below — the single
 # source of truth `setup` relies on. Each contract here regressed at least once
 # while it lived as loose prose (plan-triangulate-review's autonomous loop; the
-# duet cross-review gate), so the markers exist precisely so that can't recur.
+# duet cross-review gate; duet-plan's consensus detection), so the markers exist
+# precisely so that can't recur.
 # Exit 0 if all present; exit 1 listing each missing one.
 
 set -euo pipefail
@@ -23,7 +33,7 @@ KOJI_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # Skills that carry load-bearing markers (defined in the case below). A no-arg
 # run checks them ALL; adding a newly-pinned skill here is all it takes to wire
 # it into install-time lint (setup calls this script with no argument).
-ALL_WITH_MARKERS=(plan-triangulate-review duet-review duet-impl)
+ALL_WITH_MARKERS=(plan-triangulate-review duet-review duet-impl duet-plan)
 
 if [ -z "${1:-}" ]; then
   rc=0
@@ -44,6 +54,7 @@ fi
 # Load-bearing markers, per skill. Each MUST appear verbatim in the SKILL.md;
 # they double as the human-readable contract and the lint target. Authoring a
 # marker into the prose and asserting it here are two halves of one guard.
+COUNTED=()
 case "$SKILL" in
   plan-triangulate-review)
     MARKERS=(
@@ -64,13 +75,37 @@ case "$SKILL" in
       "Fan-out priming trap"
       "codex quota is not zero findings"
     )
+    # Reviewer-backend dispatch sites: 2b Reviewer A (single) + 2a Claude leg +
+    # 4b Claude cross leg. The two Claude-backend sites carry the never-a-fork rule.
+    COUNTED=(
+      3 'Call the `Agent` tool'
+      2 'fresh Agent context, never a fork'
+    )
     ;;
   duet-impl)
     MARKERS=(
       "Verify the embedded review actually ran its cross-review"
       "caller-side structural backstop"
       "recorded deferral, not a blocking prompt"
-      "quota reply is not an empty findings array"
+      "a codex reply that is not a findings array is not a review"
+    )
+    # 2c Claude leg + 3a promise auditor.
+    COUNTED=(
+      2 'Call the `Agent` tool'
+      1 'fresh Agent context, never a fork'
+    )
+    ;;
+  duet-plan)
+    MARKERS=(
+      "CONSENSUS REACHED at round"
+      'rm "$CODEX_FILE"'
+      "--prose"
+      "exactly one codex call"
+    )
+    # 2a drafter + 2b Claude leg + 2d drafter.
+    COUNTED=(
+      3 'Call the `Agent` tool'
+      1 'fresh Agent context, never a fork'
     )
     ;;
   *)
@@ -87,9 +122,21 @@ for m in "${MARKERS[@]}"; do
   fi
 done
 
+i=0
+while [ "$i" -lt "${#COUNTED[@]}" ]; do
+  want="${COUNTED[$i]}"
+  m="${COUNTED[$((i+1))]}"
+  have="$(grep -oF -- "$m" "$FILE" | wc -l | tr -d ' ')"
+  if [ "$have" -lt "$want" ]; then
+    echo "MISSING MARKER: '$m' — need >= $want occurrence(s), found $have"
+    MISSING=1
+  fi
+  i=$((i+2))
+done
+
 if [ "$MISSING" = "1" ]; then
   echo "koji-selfcheck: $SKILL FAILED — load-bearing markers missing (see above)." >&2
   exit 1
 fi
-echo "koji-selfcheck: $SKILL OK (${#MARKERS[@]} markers present)"
+echo "koji-selfcheck: $SKILL OK (${#MARKERS[@]} markers, $(( ${#COUNTED[@]} / 2 )) counted present)"
 exit 0

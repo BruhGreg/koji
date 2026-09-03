@@ -24,7 +24,10 @@ echo "Docs: $DOCS_PATH"
 echo "Template: $TEMPLATE"
 echo "Archive: $ARCHIVE_STRATEGY (threshold=$ARCHIVE_THRESHOLD, keep=$ARCHIVE_KEEP)"
 echo "Has docs: $HAS_DOCS | Session log: $HAS_SESSION_LOG | Handoff: $HAS_HANDOFF | Lessons: $HAS_LESSONS"
+echo "Prompts: $WRAP_PROMPTS (commit prompt: $WRAP_COMMIT_PROMPT) | Commit gate: $WRAP_COMMIT_GATE"
 ```
+
+`WRAP_PROMPTS=off` (`.koji.yaml` → `wrap: { prompts: off }`) means the user opted into the documented auto policy: every step that would fire `AskUserQuestion` takes its non-interactive branch instead and prints the one-line summary that branch already defines. `WRAP_COMMIT_PROMPT` is the same switch for Step 5's commit approval alone — it follows `prompts` unless set explicitly, because committing is the riskier prompt to drop.
 
 If `HAS_DOCS` is `false`, tell the user to run `/koji-init` first and stop.
 
@@ -135,6 +138,40 @@ The grep is a **best-effort hint, not the authority**: it catches checkbox-style
 - `~/.claude/skills/koji/bin/koji-plans-research --filter active` lists active plans **and** research (tab-separated; field 1 is the path, field 2 is `plan` or `research`).
 - For each **plan** whose work shipped: `~/.claude/skills/koji/bin/koji-plans-research --set-status <path> completed`. Whether it shipped is your judgment; the helper does the write; the file stays in place (the archive points *at* it — only the `status:` field flips).
 - For each **research** doc whose validation condition clearly fired this session: `~/.claude/skills/koji/bin/koji-plans-research --set-status <path> validated`. If it's ambiguous, leave it and note it. No auto-validation on a hunch.
+
+**Re-check each still-active plan's `next-step` (v0.8.0).** A `next-step:` line survives wraps untouched by default, so a step that was actually done this session keeps being rendered at every `/kick-off` until someone notices. Run this after the status flips:
+
+```bash
+ACTIVE_PLANS=$(~/.claude/skills/koji/bin/koji-plans-research --filter active-plan 2>/dev/null || true)
+SESSION_START=$(cat "$SESSION_START_FILE" 2>/dev/null || true)
+if [ -n "$SESSION_START" ] && git rev-parse --verify "$SESSION_START" >/dev/null 2>&1; then
+  SESSION_SUBJECTS=$(git log --format=%s "$SESSION_START..HEAD" 2>/dev/null || true)
+  TOUCHED=$( (git diff --name-only "$SESSION_START..HEAD" 2>/dev/null; git diff --name-only HEAD 2>/dev/null) | sort -u)
+else
+  SESSION_SUBJECTS=""
+  TOUCHED=$(git diff --name-only HEAD 2>/dev/null)
+fi
+printf '%s\n' "$ACTIVE_PLANS" | cut -f1,7
+```
+
+(Step 2c recomputes `SESSION_START`/`TOUCHED` for itself — each Bash block is a fresh shell; the duplication is deliberate.) Each record is tab-separated; field 1 is the plan path, field 7 its `next-step` (`-` when empty). A plan is a **candidate** when any of these hold — plans matching none are never prompted:
+
+- its path is in `TOUCHED` (the plan file itself was edited this session), or
+- its slug (file name without `.md`) appears in a `SESSION_SUBJECTS` line, or
+- you can tell from this session's work that the step the `next-step` describes was done or has changed — you have the session in working memory, the same signal Pass B relies on.
+
+Skip candidates whose `next-step` is `-`. For each remaining candidate, show the current `next-step` and decide **keep** or **rewrite**:
+
+- `WRAP_PROMPTS=on` and `AskUserQuestion` callable → **one batched prompt** listing every candidate with its current line and your proposed rewrite (or "keep"); the user picks per plan.
+- Otherwise → rewrite only on a concrete signal that the step was done or superseded (a commit subject, a TODO you just completed, a status you just flipped). When in doubt, keep.
+
+Write through the helper — never edit frontmatter by hand:
+
+```bash
+~/.claude/skills/koji/bin/koji-plans-research --set-next-step "<path>" "<one line>"
+```
+
+The text must be one line; the helper stores it as a quoted scalar (so `#` and `:` survive `--get`) and refuses a file with no frontmatter (exit 3 — leave that one alone and note it). Close with one line, `next-step: rewrote N, kept M`, or print nothing when there were no candidates.
 
 ---
 
@@ -365,7 +402,7 @@ Merge Pass A + Pass B (adds) and Pass C (removes). If both lists are empty, skip
 
 Omit the Add or Remove block if its list is empty.
 
-**Interactive mode — fire `AskUserQuestion`:**
+**Interactive mode — fire `AskUserQuestion` (only when `WRAP_PROMPTS` is `on` AND the tool is callable):**
 
 Options:
 - **A) Apply all** — add and remove as proposed.
@@ -376,7 +413,7 @@ Options:
 
 Omit B if no adds, omit C if no removes, omit A/B/C as redundant if either bucket is empty (collapses to the obvious one-bucket prompt).
 
-**Non-interactive fallback — ONLY when `AskUserQuestion` is not callable in this runtime** (e.g., the tool is absent from the available tool list, or the session is in a spawned/headless mode that lacks prompt support). Do NOT use this branch just because changes look "obvious" or "low-risk" — if AskUserQuestion is callable, fire it.
+**Non-interactive fallback — ONLY when `AskUserQuestion` is not callable in this runtime** (e.g., the tool is absent from the available tool list, or the session is in a spawned/headless mode that lacks prompt support) **or `WRAP_PROMPTS` is `off`** (the user opted into this policy via `.koji.yaml`). Do NOT use this branch just because changes look "obvious" or "low-risk" — if AskUserQuestion is callable and prompts are on, fire it.
 
 The proposal text already printed. Decide what to apply automatically:
 
@@ -450,15 +487,54 @@ The gates above (top of Step 2c) handle every combination of `TAGGED_EXISTS` × 
 
 5. Use `[Claude]` as the agent tag (or the appropriate tag from `$AGENTS`).
 
+6. **Template hygiene when writing an entry.** Strip the template's HTML comments (`<!-- … -->`) — they are instructions to you, not entry content. Under `### Test Results`, when nothing was run (docs-only session, nothing user-reachable changed), write a single `- n/a — <reason>` line instead of leaving checkboxes or padding a "no GUI smoke — …" sentence. This convention holds for every project template, including ones scaffolded before it was written down.
+
+7. **Placeholder gate (v0.8.0).** An entry that still carries template placeholders is not finalized. After writing a new entry (or finalizing an `[in progress]` one), check **only the entry you just wrote** — never the whole log, or one leaked `[Description]` in an old entry would block every future wrap:
+
+   ```bash
+   SESSION_LOG="$DOCS_PATH/agent-session.md"
+   TEMPLATE_USED="$DOCS_PATH/SESSION_TEMPLATE.md"
+   [ -f "$TEMPLATE_USED" ] || TEMPLATE_USED="$KOJI_SKILLS/templates/$TEMPLATE/SESSION_TEMPLATE.md"
+   LAST_START=$(grep -n '^## Session:' "$SESSION_LOG" | tail -1 | cut -d: -f1)
+   if [ -z "$LAST_START" ]; then
+     echo "placeholder gate: no '## Session:' heading in $SESSION_LOG — the entry was not written; go back to sub-step 4."
+   else
+     ENTRY_TMP=$(mktemp)
+     tail -n "+$LAST_START" "$SESSION_LOG" > "$ENTRY_TMP"
+     ~/.claude/skills/koji/bin/koji-session-placeholders "$TEMPLATE_USED" "$ENTRY_TMP" > "$ENTRY_TMP.left" 2> "$ENTRY_TMP.err"
+     GATE_RC=$?
+     case "$GATE_RC" in
+       0) echo "placeholders: none" ;;
+       1) echo "Session entry still has placeholder \"$(head -1 "$ENTRY_TMP.left")\" — fill it before wrap can continue."
+          cat "$ENTRY_TMP.left" ;;
+       *) echo "placeholder gate unavailable (exit $GATE_RC): $(cat "$ENTRY_TMP.err")" ;;   # a helper/template problem, not a placeholder — do not treat as a block
+     esac
+     rm -f "$ENTRY_TMP" "$ENTRY_TMP.left" "$ENTRY_TMP.err"
+   fi
+   ```
+
+   The helper prints every `[…]` token from the template that survives verbatim in the entry — checkbox marks and the `[<agent>]` tags in `$AGENTS` excluded — so it works against a project's own `SESSION_TEMPLATE.md` too. That is how a project adds an obligation that must be answered every session: a line such as `**AI-lens**: [angle | none | n/a (reason)]` in its template makes wrap refuse to finalize until the bracket is replaced. If anything is printed, **stop here**: fill the field from this session's context and re-run the check. Only a field you genuinely cannot know halts the wrap — say which one and why, and do not proceed to Step 4.
+
 ---
 
 ## Step 4 — Permission Hygiene
 
-Resolve paths via `$PROJECT_ROOT/.claude/settings.local.json` and `$PROJECT_ROOT/.claude/settings.json` — relative `.claude/...` is unreliable across cwd contexts (hooks, subshells). Treat missing/unreadable files as not having any fields set (absent `settings.local.json` is normal for fresh sessions; absent `settings.json` is normal for fresh projects).
+Resolve the *effective* permission mode with the helper — not by reading the project files yourself. Since Claude Code 2.1.257, `permissions.defaultMode: bypassPermissions` (and `auto`) set in `.claude/settings.json` or `.claude/settings.local.json` **does not take effect**; only user settings (`~/.claude/settings.json`), managed settings, or the `--permission-mode` CLI flag can set it. The old two-file check inspected exactly the files that can no longer set bypass and ignored the ones that can — and older `/koji-init` wrote the now-inert key into the local file, so a stale mirror is common.
 
-**Bypass short-circuit.** If either file has `permissions.defaultMode == "bypassPermissions"`, skip the rest of Step 4 silently. Bypass-mode entries are session noise (auto-allowed tool calls), not curated grants — promoting them would bloat `settings.json` with machine-specific cruft. Move to Step 5.
+```bash
+source <(~/.claude/skills/koji/bin/koji-permission-mode)
+echo "Effective mode: $EFFECTIVE_MODE (source: $MODE_SOURCE) | bypass: $EFFECTIVE_BYPASS | Claude Code: $CLAUDE_VERSION"
+if [ -n "$INERT_LOCAL_MODE" ]; then echo "note: .claude/settings.local.json sets defaultMode=$INERT_LOCAL_MODE — inert since Claude Code 2.1.257 (/kick-off offers cleanup)"; fi
+if [ -n "$INERT_PROJECT_MODE" ]; then echo "note: .claude/settings.json sets defaultMode=$INERT_PROJECT_MODE — inert since Claude Code 2.1.257 (/kick-off offers cleanup)"; fi
+```
 
-Otherwise, if `settings.local.json` exists:
+The helper walks managed → local → project → user in Claude Code's own precedence, skips the inert project-scope values, honors `disableBypassPermissionsMode` / `disableAutoMode`, and reads the **main checkout's** `.claude/` when you are in a worktree (`SETTINGS_ROOT` — Claude Code writes `settings.local.json` there, not in the worktree). `APPROXIMATE=true` is always set: a `--permission-mode` / `--dangerously-skip-permissions` launch flag is invisible to any settings scan, so this is the best file-based answer, not a guarantee.
+
+**Bypass short-circuit.** If `EFFECTIVE_BYPASS` is `true`, skip the rest of Step 4 silently (the inert notes above are the only output). Bypass-mode entries are session noise (auto-allowed tool calls), not curated grants — promoting them would bloat `settings.json` with machine-specific cruft. Move to Step 5. An inert project-scope key alone does **not** short-circuit — that was the bug. `auto` mode does not short-circuit either: under auto, entries in `settings.local.json` are still the user's own "always allow" clicks, which the filter below should see.
+
+If `SETTINGS_ROOT` differs from `PROJECT_ROOT` (you are in a linked worktree), print one line — `permission hygiene: skipped in worktree; settings live in <SETTINGS_ROOT>` — and move to Step 5: the promoted `settings.json` would live in another checkout, and this wrap could not commit it.
+
+Otherwise, if `$SETTINGS_ROOT/.claude/settings.local.json` exists (treat missing/unreadable files as having no fields set):
 
 1. Read `settings.local.json` (session-accumulated permissions)
 2. Read `settings.json` (committed permissions)
@@ -493,6 +569,8 @@ Otherwise, if `settings.local.json` exists:
    > One permission needs your call:
    > - `Bash(docker compose:*)` — keep for next session? (y/n)
 
+   **When `WRAP_PROMPTS` is `off`** (or `AskUserQuestion` is not callable), do not ask: leave grey-area items in `settings.local.json` un-promoted and name them in the one-liner instead — `Skipped 2 grey-area permissions (prompts off): Bash(docker compose:*), Bash(gh:*)`. Auto-promote still applies; only the judgment call is withheld.
+
 7. Merge auto-promoted + user-approved into `settings.json`, preserving existing entries. Do not duplicate.
 8. If nothing new to promote, skip this step entirely — no output.
 
@@ -504,25 +582,93 @@ Otherwise, if `settings.local.json` exists:
 
 1. Run `git status` and `git diff --stat` to capture **all** changes (session work, wrap doc updates, and permission changes).
 2. Classify every changed file as either **code** (session work) or **docs** (koji files: `$DOCS_PATH/lessons.md`, `$DOCS_PATH/AI_HANDOFF.md`, `$TODO_PATH`, `$DOCS_PATH/COMPLETED_TASKS.md`, `$DOCS_PATH/agent-session.md`, `$DOCS_PATH/SESSION_TEMPLATE.md`, `$DOCS_PATH/$ARCHIVE_DIR/**`, `$PLANS_DIR/**`, `$RESEARCH_DIR/**`, `.claude/settings.json`).
-3. Determine the commit strategy:
+3. **Amend eligibility** — compute once, before choosing a strategy:
+
+   ```bash
+   source <(~/.claude/skills/koji/bin/koji-amendable)
+   echo "Amendable: $AMENDABLE ($REASON) | HEAD: \"$HEAD_SUBJECT\" ($((HEAD_AGE_SECONDS / 60)) min ago)"
+   ```
+
+   `AMENDABLE=true` means HEAD is your own, single-parent commit, made after this session's `/kick-off` sentinel, and not known to be pushed (as of the last fetch). Folding the wrap docs into the work commit they belong to is the same-session case — "I committed the work five minutes ago; the session log goes with it." It is an *option*, never a default. When `AMENDABLE` is `false`, never offer it; `REASON` says why (`pushed`, `other-author`, `no-sentinel`, `merge-commit`, …). The exact command, when amending:
+
+   ```bash
+   git commit --amend --no-edit --trailer "Wrap-Folded-In: <one line — e.g. session log, handoff, TODO>"
+   ```
+
+   `--no-edit --trailer` keeps the subject, body and existing trailers (`Co-Authored-By`, `Claude-Session`) intact — appending a paragraph by hand detaches them. If `git commit --trailer` is unsupported (git < 2.32), use `git commit --amend --no-edit` and mention the fold in the session log instead; never rewrite the message by hand.
+
+4. **Commit gate** — runs once, after staging and before any message is proposed, in every strategy below. Resolve the command:
+
+   ```bash
+   case "${WRAP_COMMIT_GATE:-auto}" in   # empty (fresh shell, koji-detect not re-sourced) must mean auto, never "no gate"
+     none) GATE="" ;;
+     auto) if [ -f "$PROJECT_ROOT/package.json" ] && grep -q '"lint:check"' "$PROJECT_ROOT/package.json"; then GATE="npm run lint:check"; else GATE=""; fi ;;
+     *)    GATE="$WRAP_COMMIT_GATE" ;;
+   esac
+   echo "Commit gate: ${GATE:-none}"
+   ```
+
+   `auto` picks only `lint:check` (check-only by convention — a bare `lint` script is often `--fix` and mutates the tree). Anything mutating or slow must be configured explicitly (`.koji.yaml` → `wrap: { commit_gate: "<command>" }`). Test suites never run by default. If `GATE` is empty, skip to the strategy.
+
+   Otherwise run it against the working tree (the staged files are what gets linted in practice — a check-only gate reads the tree):
+
+   ```bash
+   GATE_LOG=$(mktemp)
+   TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
+   if [ -z "$TO" ]; then echo "note: no timeout binary — gate runs uncapped"; fi
+   TREE_BEFORE=$(git -C "$PROJECT_ROOT" diff --binary | cksum)
+   if [ -n "$TO" ]; then
+     (cd "$PROJECT_ROOT" && "$TO" 300 bash -c "$GATE") > "$GATE_LOG" 2>&1
+   else
+     (cd "$PROJECT_ROOT" && bash -c "$GATE") > "$GATE_LOG" 2>&1
+   fi
+   GATE_EXIT=$?
+   TREE_AFTER=$(git -C "$PROJECT_ROOT" diff --binary | cksum)
+   if [ "$TREE_BEFORE" = "$TREE_AFTER" ]; then GATE_TOUCHED=no; else GATE_TOUCHED=yes; fi
+   echo "Gate exit: $GATE_EXIT | gate modified tracked files: $GATE_TOUCHED"
+   ```
+
+   (`git diff --binary | cksum` fingerprints unstaged changes to *tracked* files only, so a linter writing an untracked `.eslintcache` is not mistaken for a formatter.) Decide:
+
+   - `GATE_EXIT=0` and `GATE_TOUCHED=no` → **pass**. Print nothing more.
+   - `GATE_EXIT=127`, or the log tail shows `command not found` / `Cannot find module` / `ENOENT`, or `package.json` exists but `$PROJECT_ROOT/node_modules` does not → **gate unavailable — skipped**. One warning line; continue as if there were no gate. An unavailable gate never aborts a wrap (a fresh clone must not lose its session log to a missing `node_modules`).
+   - `GATE_TOUCHED=yes` (the gate formatted files) → restage the same set and re-run the gate block **once**: `if [ -n "$(git -C "$PROJECT_ROOT" diff --cached --name-only)" ]; then git -C "$PROJECT_ROOT" diff --cached --name-only -z | xargs -0 git -C "$PROJECT_ROOT" add --; fi`. A second `yes`, or a non-zero exit, → **failed**.
+   - Any other non-zero exit → **failed**. Show `tail -20 "$GATE_LOG"`, then:
+     - `WRAP_COMMIT_PROMPT=on` and `AskUserQuestion` callable → ask: **A) Fix, then commit** (fix, restage, re-run the gate — it must pass before the commit) / **B) Commit anyway** / **C) Abort** (files stay staged; report).
+     - Otherwise → **abort**: `Commit gate failed (exit $GATE_EXIT) — nothing committed; changes remain staged.` Skip to sub-step 7. Autonomy never means committing a red tree.
+
+   In the **Split** strategy the gate runs once, before the first commit — a check-only gate reads the whole tree, so per-commit runs add nothing.
+
+5. **Approval rule.** `WRAP_COMMIT_PROMPT=on` → present each message and wait for approval, as always. `WRAP_COMMIT_PROMPT=off` → do not wait: apply the saved strategy (`together` when none is saved), print the message you used, commit. A failed gate still aborts under prompts-off (sub-step 4).
+
+6. Determine the commit strategy:
 
    **If there are only doc changes (work was already committed):**
-   - Propose a single commit: `docs(koji): update session logs`
-   - Stage all doc files, present the message, wait for approval, commit.
+   - Stage all doc files, run the gate (sub-step 4).
+   - **If `AMENDABLE=true`:** the docs belong with the commit you just made. When `$COMMIT_STRATEGY` is `amend-if-same-session` **and** `HEAD_AGE_SECONDS` < 43200 (12 h), amend without asking and say: `Folded wrap docs into "<HEAD_SUBJECT>" (saved preference amend-if-same-session)`. Otherwise, if prompts are on, ask:
+
+     > Wrap docs only. HEAD is your unpushed same-session commit — fold them in?
+
+     Options:
+     - A) Amend the last commit — `"<HEAD_SUBJECT>"` (<N> min ago)
+     - B) Separate commit — `docs(koji): update session logs`
+     - C) Amend + remember — `koji-config set commit_strategy amend-if-same-session` (docs-only wraps fold in automatically from now on)
+
+     Prompts off without the saved preference → B.
+   - **If `AMENDABLE=false`:** propose `docs(koji): update session logs`, apply the approval rule, commit.
 
    **If there are only code changes (no docs were modified — unlikely during wrap):**
-   - Propose a single conventional commit for the work.
-   - Stage all files, present the message, wait for approval, commit.
+   - Stage all files, run the gate, propose a single conventional commit for the work, apply the approval rule, commit.
 
    **If there are both code changes AND doc changes (mixed worktree):**
 
    First, check `$COMMIT_STRATEGY` for a saved preference:
 
-   **If `$COMMIT_STRATEGY` is `together`:** Use the saved preference — stage everything, propose one commit. Tell the user: `Using saved preference: single commit. (Change with koji-config set commit_strategy split)`
+   **If `$COMMIT_STRATEGY` is `together` or `amend-if-same-session`:** stage everything, run the gate, propose one commit. Tell the user: `Using saved preference: single commit. (Change with koji-config set commit_strategy split)`. `amend-if-same-session` applies to docs-only wraps only — a mixed tree is **never** amended automatically, because that would fold unrelated new code into the previous commit.
 
    **If `$COMMIT_STRATEGY` is `split`:** Use the saved preference — split into two commits (code first, docs second). Tell the user: `Using saved preference: split commits. (Change with koji-config set commit_strategy together)`
 
-   **If `$COMMIT_STRATEGY` is empty (no preference yet):** Ask using AskUserQuestion:
+   **If `$COMMIT_STRATEGY` is empty (no preference yet):** Ask using AskUserQuestion (prompts off → A):
 
    > This wrap has both code and doc changes. How should I commit?
 
@@ -530,22 +676,24 @@ Otherwise, if `settings.local.json` exists:
    - A) One commit — everything together (recommended for most workflows)
    - B) Split — code commit first, then docs commit
    - C) One commit + remember — save this as my default for future wraps
+   - D) Amend the last commit — fold everything into `"<HEAD_SUBJECT>"` (<N> min ago) — **only when `AMENDABLE=true`**; a one-time explicit choice (to make docs-only folds automatic later: `koji-config set commit_strategy amend-if-same-session`)
 
-   If A: stage everything, propose one commit.
+   If A: stage everything, run the gate, propose one commit.
    If B: split into two commits (code first, docs second).
-   If C: run `koji-config set commit_strategy together`, then stage everything, propose one commit.
+   If C: run `koji-config set commit_strategy together`, then stage everything, run the gate, propose one commit.
+   If D: stage everything, run the gate, amend with the exact command from sub-step 3.
 
-   **Override:** If the saved preference is `together` but the code and docs changes are clearly unrelated (e.g., code is a bug fix but docs are from a different task), use AskUserQuestion to suggest splitting for this one time. Do NOT change the saved preference.
+   **Override:** If the saved preference is `together` but the code and docs changes are clearly unrelated (e.g., code is a bug fix but docs are from a different task), use AskUserQuestion to suggest splitting for this one time (prompts off → keep the preference). Do NOT change the saved preference.
 
-   **Together**: Stage everything, propose one conventional commit, wait for approval, commit. **Done — one commit total.**
+   **Together**: Stage everything, run the gate, propose one conventional commit, apply the approval rule, commit. **Done — one commit total.**
    **Split**: Execute exactly two commits in sequence:
-     1. Stage **only code files** (`git add` each by name). Present the work commit message, wait for approval, commit.
+     1. Stage **only code files** (`git add` each by name). Run the gate. Present the work commit message, apply the approval rule, commit.
      2. Stage **only doc files** (`git add` each by name). Commit with `docs(koji): update session logs`. This second commit does not need separate approval — it was approved as part of the split decision.
      **Done — two commits total.**
 
-4. **After committing**, run `git status`. If the worktree is clean, move on. If there are unexpected leftover changes, **report them to the user** but do NOT create additional commits. Let the user decide in the next step or manually.
+7. **After committing**, run `git status`. If the worktree is clean, move on. If there are unexpected leftover changes, **report them to the user** but do NOT create additional commits. Let the user decide in the next step or manually. If the gate aborted the commit, say so here again in one line.
 
-5. **Delete the session-start sentinel and per-session state** so the next `/kick-off` creates a fresh boundary:
+8. **Delete the session-start sentinel and per-session state** so the next `/kick-off` creates a fresh boundary:
    ```bash
    rm -f "$SESSION_START_FILE"
    [ -n "$SESSION_DIR" ] && rm -f "$SESSION_DIR/duet-rules.json"
@@ -557,7 +705,7 @@ Otherwise, if `settings.local.json` exists:
 
 ## Step 6 — Starter Prompt & Session Name
 
-**Session name** — derive a short kebab-case name from **the commit message you proposed in Step 5**: take the conventional-commit subject, drop the type+scope prefix (`feat(v0.5.8): `, `fix(koji): `, etc.), then kebab-case the remainder. The commit message has already distilled this session's work; re-deriving from the session log is duplicate work and usually produces a vaguer name.
+**Session name** — derive a short kebab-case name from **the commit message you proposed in Step 5** (when Step 5 amended, from the amended commit's subject — `git log -1 --format=%s`): take the conventional-commit subject, drop the type+scope prefix (`feat(v0.5.8): `, `fix(koji): `, etc.), then kebab-case the remainder. The commit message has already distilled this session's work; re-deriving from the session log is duplicate work and usually produces a vaguer name.
 
 Examples:
 - `feat(v0.5.8): /duet-impl — N+1 review-pass formula` → `duet-impl-n-plus-1-review-pass-formula`
@@ -592,8 +740,11 @@ Before finishing, verify:
 - [ ] `lessons.md` updated (if applicable)
 - [ ] `AI_HANDOFF.md` updated (if state/rules changed)
 - [ ] `$TODO_FILE` updated (if task state changed)
-- [ ] Session entry appended to `agent-session.md`
+- [ ] Active plans' `next-step` re-checked for candidates touched this session
+- [ ] Session entry appended to `agent-session.md`, with no surviving template placeholders
 - [ ] Archive rotation performed (if threshold reached)
-- [ ] Permissions reviewed (if new ones in settings.local.json)
-- [ ] Commit proposed (awaiting approval)
+- [ ] Permissions reviewed against the *effective* mode (helper, not the project files)
+- [ ] Commit gate ran before any commit (or was `none` / unavailable — said so)
+- [ ] Amend used only when `AMENDABLE=true`, never on a pushed or foreign commit
+- [ ] Commit proposed (approval waited for unless `WRAP_COMMIT_PROMPT=off`)
 - [ ] Starter prompt generated

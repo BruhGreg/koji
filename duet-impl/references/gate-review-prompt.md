@@ -1,6 +1,6 @@
 # Gate Review Prompt (intermediate gates)
 
-Used by `/duet-impl` at each intermediate gate (agent identifies gates from plan structure per `/duet-impl` SKILL.md "Gating Strategy"). The implementer's diff for that gate is reviewed by codex (single reviewer). The FINAL phase (cumulative diff at end of run) uses `/duet-review` instead — two reviewers + cross-review pass.
+Used by `/duet-impl` at each intermediate gate (agent identifies gates from plan structure per `/duet-impl` SKILL.md "Gating Strategy"). The implementer's diff for that gate is reviewed by the configured gate reviewer (single reviewer — codex by default, or a fresh-context Claude subagent per `.koji.yaml` `duet.reviewer`; see `../../references/reviewer-backend.md`). The FINAL phase (cumulative diff at end of run) uses `/duet-review` instead — two reviewers + cross-review pass.
 
 ## Reviewer prompt
 
@@ -79,12 +79,12 @@ The diff since the previous gate:
 
 ## Implementer-side interpretation
 
-`/duet-impl` parses the codex response:
+`/duet-impl` parses the gate reviewer's response:
 
 - **No `high` findings** → PASS. Proceed to next gate.
-- **`high` findings present, suggested_fix is mechanical** → apply fix, re-run codex review. Up to 2 retries.
-- **`high` findings present, suggested_fix is complex/conceptual** → consult codex once for clarification, apply, re-run. If still failing after retry → record a deferral and proceed.
+- **`high` findings present, suggested_fix is mechanical** → apply fix, re-run the gate review. Up to 2 retries.
+- **`high` findings present, suggested_fix is complex/conceptual** → consult the reviewer once for clarification, apply, re-run. If still failing after retry → record a deferral and proceed.
 - **`medium` findings only** → log to gate-report, proceed.
 - **`low` findings only** → ignore.
 
-Per the [agent-autonomy principle](../../references/agent-autonomy.md), the loop never blocks on the user. When (1) the 2-retry budget is exhausted AND (2) a consult round with codex did not resolve the disagreement, the unresolved HIGH is recorded as a deferral (`deferred-findings.md` + the end-of-run report) and the walk proceeds — the end-of-run `/duet-review` re-examines the deferred code.
+Per the [agent-autonomy principle](../../references/agent-autonomy.md), the loop never blocks on the user. When (1) the 2-retry budget is exhausted AND (2) a consult round with the reviewer did not resolve the disagreement, the unresolved HIGH is recorded as a deferral (`deferred-findings.md` + the end-of-run report) and the walk proceeds — the end-of-run `/duet-review` re-examines the deferred code.

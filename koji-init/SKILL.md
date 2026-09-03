@@ -110,20 +110,39 @@ Options:
 
 ### 2b. Permission Mode
 
-Fires if `permissions.defaultMode` is absent from **both** `$PROJECT_ROOT/.claude/settings.local.json` AND `$PROJECT_ROOT/.claude/settings.json`. Re-ask behavior — existing projects pick this up on re-running `/koji-init`. Skip silently when either file already has the field set.
+Resolve the *effective* mode first — the two project files are no longer where bypass lives:
 
-Use AskUserQuestion:
+```bash
+source <(~/.claude/skills/koji/bin/koji-permission-mode)
+echo "Effective mode: $EFFECTIVE_MODE (source: $MODE_SOURCE) | bypass: $EFFECTIVE_BYPASS | Claude Code: $CLAUDE_VERSION"
+```
 
-> Claude Code can prompt before each tool call (default), or auto-allow them via
-> `bypassPermissions` mode. The setting lands in `.claude/settings.local.json` —
-> per-machine, never committed. Recommended for trusted personal projects; keep
-> prompts for shared/prod work where per-tool review is part of the workflow.
+Fires only when `EFFECTIVE_BYPASS` is `false`. **Skip silently** when bypass is already in force (typically from `~/.claude/settings.json` — a user who set it once should not be re-asked in every new project) or when `MODE_SOURCE` is `disabled` (policy forbids bypass; nothing koji offers can change that).
+
+Since Claude Code **2.1.257**, `permissions.defaultMode: bypassPermissions` set in `.claude/settings.json` or `.claude/settings.local.json` **does not take effect** — only user settings, managed settings, or the launch flag can set it. Earlier koji versions wrote that key into the local file; `/kick-off` Step 0i now offers to remove the inert leftover. koji **never writes `~/.claude/settings.json`**: a user-wide switch is the user's own call to make by hand.
+
+**On Claude Code ≥ 2.1.257 (or `CLAUDE_VERSION=unknown`)** — use AskUserQuestion:
+
+> Claude Code can prompt before each tool call (default), or auto-allow them in
+> `bypassPermissions` mode. Project-scope bypass no longer takes effect, so koji
+> can't set it for this repo alone; the per-project equivalent is a launch flag.
+> Recommended for trusted personal projects; keep prompts for shared/prod work
+> where per-tool review is part of the workflow.
 
 Options:
-- A) Auto-allow tools — set `permissions.defaultMode: bypassPermissions` (recommended for personal projects)
+- A) Per-launch bypass — I'll show the launch flag and an alias (recommended for personal projects)
 - B) Keep per-tool prompts — standard Claude Code behavior
 
-If A: write `permissions.defaultMode: bypassPermissions` into `$PROJECT_ROOT/.claude/settings.local.json`, preserving any existing JSON:
+If A: print the tip and do nothing else:
+
+> Launch with `claude --permission-mode bypassPermissions` in this repo. To make it one word:
+> `alias claude-yolo='claude --permission-mode bypassPermissions'` in your shell rc.
+> To turn bypass on for every project instead, set `permissions.defaultMode: bypassPermissions`
+> yourself in `~/.claude/settings.json` — koji does not write that file.
+
+If B: do nothing.
+
+**On Claude Code < 2.1.257** — project-scope bypass still works; keep the original behavior. Use AskUserQuestion with the same two options worded as *A) Auto-allow tools — set `permissions.defaultMode: bypassPermissions` in `.claude/settings.local.json` (per-machine, never committed)* / *B) Keep per-tool prompts*. If A:
 
 ```bash
 F="$PROJECT_ROOT/.claude/settings.local.json"
@@ -241,6 +260,10 @@ agents:
   - Claude
 wrap:
   starter_prompt: true
+  # prompts: on         # off = no AskUserQuestion during /wrap (documented auto policy applies)
+  # commit_gate: auto   # auto = `npm run lint:check` when package.json has it | none | "<command>"
+# duet:
+#   reviewer: codex     # codex | claude | claude-rounds+codex-final
 ```
 
 Set `docs_dir` to the value determined by the workflow: `.koji` for fresh installs and relocations, `docs` if the user chose to keep files in `docs/`.

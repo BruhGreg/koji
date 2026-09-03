@@ -15,30 +15,55 @@ PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 PROJECT_NAME="$(basename "$PROJECT_ROOT")"
 
 # --- YAML reader (simple key extraction, no external deps) ---
+
+# Normalize a raw scalar: a double- or single-quoted value yields its quoted
+# content (a trailing `# comment` after the closing quote is dropped); an
+# unquoted value loses any trailing ` # comment` and surrounding whitespace.
+# Every README config example carries a trailing comment, so a reader that
+# kept `off  # autonomy` as the value would silently reject every pasted line.
+_yaml_clean() {
+  local v="$1"
+  v="${v#"${v%%[![:space:]]*}"}"
+  case "$v" in
+    \"*)
+      # Escape-aware: `"grep \"x\" f && echo ok"  # gate` → `grep "x" f && echo ok`.
+      # Cutting at the first `"` would truncate a command that Step 5 then EXECUTES.
+      local u
+      u="$(printf '%s' "$v" | sed -E 's/^"((\\.|[^"\\])*)".*$/\1/; s/\\(["\\])/\1/g')"
+      case "$u" in
+        \"*) v="${v#\"}"; v="${v%%\"*}" ;;   # no closing quote found — degrade to the naive cut
+        *)   v="$u" ;;
+      esac ;;
+    \'*) v="${v#\'}"; v="${v%%\'*}" ;;
+    *)   v="$(printf '%s' "$v" | sed -E 's/[[:space:]]+#.*$//')" ;;
+  esac
+  v="${v%"${v##*[![:space:]]}"}"
+  printf '%s' "$v"
+}
+
 _yaml_get() {
   local file="$1" key="$2"
   [ -f "$file" ] || return 0
 
   local parent="${key%%.*}"
   local child="${key#*.}"
+  local raw
 
   if [ "$parent" = "$child" ]; then
-    grep -E "^${key}:" "$file" 2>/dev/null | tail -1 | sed 's/^[^:]*:[[:space:]]*//' | sed 's/[[:space:]]*$//' | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/" || true
+    raw="$(grep -E "^${key}[[:space:]]*:" "$file" 2>/dev/null | tail -1 | sed 's/^[^:]*:[[:space:]]*//' || true)"
   else
-    awk -v parent="$parent" -v child="$child" '
-      $0 ~ "^"parent":" { in_block=1; next }
-      in_block && /^[^ ]/ { in_block=0 }
-      in_block && $0 ~ "^[[:space:]]+"child":" {
+    # A full-line `#` comment inside a block must not end the block.
+    raw="$(awk -v parent="$parent" -v child="$child" '
+      $0 ~ "^"parent"[[:space:]]*:" { in_block=1; next }
+      in_block && /^[^ \t#]/ { in_block=0 }
+      in_block && $0 ~ "^[[:space:]]+"child"[[:space:]]*:" {
         sub(/^[[:space:]]+[^:]+:[[:space:]]*/, "")
-        sub(/[[:space:]]*$/, "")
-        # Strip surrounding YAML quotes
-        if (substr($0,1,1) == "\"" && substr($0,length($0),1) == "\"") $0 = substr($0,2,length($0)-2)
-        if (substr($0,1,1) == "\047" && substr($0,length($0),1) == "\047") $0 = substr($0,2,length($0)-2)
         print
         exit
       }
-    ' "$file" 2>/dev/null || true
+    ' "$file" 2>/dev/null || true)"
   fi
+  _yaml_clean "$raw"
 }
 
 # --- YAML list reader ---
@@ -103,6 +128,42 @@ _emit HANDOFF_FILE "AI_HANDOFF.md"
 _emit LESSONS_FILE "lessons.md"
 
 _emit WRAP_STARTER "$(_resolve "wrap.starter_prompt" "true")"
+
+# _resolve_enum <key> <default> <valid>... — like _resolve, but the value must be
+# one of <valid>. Anything else warns on STDERR and falls back to <default>:
+# stdout is `source`d by every skill, so a warning there would execute as shell.
+# Fail-safe matters here — a typo in `wrap.prompts` must keep prompts ON, and a
+# typo in `duet.reviewer` must keep codex. Boolean spellings normalize for the
+# on/off toggles (true/yes/1 → on, false/no/0 → off) because `starter_prompt:
+# true` sits in the same block and users will write `prompts: false`.
+_resolve_enum() {
+  local key="$1" default="$2"; shift 2
+  local val v
+  # Every valid token is lowercase, so compare case-insensitively (`Claude`, `On`).
+  val="$(_resolve "$key" "$default" | tr '[:upper:]' '[:lower:]')"
+  case "$val" in
+    true|yes|1)  val=on ;;
+    false|no|0)  val=off ;;
+  esac
+  for v in "$@"; do
+    [ "$val" = "$v" ] && { printf '%s' "$val"; return; }
+  done
+  echo "koji-detect: WARN invalid $key='$val' — using '$default'" >&2
+  printf '%s' "$default"
+}
+
+# /wrap autonomy toggles (v0.8.0). `commit_prompt` follows `prompts` unless set
+# explicitly — the commit prompt is the riskier one, so it can stay on alone.
+WRAP_PROMPTS="$(_resolve_enum "wrap.prompts" "on" on off)"
+_emit WRAP_PROMPTS "$WRAP_PROMPTS"
+_emit WRAP_COMMIT_PROMPT "$(_resolve_enum "wrap.commit_prompt" "$WRAP_PROMPTS" on off)"
+# Free-form: `auto` (npm run lint:check when present), `none`, or a shell command.
+_emit WRAP_COMMIT_GATE "$(_resolve "wrap.commit_gate" "auto")"
+
+# Duet reviewer backend (v0.8.0). Default = today's behavior (codex).
+_emit DUET_REVIEWER "$(_resolve_enum "duet.reviewer" "codex" codex claude claude-rounds+codex-final)"
+_emit DUET_CLAUDE_MODEL "$(_resolve_enum "duet.claude_reviewer_model" "inherit" inherit fable opus sonnet)"
+_emit DUET_CODEX_EFFORT "$(_resolve_enum "duet.codex_effort" "xhigh" xhigh high)"
 
 # Commit strategy preference (persisted via koji-config)
 COMMIT_STRATEGY="$("$KOJI_SKILLS/bin/koji-config" get commit_strategy 2>/dev/null || true)"

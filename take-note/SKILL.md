@@ -41,7 +41,7 @@ If the user typed text after `/take-note` (e.g., `/take-note just finished auth 
    - Add `[in progress]` tag to the session title if not already present
    - Update Summary and Key Achievements with work completed so far (use user's note if provided)
    - Do NOT touch "Notes for Next Session" — that section is written by `/wrap` at session end
-4. If there is no session entry yet, create one using the session template (check `$DOCS_PATH/SESSION_TEMPLATE.md` first, then `$KOJI_SKILLS/templates/$TEMPLATE/SESSION_TEMPLATE.md`). Leave "Notes for Next Session" empty or with a placeholder.
+4. If there is no session entry yet, create one using the session template (check `$DOCS_PATH/SESSION_TEMPLATE.md` first, then `$KOJI_SKILLS/templates/$TEMPLATE/SESSION_TEMPLATE.md`). Strip the template's HTML comments (`<!-- … -->`) — they are guidance, not entry content. Leave "Notes for Next Session" empty or with a placeholder (`/wrap` fills it and refuses to finalize while any template placeholder survives).
 
 **Important:**
 - Do NOT create a new session entry (unless none exists)

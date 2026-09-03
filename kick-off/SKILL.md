@@ -322,6 +322,49 @@ Tell the user: `Set up CODEBASE_CONVENTIONS.md (codebase-fit). Sources: <comma-l
 
 Tell the user: `Won't set up codebase-fit FOR THIS PROJECT. Re-enable with: koji-config set codebase_conventions_declined_$SESSION_HASH false`.
 
+### 0i. Inert project bypass key (v0.8.0)
+
+Pre-v0.8.0 `/koji-init` offered to write `permissions.defaultMode: bypassPermissions` into `.claude/settings.local.json`. Since Claude Code 2.1.257 that key is inert — only user settings (`~/.claude/settings.json`), managed settings, or `claude --permission-mode` can set bypass — so it now does nothing except mislead `/wrap` Step 4's permission-hygiene check. This step offers to remove it.
+
+Detect (the helper resolves the *effective* mode the way Claude Code does and names any inert project-scope value; it never edits anything in report mode):
+
+```bash
+source <(~/.claude/skills/koji/bin/koji-detect)
+source <(~/.claude/skills/koji/bin/koji-permission-mode)
+BYPASS_DECLINED=$(~/.claude/skills/koji/bin/koji-config get "bypass_migration_declined_$SESSION_HASH" 2>/dev/null || true)
+echo "Inert bypass key — local: ${INERT_LOCAL_MODE:-none} | project: ${INERT_PROJECT_MODE:-none} | effective: $EFFECTIVE_MODE ($MODE_SOURCE) | declined: ${BYPASS_DECLINED:-false}"
+```
+
+If `INERT_LOCAL_MODE` and `INERT_PROJECT_MODE` are both empty, OR `BYPASS_DECLINED` is `true`, **skip this step silently** — idempotent: a no-op once the key is gone or the user has declined.
+
+Otherwise, if AskUserQuestion is not callable, print one line naming the file(s) that carry the key (`INERT_LOCAL_MODE` → `.claude/settings.local.json`, `INERT_PROJECT_MODE` → `.claude/settings.json`) and continue:
+
+> note: `.claude/settings.local.json` sets `permissions.defaultMode=bypassPermissions` — inert since Claude Code 2.1.257. Remove with: `~/.claude/skills/koji/bin/koji-permission-mode --remove-inert`
+
+Otherwise use AskUserQuestion:
+
+> `.claude/settings.local.json` sets `permissions.defaultMode: bypassPermissions` (written by an older `/koji-init`). Claude Code ≥ 2.1.257 ignores bypass set at project scope, so the key does nothing — and it confuses `/wrap`'s permission hygiene. Your effective mode is `<EFFECTIVE_MODE>` (from `<MODE_SOURCE>`) and stays unchanged either way. Remove the key?
+
+Options:
+- **A) Remove the inert key** (recommended) — the helper edits only the project-scope file(s), atomically, every other key preserved
+- **B) Leave it** — koji won't ask again for this project
+
+**If A**:
+
+```bash
+~/.claude/skills/koji/bin/koji-permission-mode --remove-inert
+```
+
+Tell the user: `Removed inert bypass key from <file(s)>. To actually run in bypass mode, set permissions.defaultMode in ~/.claude/settings.json yourself or launch with claude --permission-mode bypassPermissions — koji never writes ~/.claude/settings.json.`
+
+**If B**: persist the decline so the prompt never fires again for this project:
+
+```bash
+~/.claude/skills/koji/bin/koji-config set "bypass_migration_declined_$SESSION_HASH" true
+```
+
+Tell the user: `Won't ask again FOR THIS PROJECT. Re-enable with: koji-config set bypass_migration_declined_$SESSION_HASH false`.
+
 ### 1. Check for user-provided focus
 
 If the user typed text after `/kick-off` (e.g., `/kick-off build the news landing page`), use that as the **session focus** — skip reading the last session's starter prompt and use the user's intent instead. Still read handoff and lessons for context.

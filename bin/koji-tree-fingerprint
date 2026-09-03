@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# koji-tree-fingerprint — one short digest of the working tree's CONTENT state.
+#
+# Usage:
+#   koji-tree-fingerprint            # uncommitted content: diff vs HEAD + untracked
+#   koji-tree-fingerprint --cached   # the staged set only
+#
+# Prints one digest token (hex, or a decimal cksum on hosts with no hasher) and
+# nothing else. Outside a git repo it prints `nogit` and exits 0 — callers get a
+# usable token in every case and never have to branch on "am I in a repo".
+#
+# Purpose: detect that the tree moved under a read-only reviewer. Take a
+# fingerprint before handing work to a reviewer that promises not to write,
+# take it again after, and compare. Equal digests mean the review looked at the
+# tree the caller thinks it did; different digests mean the review is stale (or
+# the reviewer wrote, despite promising not to).
+#
+# It is a CONTENT digest, not a mtime/inode one: `touch` on an unchanged file
+# does not move it, and the same edit re-applied yields the same token. It is
+# not a security hash — it is a cheap change detector.
+#
+# Scope: always the whole repo (`git rev-parse --show-toplevel`), regardless of
+# cwd, so two calls from different directories of one repo agree.
+set -euo pipefail
+
+MODE="default"
+case "${1:-}" in
+  "")        ;;
+  --cached)  MODE="cached" ;;
+  --help|-h)
+    cat <<'USAGE'
+koji-tree-fingerprint — digest of the working tree's content state.
+
+Usage:
+  koji-tree-fingerprint            diff vs HEAD (or the index, on an unborn
+                                   HEAD) plus every untracked, non-ignored file
+  koji-tree-fingerprint --cached   the staged set only
+
+Prints one digest token, or `nogit` outside a repo (exit 0 either way).
+Compare two runs to detect that the tree moved while a reviewer read it.
+USAGE
+    exit 0
+    ;;
+  *)
+    printf 'ERROR: unknown option: %s\n' "$1" >&2
+    printf 'Usage: koji-tree-fingerprint [--cached]\n' >&2
+    exit 2
+    ;;
+esac
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$ROOT" ]; then
+  printf 'nogit\n'
+  exit 0
+fi
+cd "$ROOT"
+
+# --- hasher: md5 → md5sum → shasum → cksum (koji-detect's SESSION_HASH cascade).
+# Resolved with `command -v` BEFORE any bytes flow, not by chaining `md5 ||
+# md5sum` on a pipe: the chained form is only safe when the first hasher fails
+# to *exec*, and a hasher that exits non-zero mid-stream would have already
+# eaten stdin, leaving the fallback to hash nothing. Digest is emitted whole —
+# no `head -c 8` truncation, this is a comparison token, not a directory name.
+_hash() {
+  if command -v md5 >/dev/null 2>&1; then
+    md5
+  elif command -v md5sum >/dev/null 2>&1; then
+    md5sum | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum | cut -d' ' -f1
+  else
+    cksum | cut -d' ' -f1
+  fi
+}
+
+# --- the byte stream that defines "content state" ---
+#
+# --binary makes the diff cover binary files too; without it git prints
+# "Binary files differ" and a changed .png would be invisible to the digest.
+_stream() {
+  if [ "$MODE" = "cached" ]; then
+    git diff --cached --binary
+    return 0
+  fi
+
+  # Unborn HEAD (a repo with no commits): `git diff HEAD` errors out. The
+  # staged set is then the whole of the tracked content, so use it.
+  if git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    git diff HEAD --binary
+  else
+    git diff --cached --binary
+  fi
+
+  # Untracked-but-not-ignored files, contents concatenated in a stable order.
+  # The NUL list is staged through a temp file rather than a shell variable
+  # because bash drops NUL bytes from command substitution, and through an
+  # `-s` test rather than `xargs -r` because BSD xargs (macOS) has no -r and
+  # would run a bare `cat` — which then blocks on / consumes our own stdin.
+  local list
+  list="$(mktemp "${TMPDIR:-/tmp}/koji-fp.XXXXXX")"
+  git ls-files --others --exclude-standard -z >"$list"
+  if [ -s "$list" ]; then
+    sort -z <"$list" | xargs -0 cat
+  fi
+  rm -f "$list"
+}
+
+_stream | _hash

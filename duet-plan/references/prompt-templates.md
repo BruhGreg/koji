@@ -1,6 +1,6 @@
 # /duet-plan — Round Prompt Templates
 
-Both agents (Claude as drafter, codex as critic) end every turn with a `VERDICT:` line. The skill parses these to detect consensus.
+Both agents — Claude as drafter, and the reviewer (codex by default, or a fresh-context Claude subagent per `.koji.yaml` `duet.reviewer`; see `../../references/reviewer-backend.md`) as critic — end every turn with a `VERDICT:` line. The skill parses these to detect consensus.
 
 ## Verdict markers
 
@@ -18,7 +18,7 @@ The skill only locks when **both agents emit `AGREE`** in the same round.
 
 ```
 You are drafting a plan for a software engineering task. You will collaborate
-with another AI agent (codex) who will critique your plan adversarially. Your
+with another AI agent (the adversarial reviewer, running in a separate context) who will critique your plan adversarially. Your
 goal: produce a high-quality plan together.
 
 TOPIC: {topic}
@@ -46,25 +46,28 @@ Draft a plan that includes:
 - Risks and unknowns
 - Out of scope (what we are NOT doing)
 
-Be specific. Codex will challenge this plan — bring reasoning, not just
+Be specific. The reviewer will challenge this plan — bring reasoning, not just
 structure. If you reach for "we'll figure it out later", name it as a
 risk or unknown.
 
-End your response with the VERDICT line.
+End your response with the VERDICT line — exactly one of `VERDICT: AGREE`
+(ready to lock as written), `VERDICT: PARTIAL: <reason>`, or
+`VERDICT: DISAGREE: <reason>`, as the very last line.
 ```
 
-## CODEX — every round
+## REVIEWER — every round (codex or Claude backend)
 
 ```
-You are critiquing a plan drafted by another agent (Claude). Your goal:
+You are the adversarial reviewer for a plan drafted by another agent in a
+separate context. Your goal:
 improve the plan through honest, adversarial review. The two of you must
 reach consensus before the plan is locked. Push back hard where you see
-weakness; concede gracefully where Claude has thought it through.
+weakness; concede gracefully where the drafter has thought it through.
 
 TOPIC: {topic}
 REPOSITORY: {project_root}
 
-Claude's current plan:
+The drafter's current plan:
 
 ---
 {claude_plan}
@@ -75,26 +78,28 @@ Your task: find what's missing, wrong, or over-engineered. Specifically check:
 - Unaddressed risks or hand-waving
 - Scope creep, or scope that's too narrow
 - Technical mistakes or unsafe sequencing
-- Alternatives Claude didn't consider
+- Alternatives the drafter didn't consider
 - Inconsistencies between sections
 - Codebase fit — does the plan's Codebase Fit Contract honor `CODEBASE_CONVENTIONS.md` (in the koji docs dir, `.koji/` by default) and the conventions of analogous existing code? Flag invented structure that diverges from established patterns, or a missing or thin Fit Contract.
 
 Be precise: cite section names or numbered items. Suggest concrete
 improvements where you can. Don't restate what's already in the plan.
 
-If you previously critiqued an earlier draft, note whether Claude
+If you previously critiqued an earlier draft, note whether the drafter
 addressed your points:
 
 {prior_critique_or_empty}
 
-End your response with the VERDICT line.
+End your response with the VERDICT line — exactly one of `VERDICT: AGREE`
+(ready to lock as written), `VERDICT: PARTIAL: <reason>`, or
+`VERDICT: DISAGREE: <reason>`, as the very last line.
 ```
 
 ## CLAUDE — subsequent rounds (round 2+)
 
 ```
-You drafted a plan; codex critiqued it. Update your plan to address codex's
-points where you agree, and push back where you disagree (with reasons).
+You drafted a plan; the reviewer critiqued it. Update your plan to address the
+reviewer's points where you agree, and push back where you disagree (with reasons).
 
 TOPIC: {topic}
 
@@ -104,15 +109,18 @@ Your previous plan:
 {claude_previous}
 ---
 
-Codex's critique:
+The previous round's critique (it may come from a different reviewer than the
+one who will read your update — after a rejected lock gate it is codex's):
 
 ---
 {codex_critique}
 ---
 
-Update the plan. For each codex point: accept, partially accept, or reject
-with a brief rationale. Don't reflexively agree — if codex is wrong, say so.
-Don't reflexively defend — if codex is right, fix it.
+Update the plan. For each reviewer point: accept, partially accept, or reject
+with a brief rationale. Don't reflexively agree — if the reviewer is wrong, say so.
+Don't reflexively defend — if the reviewer is right, fix it.
 
-Output the FULL updated plan (not a diff). End with the VERDICT line.
+Output the FULL updated plan (not a diff). End with the VERDICT line — exactly
+one of `VERDICT: AGREE` (ready to lock as written), `VERDICT: PARTIAL: <reason>`,
+or `VERDICT: DISAGREE: <reason>`, as the very last line.
 ```

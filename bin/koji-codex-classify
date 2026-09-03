@@ -7,7 +7,7 @@
 # message (no findings JSON), so that path silently banks a clean review. This
 # helper makes a quota reply its OWN state, distinct from empty findings.
 #
-#   koji-codex-classify <raw> <err> <exit> [--json-out <file>]
+#   koji-codex-classify <raw> <err> <exit> [--json-out <file>] [--prose]
 #
 # Prints ONE state token to stdout: OK | QUOTA | TIMEOUT | ERROR | EMPTY
 #   OK      — a valid findings JSON array was extracted (may be `[]`); exit 0.
@@ -19,19 +19,53 @@
 #   TIMEOUT — no array, no markers, exit 124.
 #   ERROR   — no array, no markers, non-zero exit.
 #   EMPTY   — no array, no markers, exit 0 (genuine drift: prose reply). Writes `[]`.
+#
+# --prose mode (flags may appear in any order after the three positional files):
+#   /duet-plan's codex leg answers with a PROSE critique that ends in a
+#   `VERDICT: AGREE|PARTIAL|DISAGREE` line — never a findings array. Fed such a
+#   reply, the default mode finds no array and then substring-scans stdout for
+#   'quota' / 'rate limit' / '429', so a perfectly healthy critique that merely
+#   DISCUSSES quota handling is labelled QUOTA — a false back-off on a review
+#   that actually completed. (Observed for real: tests/fixtures/codex-prose-
+#   review.txt.) --prose closes that trap: OK iff exit 0 AND koji-duet-verdict
+#   parses a real verdict token (AGREE/PARTIAL/DISAGREE, not UNKNOWN), checked
+#   BEFORE any quota scan. Anything else falls through to exactly the default
+#   QUOTA / TIMEOUT / ERROR / EMPTY logic above. No array is extracted and
+#   --json-out is ignored (a prose reply has no findings JSON to write).
 set -euo pipefail
 
-RAW="${1:?Usage: koji-codex-classify <raw> <err> <exit> [--json-out <file>]}"
+RAW="${1:?Usage: koji-codex-classify <raw> <err> <exit> [--json-out <file>] [--prose]}"
 ERR="${2:?}"
 EXITF="${3:?}"
+shift 3
 JSON_OUT=""
-[ "${4:-}" = "--json-out" ] && JSON_OUT="${5:?--json-out needs a path}"
+PROSE=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json-out) JSON_OUT="${2:?--json-out needs a path}"; shift 2 ;;
+    --prose)    PROSE=1; shift ;;
+    *)          shift ;;
+  esac
+done
 
 EXIT="$(cat "$EXITF" 2>/dev/null || echo 1)"
 
-# 1. Try to extract a valid JSON array from raw stdout (same shape the reviewers
-#    are told to emit). A valid array == codex responded with a review.
-ARRAY="$(python3 -c "
+if [ "$PROSE" = "1" ]; then
+  # Prose reply: there is no findings array, so --json-out has nothing to write.
+  JSON_OUT=""
+  # 1'. A parsed verdict token on a clean exit == the reviewer actually answered.
+  #     Checked BEFORE the quota scan so a critique that merely mentions quota
+  #     can never be mistaken for a quota reply.
+  if [ "$EXIT" = "0" ]; then
+    PROSE_VERDICT="$(bash "$(dirname "$0")/koji-duet-verdict" "$RAW" 2>/dev/null || echo UNKNOWN)"
+    case "$PROSE_VERDICT" in
+      AGREE|PARTIAL|DISAGREE) echo OK; exit 0 ;;
+    esac
+  fi
+else
+  # 1. Try to extract a valid JSON array from raw stdout (same shape the reviewers
+  #    are told to emit). A valid array == codex responded with a review.
+  ARRAY="$(python3 -c "
 import re, sys
 raw = open('$RAW').read() if __import__('os').path.exists('$RAW') else ''
 import json
@@ -44,9 +78,10 @@ if m:
 sys.exit(1)
 " 2>/dev/null)" && HAVE_ARRAY=1 || HAVE_ARRAY=0
 
-if [ "$HAVE_ARRAY" = "1" ] && [ "$EXIT" = "0" ]; then
-  [ -n "$JSON_OUT" ] && printf '%s' "$ARRAY" > "$JSON_OUT"
-  echo OK; exit 0
+  if [ "$HAVE_ARRAY" = "1" ] && [ "$EXIT" = "0" ]; then
+    [ -n "$JSON_OUT" ] && printf '%s' "$ARRAY" > "$JSON_OUT"
+    echo OK; exit 0
+  fi
 fi
 
 # 2. No usable array — is this a quota/rate-limit reply? Scan stdout+stderr.

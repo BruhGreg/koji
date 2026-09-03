@@ -17,6 +17,7 @@ where `$RUN_DIR` is the per-invocation temp dir (mktemp -d). The path is printed
   "base": "<base-ref>",
   "head": "<head-sha>",
   "reviewers": ["claude", "codex"],
+  "reviewer_backends": { "a": "claude", "b": "codex" | "claude" },
   "cross_review_required": <bool>,
   "cross_review_done":     <bool>,
   "totals": {
@@ -40,6 +41,12 @@ Each `<finding>` carries the reviewer-prompt.md schema plus synthesizer-added fi
 - `agreed_by` — array, e.g. `["claude","codex"]` or `["codex"]`
 - `cross_review` (optional, when a cross-review verdict applied) — `{"by": "claude"|"codex", "verdict": "AGREE-HIGH"|"AGREE-MEDIUM"|"AGREE-LOW"|"DISAGREE"|"NEEDS-MORE-CONTEXT"}`
 - `claude_severity` / `codex_severity` — original per-reviewer ratings, kept when severity was resolved by cross-review (so the user can see how it shifted)
+
+## Reviewer slots vs. backends
+
+`claude` / `codex` in `reviewers` and in a finding's `agreed_by` are **slot identifiers** (reviewer A / reviewer B), not model names. They are kept stable whatever model actually ran, because downstream consumers key on those exact literals.
+
+`reviewer_backends` carries the real backend per slot: `a` is always `claude` (the orchestrator's own model), and `b` is set from the synthesizer's `--b-backend {codex,claude}` flag (default `codex`). Read this field — never the slot identifiers — when reporting which models produced a verdict.
 
 ## Cross-review flags
 

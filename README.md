@@ -90,9 +90,18 @@ archive:
   keep: 1                    # keep this many in the active file
 agents:                      # tags for session entries
   - Claude
+wrap:
+  starter_prompt: true       # print a starter prompt for the next session
+  prompts: on                # off = /wrap runs with zero prompts (its documented auto policy)
+  commit_prompt: on          # defaults to `prompts`; keep just the commit prompt on
+  commit_gate: auto          # auto = `npm run lint:check` if present | none | "<command>"
+duet:
+  reviewer: codex            # codex | claude | claude-rounds+codex-final
+  claude_reviewer_model: inherit   # inherit | fable | opus | sonnet
+  codex_effort: xhigh        # xhigh | high (natural-language signals still override)
 ```
 
-Global preferences (`commit_strategy`, `auto_update`) live in `~/.config/koji/config.yaml`.
+Global preferences (`commit_strategy` — `together` | `split` | `amend-if-same-session` — and `auto_update`) live in `~/.config/koji/config.yaml`.
 
 ## Notable features
 
@@ -102,7 +111,11 @@ Global preferences (`commit_strategy`, `auto_update`) live in `~/.config/koji/co
 
 **Doc drift detection.** Tag any doc with `covers:` frontmatter listing the code paths it describes. `/kick-off` warns when covered paths have drifted past a commit threshold since the doc was last edited. `/inspect-doc-drift` audits the whole repo. Deterministic — no LLM needed.
 
+**Wrap autonomy.** `wrap.prompts: off` runs `/wrap` end-to-end with zero prompts, using the same auto policy it already applies when no prompt is available (adds apply, deterministic removes apply, judgment removes only once established). `wrap.commit_gate` runs your commit gate before `/wrap` commits — `auto` picks `npm run lint:check` when `package.json` has one; a failing gate never commits silently, and a missing gate is skipped, never fatal. `commit_strategy: amend-if-same-session` folds a docs-only wrap into your own unpushed same-session commit (`git commit --amend --trailer`, subject preserved) instead of trailing it with a `docs(koji)` commit.
+
 **Duet workflow.** Cross-model agent collaboration that doesn't block the user. `/duet-plan` runs a multi-round Claude↔codex dialogue till consensus, locks the plan. `/duet-impl` walks the plan gate-by-gate with codex review at each, then audits the cumulative diff against every explicit promise the locked plan made — contract verification distinct from the quality reviews. `/duet-review` does a 2-reviewer adversarial pass with severity-aware cross-review on any reviewer-exclusive medium/high disagreement; a hard gate, a `-PRELIMINARY` verdict suffix, and a caller-side re-check under `/duet-impl` make sure the cross-review pass can't be silently skipped. All three run reviewers as background tasks — you can keep working while they progress. Codex defaults to `xhigh` effort; opt down with a natural-language signal in the invocation phrase. `/duet-review`'s Claude side scales with effort too: at `/effort max` — or an explicit "full review" / "fan out" / "deep review" — it fans out into five angle reviewers (correctness, removed-behavior, cross-file, reuse, altitude) that the main agent consolidates into one finding set, while lighter effort runs a single holistic pass and "quick" / "save tokens" forces the single pass even at max.
+
+**Reviewer backend.** `duet.reviewer` picks the adversarial voice for the duet skills: `codex` (default), `claude`, or `claude-rounds+codex-final`. `claude` runs a fresh-context Claude subagent — never a fork of the authoring session — as the reviewer. It is a quota escape hatch, and the signal is weaker: both sides are the same model family, so consensus means two independent contexts agreed, not two vendors. The hybrid has Claude review every round and spends one codex call per lock attempt to gate the lock — exactly one in the clean case. Quota rule: when codex hits its limit (or fails to start) on a review that isn't the final one, koji substitutes a fresh-context Claude reviewer for that review and tries codex again on the next; only the final review waits for codex.
 
 **Codebase fit.** The duet skills hold new code to *this project's* conventions — file structure, naming, idioms, layering — not just correctness. `/duet-plan` records a Codebase Fit Contract in every plan; `/duet-impl` gate reviews and `/duet-review` carry a `codebase-fit` lens. The shared reference is `CODEBASE_CONVENTIONS.md` in your koji docs dir: a hub that *points* (never copies) to the project's own convention docs — `CONTRIBUTING.md`, `AGENTS.md`, `.cursorrules`, a `STYLE.md` — via a `sources:` list, and accumulates a canonical-exemplar index plus a rejected-patterns log from what review actually catches. `/koji-init` scaffolds it for new projects; `/kick-off` backfills it into existing ones.
 
@@ -112,9 +125,9 @@ Global preferences (`commit_strategy`, `auto_update`) live in `~/.config/koji/co
 
 **Plan hardening (`/plan-triangulate-review`).** Autonomous, lean cross-model hardening of a *locked* plan. Drives gstack's `/plan-eng-review` inline; per finding it triages — refute or record most by reading the source, debate only the genuinely contentious ones (Claude↔codex, auto-lock on consensus, hard 3-round cap). One end-of-run erratum ratifies the decisions, cross-model concessions, and anything still split. Invocation requires the `triangulate-review` intent (not bare `/triangulate`); requires gstack and codex. The reference run hardened a locked ADR in 4 model calls — a triage loop, not a fan-out.
 
-**Walk-away sessions.** `/duet-plan`, `/duet-impl`, and `/plan-triangulate-review` keep the machine awake (`caffeinate` / `systemd-inhibit`) while their background AI dispatches run, then release it at the end, so you can start a long run and step away. (Lone `/triangulate` is interactive — it hands you each decision — so it skips keep-awake, like `/duet-review`.) Opt-in only (never plain `/kick-off`); reference-counted so overlapping runs share one keep-awake, and ownership-safe — a keep-awake you started yourself is never touched. `/duet-impl` is unattended-safe by design: it never freezes on a stuck gate. A gate that can't clear after its retries becomes a recorded deferral in `deferred-findings.md` — all surfaced at once on your return — and the walk continues, rather than blocking on a modal prompt. And a codex quota/rate-limit reply is no longer misread as "zero findings → pass": the run backs off ~15 min and auto-resumes within codex's 5-hour window, so a depleted quota pauses the gate rather than banking a silent false review.
+**Walk-away sessions.** `/duet-plan`, `/duet-impl`, and `/plan-triangulate-review` keep the machine awake (`caffeinate` / `systemd-inhibit`) while their background AI dispatches run, then release it at the end, so you can start a long run and step away. (Lone `/triangulate` is interactive — it hands you each decision — so it skips keep-awake, like `/duet-review`.) Opt-in only (never plain `/kick-off`); reference-counted so overlapping runs share one keep-awake, and ownership-safe — a keep-awake you started yourself is never touched. `/duet-impl` is unattended-safe by design: it never freezes on a stuck gate. A gate that can't clear after its retries becomes a recorded deferral in `deferred-findings.md` — all surfaced at once on your return — and the walk continues, rather than blocking on a modal prompt. And a codex quota reply or start failure is never misread as "zero findings → pass": gates before the last substitute a fresh-context Claude reviewer and keep walking, and only the final `/duet-review` gate backs off (~15 min) and resumes within codex's 5-hour window — a depleted quota slows the walk, it never banks a silent false review.
 
-**Plans + research working docs.** `.koji/plans/` (decided work, ready to implement) and `.koji/research/` (investigation findings, pending validation). Research files are topic-addressable — new findings accumulate into existing topic-files (`## Decisions` newest-first) rather than spawning parallel session-named files. Lightweight YAML frontmatter (`status:` field, kind-aware: pending/in-progress/completed/archived for plans, unvalidated/validated/archived for research). `/kick-off` surfaces pending entries; `/duet-impl` marks plans `completed` at end of run; `koji-plans-research --set-status <path> <new>` mutates from the command line. Drift-exempt (not code-coverage docs).
+**Plans + research working docs.** `.koji/plans/` (decided work, ready to implement) and `.koji/research/` (investigation findings, pending validation). Research files are topic-addressable — new findings accumulate into existing topic-files (`## Decisions` newest-first) rather than spawning parallel session-named files. Lightweight YAML frontmatter (`status:` field, kind-aware: pending/in-progress/completed/archived for plans, unvalidated/validated/archived for research). `/kick-off` surfaces pending entries; `/duet-impl` marks plans `completed` at end of run; `koji-plans-research --set-status <path> <new>` mutates from the command line, and `--set-next-step <path> "<text>"` rewrites the `next-step:` line; `/wrap` re-checks an active plan's `next-step` whenever the session touched that plan. Drift-exempt (not code-coverage docs).
 
 ## Deeper docs
 
@@ -124,10 +137,14 @@ The README is intentionally short. SKILL.md files have the details:
 - [`triangulate/SKILL.md`](triangulate/SKILL.md) — Claude + codex + you = 3 reference points on one decision
 - [`plan-triangulate-review/SKILL.md`](plan-triangulate-review/SKILL.md) — autonomous per-finding hardening of a locked plan (drives `/plan-eng-review` + per-finding debate)
 - [`references/agent-autonomy.md`](references/agent-autonomy.md) — shared principle for the duet skills
+- [`references/reviewer-backend.md`](references/reviewer-backend.md) — reviewer backend mapping, read-only clause, quota rule
+- [`tests/run.sh`](tests/run.sh) — fixture runner for the bash helpers (`tests/run.sh [case]`); not an install gate
 
 ## FAQ
 
 **Where do session docs live?** In each project's `.koji/` directory, committed to git. `~/.config/koji/` only stores global preferences.
+
+**Why does `/kick-off` ask about a bypass key?** Older `/koji-init` versions wrote `permissions.defaultMode: bypassPermissions` into `.claude/settings.local.json`. Since Claude Code 2.1.257 that key is inert at project scope, so `/kick-off` offers to remove it, and `/wrap`'s permission hygiene now reads the effective mode from user and managed settings instead. koji never writes `~/.claude/settings.json`.
 
 **Will `/koji-init` overwrite my existing docs?** No. If existing session files are found in `docs/`, koji asks whether to relocate or keep them. Content is preserved.
 

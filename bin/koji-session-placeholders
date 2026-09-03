@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# koji-session-placeholders — which template placeholders survived into an entry?
+#
+# Usage: koji-session-placeholders <template-file> <entry-file>
+#
+# Prints every `[…]` token that appears in the TEMPLATE and still appears
+# verbatim in the ENTRY — one per line, deduplicated, in template order. That
+# set is exactly the boilerplate the writer forgot to replace.
+#
+# Exit codes are the check:
+#   0  nothing survived — the entry is clean
+#   1  at least one placeholder printed — the entry still has boilerplate
+#   2  usage error, or a file that does not exist
+#
+# Not excluded from that: a token the entry happens to contain for its own
+# reasons. Matching is verbatim and per-token, so `[Description]` in a filled
+# entry is still reported — the point is a cheap, loud, false-positive-tolerant
+# gate at /wrap, not a proof.
+#
+# Excluded on purpose:
+#   [ ] [x] [X]   markdown checkboxes — structure, not boilerplate
+#   [<agent>]     one per name in $AGENTS (space-separated, default Claude;
+#                 self-sources koji-detect when unset). `**Agent**: [Claude]`
+#                 is a correctly filled line, not an unfilled placeholder.
+#   <!-- … -->    HTML comment blocks, possibly spanning lines, are cut out of
+#                 the TEMPLATE before tokens are extracted. Templates carry
+#                 authoring guidance in comments (`**AI-lens**: [angle | none |
+#                 n/a (reason)]`) whose brackets are examples, not slots.
+#                 Only the template is stripped — the entry is still searched
+#                 verbatim, which keeps the gate loud rather than clever.
+#
+# A token is `[`, any run of non-`]` characters (spaces and punctuation
+# included), `]` — `grep -oE '\[[^]]*\]'`, which BSD and GNU grep agree on
+# (`]` first in a bracket expression is literal in both).
+set -euo pipefail
+
+# Variable names are deliberately not TEMPLATE/AGENTS-adjacent: this script
+# self-sources koji-detect below, and koji-detect emits TEMPLATE=<name>, which
+# would silently overwrite an argument held in a variable of that name.
+TPL_FILE="${1:-}"
+ENTRY_FILE="${2:-}"
+
+if [ -z "$TPL_FILE" ] || [ -z "$ENTRY_FILE" ]; then
+  cat >&2 <<'USAGE'
+ERROR: usage: koji-session-placeholders <template-file> <entry-file>
+
+Prints the `[…]` placeholders present in BOTH files, one per line, in template
+order. Exit 0 = clean, 1 = placeholders printed, 2 = usage/missing file.
+Checkboxes ([ ] [x] [X]) and [<agent>] for each $AGENTS name are excluded.
+USAGE
+  exit 2
+fi
+
+for f in "$TPL_FILE" "$ENTRY_FILE"; do
+  if [ ! -f "$f" ]; then
+    printf 'ERROR: file not found: %s\n' "$f" >&2
+    exit 2
+  fi
+done
+
+if [ -z "${AGENTS:-}" ]; then
+  eval "$(~/.claude/skills/koji/bin/koji-detect)"
+fi
+AGENTS="${AGENTS:-Claude}"
+
+FOUND=0
+
+# Cut `<!-- … -->` spans out of a file, comment state carried across lines so a
+# multi-line block disappears whole. index()/substr() only — no regex — because
+# a `/<!--.*-->/` sub() cannot span lines and would leave the tail of a
+# multi-line comment behind for the token scan to find.
+_strip_html_comments() {
+  awk '
+    {
+      line = $0
+      out  = ""
+      while (1) {
+        if (incomment) {
+          i = index(line, "-->")
+          if (i == 0) { line = ""; break }     # comment continues on the next line
+          incomment = 0
+          line = substr(line, i + 3)
+          continue
+        }
+        i = index(line, "<!--")
+        if (i == 0) { out = out line; break }  # no comment opens on this line
+        out = out substr(line, 1, i - 1)
+        line = substr(line, i + 4)
+        incomment = 1
+      }
+      print out
+    }
+  ' "$1"
+}
+
+# Word-splitting $AGENTS is deliberate: koji-detect emits it space-separated
+# (and with a trailing space), which is exactly what this loop wants.
+while IFS= read -r token; do
+  [ -n "$token" ] || continue
+
+  case "$token" in
+    '[ ]'|'[x]'|'[X]') continue ;;
+  esac
+
+  skip=0
+  # shellcheck disable=SC2086
+  for agent in $AGENTS; do
+    if [ "$token" = "[$agent]" ]; then skip=1; break; fi
+  done
+  [ "$skip" = 0 ] || continue
+
+  # -F: the token is a literal, and it is full of regex metacharacters.
+  # --: the token starts with `[`, which grep would otherwise read as a flag.
+  if grep -qF -- "$token" "$ENTRY_FILE"; then
+    printf '%s\n' "$token"
+    FOUND=1
+  fi
+done < <(_strip_html_comments "$TPL_FILE" | grep -oE '\[[^]]*\]' 2>/dev/null | awk '!seen[$0]++')
+
+exit "$FOUND"

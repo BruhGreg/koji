@@ -9,6 +9,15 @@ Optional second-pass inputs:
   --codex-cross   codex's verdicts on Claude's solo findings (cross-review)
   --cross-review-done  Mark the verdict as final (no more cross-review passes)
 
+Backend provenance:
+  --b-backend {codex,claude}  Which model actually filled reviewer slot B
+                              (default: codex). Recorded verbatim in the output
+                              as "reviewer_backends": {"a": "claude", "b": ...}.
+  The literals "claude"/"codex" in `agreed_by` and `reviewers` are SLOT
+  identifiers (A/B), not model names: downstream consumers key on them, so they
+  stay fixed whatever backend ran. `reviewer_backends` is the only field that
+  reports the real model per slot.
+
 Output: a single verdict JSON written to --out, with the schema in
 references/verdict-format.md.
 
@@ -259,6 +268,10 @@ def main() -> int:
                     help="codex's verdicts on Claude's solo findings")
     ap.add_argument("--cross-review-done", action="store_true",
                     help="Mark this verdict as cross-review-final")
+    ap.add_argument("--b-backend", default="codex", choices=("codex", "claude"),
+                    help="Model that actually filled reviewer slot B "
+                         "(default: codex). Recorded in reviewer_backends; does "
+                         "NOT rename the A/B slot identifiers.")
     args = ap.parse_args()
 
     claude = load_findings(args.claude)
@@ -346,7 +359,11 @@ def main() -> int:
         "verdict": verdict,
         "base": args.base,
         "head": args.head,
+        # Slot identifiers, NOT model names — kept stable for downstream keying.
         "reviewers": ["claude", "codex"],
+        # The actual backend behind each slot. Slot A is always Claude (the
+        # orchestrator's own model); slot B is whatever --b-backend named.
+        "reviewer_backends": {"a": "claude", "b": args.b_backend},
         "cross_review_required": cross_review_required,
         "cross_review_done": cross_review_done,
         "totals": {

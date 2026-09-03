@@ -19,7 +19,7 @@ allowed-tools:
 
 Use ONLY when the user explicitly types `/duet-review`, says "duet review", "duet-review", "let's duet review this diff", or similar — the `duet` keyword is required. Do NOT invoke on casual "review this" or "code review" phrases — gstack `/review` handles those.
 
-Two-reviewer adversarial code review. **Reviewer A** is Claude (Agent subagent, fresh context — at `/effort max` it fans out into multiple angle reviewers that the main agent consolidates; see Step 2); **Reviewer B** is codex (codex exec, `xhigh` effort by default — drop to `high` only via natural-language signal per the Arguments note). Both run in parallel; results are synthesized into a verdict; reviewer-exclusive findings at severity ≥ medium trigger a cross-review pass with severity-aware AGREE labels; high-consensus mechanical fixes prompt the user with four choices (apply / hold / apply+remember-for-repo / apply+remember-for-session).
+Two-reviewer adversarial code review. **Reviewer A** is Claude (Agent subagent, fresh context — at `/effort max` it fans out into multiple angle reviewers that the main agent consolidates; see Step 2); **Reviewer B** is codex by default (codex exec, `xhigh` effort by default — drop to `high` only via natural-language signal per the Arguments note); `duet.reviewer: claude` in `.koji.yaml` swaps in a fresh-context Claude subagent instead (see **Reviewer B backend** in Arguments). Both run in parallel; results are synthesized into a verdict; reviewer-exclusive findings at severity ≥ medium trigger a cross-review pass with severity-aware AGREE labels; high-consensus mechanical fixes prompt the user with four choices (apply / hold / apply+remember-for-repo / apply+remember-for-session).
 
 ## Preamble
 
@@ -28,6 +28,7 @@ source <(~/.claude/skills/koji/bin/koji-detect)
 echo "=== koji duet-review ==="
 echo "Project: $PROJECT_NAME"
 echo "Session: $SESSION_DIR"
+echo "Reviewer B: ${DUET_REVIEWER:-codex} (claude model: ${DUET_CLAUDE_MODEL:-inherit}, codex effort: ${DUET_CODEX_EFFORT:-xhigh})"
 ```
 
 ## Arguments
@@ -40,6 +41,8 @@ echo "Session: $SESSION_DIR"
 - **Verdict only, no auto-apply** → `NO_AUTO_APPLY`. By default consensus mechanical fixes prompt the 4-choice apply menu. If the user wants the report without any apply prompt ("no auto-apply", "just the verdict", "report only, don't touch my files", "don't apply anything"), set `NO_AUTO_APPLY=1` — the apply step is skipped and the verdict is emitted as-is. (A required cross-review still runs first; see Step 5.)
 
 **Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens). Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick review", "lighter pass", "use high effort", "save tokens", "fast check". Don't downgrade for "the diff looks small" or similar heuristics; only on explicit user signal. Claude inherits the parent session's effort level — set `/effort max` once before running if you want max-tier Claude reviewer.
+
+**Reviewer B backend: config, not intent** → `REVIEWER_B`. Resolved from `.koji.yaml` `duet.reviewer` via `koji-duet-backend review-b` (see [`../references/reviewer-backend.md`](../references/reviewer-backend.md)): `codex` (default) and `claude-rounds+codex-final` both mean **codex** here — this skill is always a *final* review (the end-of-run pass `/duet-impl` embeds, and on its own the cross-model check), so the hybrid value's "codex at the final gate" lands on it. `claude` makes Reviewer B a **fresh-context Claude subagent** (never a fork) running the identical reviewer prompt. Same-model caveat: two Claude contexts agreeing is two independent readings, not two model families — the disagreement signal is weaker and exact-fingerprint agreement inflates the auto-apply bucket; Step 6 says so in the header. Not settable from the invocation phrase.
 
 **Claude reviewer depth: single pass (default) vs angle fan-out (max effort)** → `REVIEW_MODE`. Reviewer A normally runs as ONE holistic pass (`REVIEW_MODE=single`). At `/effort max` — or when the invocation phrase explicitly asks for a full/deep review ("full review", "fan out", "all angles", "deep review") — set `REVIEW_MODE=fanout`: Reviewer A instead fans out into 5 focused angle reviewers that the main agent consolidates (Step 2b fan-out → Step 2e). This is Claude-side only and orthogonal to codex's `xhigh`/`high` knob. It roughly 5×'s the Claude-side cost, so it is gated like every other knob here — read from intent, not a flag — and a "quick review" / "lighter pass" / "save tokens" phrase forces `single` even at max effort. The decision is set at the top of Step 2; single pass is the preserved lightest tier. When `/duet-impl` invokes this skill for its **final review**, treat it as a full review: at `/effort max` run `fanout` — that final pass is meant to be the 5-angle review, never a single pass.
 
@@ -62,6 +65,9 @@ SINCE="${SINCE:-}"                   # floor ref for WORKTREE mode (default HEAD
 NO_AUTO_APPLY="${NO_AUTO_APPLY:-}"   # "1" → skip the apply prompt, emit verdict only (Step 5)
 QUOTA_BACKOFF="${QUOTA_BACKOFF:-900}"      # codex quota back-off interval (s), default 15 min
 QUOTA_MAX_WAITS="${QUOTA_MAX_WAITS:-20}"   # cap on codex quota back-off retries (~5h)
+CLAUDE_MODEL="${DUET_CLAUDE_MODEL:-inherit}"   # Claude-backend Reviewer B model; inherit → omit the Agent `model` param
+CODEX_UNAVAILABLE="${CODEX_UNAVAILABLE:-}"     # "1" → Reviewer B degraded (quota cap, or Claude-B malformed ×2); Step 6 banner
+B_RETRIED="${B_RETRIED:-0}"                    # Claude-B malformed-reply retry already used (0/1)
 
 if [ "$WORKTREE" != "1" ] && [ -z "$BASE" ] && [ "$STAGED" != "1" ]; then
   BASE=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|origin/||')
@@ -122,18 +128,26 @@ Both reviewers run as **background tasks**. After launching them, briefly tell t
 # "save tokens" phrase forces "single" even at max effort. Render-safe: plain
 # string var, no field refs.
 REVIEW_MODE="${REVIEW_MODE:-single}"
-echo "Claude reviewer mode: $REVIEW_MODE"
+# Reviewer B backend from .koji.yaml (never from the phrase). Stateless helper —
+# codex unless duet.reviewer is exactly `claude`; the hybrid value is codex here.
+REVIEWER_B=$(~/.claude/skills/koji/bin/koji-duet-backend review-b)
+echo "Claude reviewer mode: $REVIEW_MODE | Reviewer B backend: $REVIEWER_B"
 ```
 
-Mode wiring: `single` → run 2b (single pass) + the single-mode half of 2d, and SKIP 2e. `fanout` → run 2b (fan-out) + the fan-out half of 2d, then 2e. Step 2a (codex) and Steps 3–6 are identical either way.
+Mode wiring: `single` → run 2b (single pass) + the single-mode half of 2d, and SKIP 2e. `fanout` → run 2b (fan-out) + the fan-out half of 2d, then 2e. Step 2a (Reviewer B) and Steps 3–6 are identical either way. `REVIEWER_B` is orthogonal to `REVIEW_MODE` — every combination is legal; it only selects which 2a leg runs and which 2d/4b/4c collection branch applies.
 
-### 2a. Start codex (Reviewer B) in background
+### 2a. Start Reviewer B in background
+
+**Run the leg matching `REVIEWER_B`.** Both legs end up in the same slot (`$RUN_DIR/codex.json`, written in 2d), so the synthesizer never learns which backend ran — the slot rule in [`../references/reviewer-backend.md`](../references/reviewer-backend.md).
+
+#### 2a — codex leg (`REVIEWER_B=codex`)
 
 ```bash
-# Default codex effort: xhigh. Agent sets EFFORT=high TIMEOUT=900 BEFORE this
-# block only when the user's invocation phrase signals lighter effort (see
-# "Codex effort" note in Arguments above).
-EFFORT="${EFFORT:-xhigh}"
+# Default codex effort: the .koji.yaml duet.codex_effort value (xhigh unless set).
+# Agent sets EFFORT=high TIMEOUT=900 BEFORE this block only when the user's
+# invocation phrase signals lighter effort (see "Codex effort" note in Arguments
+# above) — the NL signal wins over the config default.
+EFFORT="${EFFORT:-${DUET_CODEX_EFFORT:-xhigh}}"
 TIMEOUT="${TIMEOUT:-1800}"
 TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
 PROMPT_FILE="$KOJI_SKILLS/duet-review/references/reviewer-prompt.md"
@@ -171,6 +185,25 @@ echo $? > "$RUN_DIR/codex.exit"
 ```
 
 Run this Bash block with **`run_in_background: true`**. The harness returns immediately with a task ID; you (the main agent) will be notified when the command completes. The output file path the harness gives you can also be polled if needed, but the notification is the primary signal.
+
+#### 2a — Claude leg (`REVIEWER_B=claude`)
+
+Record the tree state first — the Claude backend has no `-s read-only` sandbox, only an instruction, so the run detects (not prevents) a reviewer that edits:
+
+```bash
+: "${RUN_DIR:?RUN_DIR unset — re-substitute it in this block}"   # an empty prefix would write "/codex.fp"
+~/.claude/skills/koji/bin/koji-tree-fingerprint > "$RUN_DIR/codex.fp"   # compared in 2d
+```
+
+**Call the `Agent` tool** — a literal tool call; do not narrate "spawning a reviewer" and write the findings yourself. The reviewer runs in a **fresh Agent context, never a fork** — a fork inherits this session's view of the diff, which is exactly the blind spot a second reviewer exists to avoid.
+
+- `subagent_type`: `general-purpose`
+- `description`: `Duet review: Reviewer B (Claude) pass`
+- `model`: **omit this parameter** when `$CLAUDE_MODEL` is `inherit`; otherwise pass its value (`fable` / `opus` / `sonnet`)
+- `prompt`: exactly what the codex leg composes — the full `reviewer-prompt.md` text, the closer *"Now review the diff below. Output STRICT JSON only — no markdown fences, no preamble, no commentary. If no findings, output []."*, a `DIFF:` line and the full contents of `$DIFF_FILE` — followed by the **read-only clause** from `../references/reviewer-backend.md`
+- `run_in_background`: `true`
+
+Reviewer A (2b) still runs as its own fresh context. Two Claude contexts on disjoint roles is still a duet *structurally*: the orchestrator never judges across the A/B boundary — it collects, writes the slot files, and runs the synthesizer. What changes is the signal strength, and Step 6 says so.
 
 ### 2b. Run Claude reviewer (Reviewer A) via Agent tool — also backgrounded
 
@@ -215,15 +248,15 @@ The five fixed angles (each writes to its numbered file in Step 2d):
 
 ### 2c. Tell the user, then go
 
-After **all** reviewers are launched (codex + the one Claude reviewer in single mode, or codex + all five angle agents in fan-out mode), tell the user something like:
+After **all** reviewers are launched (Reviewer B + the one Claude reviewer in single mode, or Reviewer B + all five angle agents in fan-out mode), tell the user something like:
 
-> *"duet-review running — codex + Claude reviewer(s) launched in background. I'll come back with the verdict when everything completes; in the meantime you can continue with anything else."*
+> *"duet-review running — Reviewer B (<codex | Claude>) + Claude reviewer(s) launched in background. I'll come back with the verdict when everything completes; in the meantime you can continue with anything else."*
 
 Then **return control**. Do NOT poll, sleep, or proactively check on progress. The harness will re-invoke you with the notification messages.
 
 ### 2d. On notification: collect outputs
 
-When the codex Bash notification arrives, extract its JSON:
+**Reviewer B — codex leg (`REVIEWER_B=codex`):** when the codex Bash notification arrives, extract its JSON:
 
 ```bash
 CODEX_STATE=$(~/.claude/skills/koji/bin/koji-codex-classify \
@@ -234,12 +267,22 @@ echo "codex state: $CODEX_STATE"
 Branch on `$CODEX_STATE` (per-run loop-state `CODEX_WAITS`, default `0`) — **codex quota is not zero findings**:
 
 - **`OK` / `EMPTY`** → `codex.json` written; proceed.
-- **`TIMEOUT` / `ERROR`** → `WARN: codex $CODEX_STATE — treating as empty findings`; write `echo "[]" > "$RUN_DIR/codex.json"`; proceed (safe degrade, as before).
+- **`TIMEOUT` / `ERROR`** → Reviewer B did not review. `WARN: codex $CODEX_STATE — Reviewer B unavailable; this review runs Claude-only (degraded)`; set `CODEX_UNAVAILABLE=1`; write `echo "[]" > "$RUN_DIR/codex.json"` as the degraded-run placeholder (not a finding count — the Step 6 banner declares it); proceed. A codex start failure at the final review must never read as a two-reviewer PASS.
 - **`QUOTA`** → do **not** treat as findings. If `CODEX_WAITS < QUOTA_MAX_WAITS`: tell the user *"codex quota/rate-limit — backing off ${QUOTA_BACKOFF}s, retry $((CODEX_WAITS+1))/${QUOTA_MAX_WAITS}"*, dispatch a backgrounded `sleep "$QUOTA_BACKOFF"; <the Step 2a codex exec …>` reading the **same `$PROMPT_TXT` already on disk** — an identical retry, no prompt rebuild (`run_in_background: true`), increment `CODEX_WAITS`, return control; re-classify on notification. If the cap is reached: `echo "WARN: codex unavailable (quota) after $QUOTA_MAX_WAITS back-offs — this review ran Claude-only (degraded, NOT a true duet)"`, set `CODEX_UNAVAILABLE=1`, write `echo "[]" > "$RUN_DIR/codex.json"`, and proceed. The degraded state surfaces in the Step 6 header so it is never a silent pass.
 
 ```bash
 echo "codex.json:  $(wc -c < "$RUN_DIR/codex.json") bytes"
 ```
+
+**Reviewer B — Claude leg (`REVIEWER_B=claude`):** when the Reviewer B Agent notification arrives, extract the JSON array from its response and write it to `$RUN_DIR/codex.json` — the B slot — via the Write tool. **Do not run `koji-codex-classify` on it**: its quota-marker scan over review text would turn a review of rate-limiting code into a phantom `QUOTA`. Then compare the tree fingerprint:
+
+```bash
+FP_NOW=$(~/.claude/skills/koji/bin/koji-tree-fingerprint)
+[ "$FP_NOW" = "$(cat "$RUN_DIR/codex.fp" 2>/dev/null)" ] \
+  || echo "⚠ working tree changed while a read-only reviewer was in flight (reviewer or concurrent work) — review snapshot may be stale"
+```
+
+If the response has **no parseable array**: when `B_RETRIED=0`, set `B_RETRIED=1` and re-dispatch the same 2a Claude leg once with the reminder *"Your last response was not a JSON array — re-output your findings as ONLY a JSON array, `[]` if none."* On a second failure Reviewer B is **unavailable**: set `CODEX_UNAVAILABLE=1`, write `echo "[]" > "$RUN_DIR/codex.json"` as the degraded-run placeholder — this is *not* a claim of zero findings; the Step 6 banner declares the degradation — and proceed. Never write `[]` for a reply you could not parse without also setting the flag.
 
 **Claude side — single mode:** when the Claude reviewer Agent notification arrives, extract the JSON array from its response and write to `$RUN_DIR/claude.json` via the Write tool. If the response contains no parseable array, write `[]` and note it in the summary.
 
@@ -255,7 +298,7 @@ echo "angles present: $ANGLES_DONE"
 
 If `ANGLES_DONE=0`, confirm the angle you just collected and return control (the next notification re-invokes you). If `ANGLES_DONE=1`, run **Step 2e** to consolidate the angles into `$RUN_DIR/claude.json`. (If one angle never notifies for an unreasonably long time while all the others are in, treat it as `[]`, write its file, and proceed — do not hang the review.)
 
-**Proceed to Step 3 only after `$RUN_DIR/codex.json` AND `$RUN_DIR/claude.json` both exist** (in fan-out mode `claude.json` is produced by Step 2e, below). codex and the Claude side run independently; whichever finishes last trips Step 3. If something is still running when you're re-invoked by another notification, just confirm what finished and return control again — the next notification re-invokes you.
+**Proceed to Step 3 only after `$RUN_DIR/codex.json` AND `$RUN_DIR/claude.json` both exist** (in fan-out mode `claude.json` is produced by Step 2e, below). Reviewer B and the Claude side (Reviewer A) run independently; whichever finishes last trips Step 3. If something is still running when you're re-invoked by another notification, just confirm what finished and return control again — the next notification re-invokes you.
 
 > **STOP — the synthesizer is the gate; do not triage by hand.** With both files written, your ONLY next action is **Step 3** (`koji-duet-synthesize`). **You MUST run `koji-duet-synthesize` before you assess, triage, or apply ANY finding.** Reading the raw findings and deciding what to fix yourself — skipping Step 3 — is the single most common failure of this skill. It is not a faster path to the same verdict; it is a *different, worse* one:
 >
@@ -290,6 +333,7 @@ Then fall through to Step 3 exactly as single mode does — `claude.json` now ex
 ~/.claude/skills/koji/bin/koji-duet-synthesize \
   --claude "$RUN_DIR/claude.json" \
   --codex  "$RUN_DIR/codex.json" \
+  --b-backend "${REVIEWER_B:-$(~/.claude/skills/koji/bin/koji-duet-backend review-b)}" \
   --base   "$BASE" \
   --head   "$HEAD_SHA" \
   --out    "$RUN_DIR/verdict.json"
@@ -342,6 +386,7 @@ if [ "$codex_target_count" = "0" ] && [ "$claude_target_count" = "0" ]; then
   ~/.claude/skills/koji/bin/koji-duet-synthesize \
     --claude "$RUN_DIR/claude.json" \
     --codex  "$RUN_DIR/codex.json" \
+    --b-backend "${REVIEWER_B:-$(~/.claude/skills/koji/bin/koji-duet-backend review-b)}" \
     --claude-cross "$RUN_DIR/claude.cross.json" \
     --codex-cross  "$RUN_DIR/codex.cross.json" \
     --cross-review-done \
@@ -361,10 +406,12 @@ Both use **severity-aware AGREE labels** — plain AGREE/DISAGREE loses signal w
 - `DISAGREE` — false positive
 - `NEEDS-MORE-CONTEXT` — can't tell from what was shown
 
-**Codex cross-review (Bash, background)** — codex reads `$RUN_DIR/codex-cross-targets.json` (Claude's solo findings) and emits a JSON array of `{fingerprint, verdict, rationale}`:
+Both cross legs keep the A/B boundary: Reviewer B assesses only Reviewer A's solo findings and vice versa, each in its own context; the orchestrator collects and re-synthesizes, never judges. Under `REVIEWER_B=claude` that is still two separate fresh contexts on disjoint target sets — do not "simplify" it into one agent assessing both.
+
+**Reviewer B cross-review — codex leg (`REVIEWER_B=codex`; Bash, background)** — codex reads `$RUN_DIR/codex-cross-targets.json` (Reviewer A's solo findings) and emits a JSON array of `{fingerprint, verdict, rationale}`:
 
 ```bash
-CROSS_PROMPT="You are codex. Another reviewer (Claude) flagged the following findings on this diff that you did not catch in your first-pass review. For each, return your assessment using these severity-aware labels:
+CROSS_PROMPT="You are Reviewer B. Reviewer A — a separate reviewer — flagged the following findings on this diff that you did not catch in your first-pass review. For each, return your assessment using these severity-aware labels:
 
   AGREE-HIGH     | yes, ship-blocking
   AGREE-MEDIUM   | yes, should fix but not blocking
@@ -375,7 +422,7 @@ CROSS_PROMPT="You are codex. Another reviewer (Claude) flagged the following fin
 DIFF:
 $(cat "$DIFF_FILE")
 
-CLAUDE'S FINDINGS TO ASSESS (JSON):
+REVIEWER A'S FINDINGS TO ASSESS (JSON):
 $(cat "$RUN_DIR/codex-cross-targets.json")
 
 Output STRICT JSON only — array of {\"fingerprint\": \"...\", \"verdict\": \"AGREE-HIGH\"|..., \"rationale\": \"one line\"}. No markdown fences. Empty array if nothing to assess."
@@ -399,26 +446,29 @@ echo $? > "$RUN_DIR/codex.cross.exit"
 
 Run with **`run_in_background: true`**.
 
-**Claude cross-review (Agent, background)** — call the `Agent` tool with `run_in_background: true`. Prompt:
+**Reviewer B cross-review — Claude leg (`REVIEWER_B=claude`; Agent, background)** — same target set, same labels, same output file. First `~/.claude/skills/koji/bin/koji-tree-fingerprint > "$RUN_DIR/codex.cross.fp"`. Then **Call the `Agent` tool** — a literal tool call; do not assess Reviewer A's findings yourself. The reviewer runs in a **fresh Agent context, never a fork**: `subagent_type: general-purpose`, `description: Duet review: Reviewer B (Claude) cross-review`, `model` omitted when `$CLAUDE_MODEL` is `inherit` else its value, `run_in_background: true`, and `prompt` = the exact `$CROSS_PROMPT` text above (with the diff and the targets JSON inlined) followed by the read-only clause from `../references/reviewer-backend.md`. Its array is written to `$RUN_DIR/codex.cross.json` in 4c — the B cross slot.
+
+**Reviewer A cross-review (Agent, background)** — call the `Agent` tool with `run_in_background: true`. Prompt:
 
 ```
-You are a code reviewer. Another reviewer (codex) flagged the following findings on this diff that you did not catch in your first-pass review. For each, return your assessment using these labels: AGREE-HIGH / AGREE-MEDIUM / AGREE-LOW / DISAGREE / NEEDS-MORE-CONTEXT.
+You are a code reviewer. Reviewer B — a separate reviewer — flagged the following findings on this diff that you did not catch in your first-pass review. For each, return your assessment using these labels: AGREE-HIGH / AGREE-MEDIUM / AGREE-LOW / DISAGREE / NEEDS-MORE-CONTEXT.
 
 DIFF FILE PATH: <DIFF_FILE>
 
-CODEX'S FINDINGS TO ASSESS (JSON): <contents of $RUN_DIR/claude-cross-targets.json>
+REVIEWER B'S FINDINGS TO ASSESS (JSON): <contents of $RUN_DIR/claude-cross-targets.json>
 
 Output STRICT JSON ONLY — array of {fingerprint, verdict, rationale}. No markdown fences, no commentary. Empty array if nothing to assess.
 ```
 
 ### 4c. Collect both responses, re-synthesize
 
-When BOTH notifications arrive, extract JSON arrays and write to `$RUN_DIR/codex.cross.json` and `$RUN_DIR/claude.cross.json`. For the **codex** cross leg use `koji-codex-classify` (as in Step 2d): a `QUOTA` state backs off + retries up to `QUOTA_MAX_WAITS` before falling to the 4d safe-degrade — never read a quota reply as an empty cross-review. Then re-run the synthesizer with the new inputs:
+When BOTH notifications arrive, extract JSON arrays and write to `$RUN_DIR/codex.cross.json` and `$RUN_DIR/claude.cross.json`. When `REVIEWER_B=codex`, use `koji-codex-classify` for the B cross leg (as in Step 2d): a `QUOTA` state backs off + retries up to `QUOTA_MAX_WAITS` before falling to the 4d safe-degrade — never read a quota reply as an empty cross-review. When `REVIEWER_B=claude`, extract the array from the B cross Agent's response directly — no classifier — and compare `codex.cross.fp` against a fresh `koji-tree-fingerprint` (same `⚠` line as 2d on mismatch). Then re-run the synthesizer with the new inputs:
 
 ```bash
 ~/.claude/skills/koji/bin/koji-duet-synthesize \
   --claude "$RUN_DIR/claude.json" \
   --codex  "$RUN_DIR/codex.json" \
+  --b-backend "${REVIEWER_B:-$(~/.claude/skills/koji/bin/koji-duet-backend review-b)}" \
   --claude-cross "$RUN_DIR/claude.cross.json" \
   --codex-cross  "$RUN_DIR/codex.cross.json" \
   --cross-review-done \
@@ -521,7 +571,7 @@ Print a markdown summary to the user:
 ```
 duet-review verdict: <VERDICT>
 
-Reviewers: claude (<single pass | fan-out 5 angles>) + codex (<xhigh|high | UNAVAILABLE — quota>)
+Reviewers: claude-A (<single pass | fan-out 5 angles>) + <codex (<xhigh|high>) | claude-B (<inherit|fable|opus|sonnet>)> [UNAVAILABLE — <quota | malformed>]
 Diff: <N> lines  base=<base>  head=<sha>
 
 Consensus high (X):   <list — auto-applied / held by user / failed apply>
@@ -533,7 +583,9 @@ Output JSON: <RUN_DIR>/verdict.json
 Exit code: <0|1|2>
 ```
 
-When `CODEX_UNAVAILABLE=1` (quota back-off cap reached), print `codex (UNAVAILABLE — quota)` on the Reviewers line and add a one-line banner above the verdict — *"⚠ Degraded: codex was unavailable; this verdict reflects the Claude reviewer only, not a two-reviewer duet."* — so the degradation is explicit, never a silent single-reviewer pass.
+When `CODEX_UNAVAILABLE=1` (codex quota back-off cap reached, codex `TIMEOUT`/`ERROR`, or the Claude-B leg returned no parseable array twice), print `UNAVAILABLE — <quota | error | malformed>` after the Reviewer B entry and add a one-line banner above the verdict — *"⚠ Degraded: Reviewer B (<codex | Claude>) was unavailable; this verdict reflects Reviewer A only, not a two-reviewer duet."* — so the degradation is explicit, never a silent single-reviewer pass.
+
+When `REVIEWER_B=claude`, add one line under the Reviewers line: *"Note: same-model duet (claude + claude) — consensus here means two independent Claude contexts, not two model families; the cross-model disagreement signal is weaker, and exact-fingerprint agreement inflates the auto-apply bucket."* If any `⚠ working tree changed …` fired during 2d/4c, repeat it here as a header note.
 
 Then `exit $EXIT_CODE` where exit code comes from `verdict.json`.
 
@@ -546,7 +598,10 @@ Then `exit $EXIT_CODE` where exit code comes from `verdict.json`.
 | Codex hangs (no output, no timeout fire) | Stdin not closed, or `--enable web_search_cached` re-introduced | This skill explicitly drops both — verify the bash above wasn't modified. Kill `$CODEX_PID` manually. |
 | Codex exits 124 | Hit the timeout. xhigh's 30-min wall isn't enough for very large diffs. | Re-run with smaller scope (name a closer `BASE`), or ask for verdict-only (`NO_AUTO_APPLY`) to at least get the report. |
 | Codex quota/rate-limit reply | 5-hour session limit depleted | `koji-codex-classify` returns `QUOTA` (not `[]`) → back off `QUOTA_BACKOFF`s and auto-retry to `QUOTA_MAX_WAITS`; cap reached → Claude-only degraded verdict with an explicit banner (`CODEX_UNAVAILABLE`), never a silent single-reviewer pass. |
-| Agent (Claude) returns prose instead of JSON | Reviewer prompt drift, or model decided to chat. | The prompt body explicitly demands strict JSON; the JSON extractor handles single arrays. If the array is missing → treat as `[]`. |
+| Agent (Claude, Reviewer A) returns prose instead of JSON | Reviewer prompt drift, or model decided to chat. | The prompt body explicitly demands strict JSON; the JSON extractor handles single arrays. If the array is missing → treat as `[]`. |
+| Reviewer B Claude leg returns prose / no array | Same drift, on the B side | Retry once with the format reminder (Step 2d); second failure → `CODEX_UNAVAILABLE=1` + degraded banner. Never a silent `[]` — a B slot placeholder is always announced. Never run `koji-codex-classify` on Claude output. |
+| `⚠ working tree changed while a read-only reviewer was in flight` | Reviewer B (Claude leg) edited despite the read-only clause, or the user kept working | Unattributed by design. Inspect `git status`; if the reviewer edited, re-run the review on the intended snapshot. |
+| `duet.reviewer` typo in `.koji.yaml` | Enum validation in `koji-detect` | Warns on stderr and falls back to `codex` — check the preamble's `Reviewer B:` line. |
 | Synthesize crashes | Malformed input (rare; both reviewers were instructed to emit strict JSON) | `koji-duet-synthesize` is defensive: bad input → empty findings → PASS verdict. |
 | User chose "remember for repo" but rule doesn't trigger next session | Likely fingerprint mismatch on the OTHER reviewer (consensus didn't form again). Rules need consensus PLUS category match. | This is intentional — rule does not auto-apply on single-reviewer findings. |
 | Angle agent (fan-out) returns prose, or never notifies | One of the 5 angle subagents drifted, or its notification was lost | Each angle's collection writes `[]` on an unparseable response; a never-returning angle is treated as `[]` once the others are in (Step 2d). The review completes on the remaining angles — fan-out degrades, never hangs. |
@@ -555,6 +610,7 @@ Then `exit $EXIT_CODE` where exit code comes from `verdict.json`.
 ## Related
 
 - Autonomy principle: [../references/agent-autonomy.md](../references/agent-autonomy.md)
+- Reviewer backend (codex | claude | hybrid; read-only clause; quota rule): [../references/reviewer-backend.md](../references/reviewer-backend.md)
 - Verdict JSON spec: [references/verdict-format.md](references/verdict-format.md)
 - Reviewer prompt: [references/reviewer-prompt.md](references/reviewer-prompt.md)
 - Angle lenses (fan-out mode): [references/claude-angles.md](references/claude-angles.md)

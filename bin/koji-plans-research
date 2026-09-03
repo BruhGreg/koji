@@ -27,12 +27,28 @@ _fm_get() {
     in_fm && /^---[[:space:]]*$/ { exit 0 }
     in_fm && $0 ~ "^"key"[[:space:]]*:" {
       sub("^"key"[[:space:]]*:[[:space:]]*", "")
-      sub(/[[:space:]]+#.*$/, "")
-      sub(/[[:space:]]*$/, "")
-      n = length($0)
-      if (n >= 2) {
-        f = substr($0, 1, 1); l = substr($0, n, 1)
-        if ((f == "\"" && l == "\"") || (f == "\047" && l == "\047")) $0 = substr($0, 2, n - 2)
+      c = substr($0, 1, 1)
+      if (c == "\"") {
+        # Double-quoted scalar: read through the closing unescaped quote BEFORE
+        # any comment stripping (a `#` inside quotes is data), unescaping \" and
+        # \\ — the exact inverse of what --set-next-step writes.
+        s = substr($0, 2); out = ""; i = 1; L = length(s)
+        while (i <= L) {
+          ch = substr(s, i, 1)
+          if (ch == "\\" && i < L) {
+            nx = substr(s, i + 1, 1)
+            if (nx == "\"" || nx == "\\") { out = out nx; i += 2; continue }
+          }
+          if (ch == "\"") break
+          out = out ch; i++
+        }
+        $0 = out
+      } else if (c == "\047") {
+        s = substr($0, 2); idx = index(s, "\047")
+        $0 = (idx > 0) ? substr(s, 1, idx - 1) : s
+      } else {
+        sub(/[[:space:]]+#.*$/, "")
+        sub(/[[:space:]]*$/, "")
       }
       print
       exit 0
@@ -319,6 +335,84 @@ cmd_set_status() {
   printf 'set %s status=%s\n' "${abs#"$PROJECT_ROOT/"}" "$new_status"
 }
 
+# Line-oriented frontmatter next-step updater (v0.8.0). Mirrors cmd_set_status
+# but is stricter: the value must be one line (a newline could inject
+# frontmatter keys; a tab is never wanted), it is ALWAYS written as a
+# double-quoted scalar with `\` and `"` escaped (so `#` and `:` survive the
+# reader), and a file with no frontmatter is refused rather than given an
+# invented block. The value travels through ENVIRON, not `awk -v`, because -v
+# processes escape sequences and would corrupt a backslash in the text.
+cmd_set_next_step() {
+  local input="$1" text="$2"
+
+  case "$text" in
+    *$'\n'*|*$'\t'*)
+      printf 'ERROR: next-step must be a single line (no newline/tab)\n' >&2
+      return 2 ;;
+  esac
+  if [ -z "$text" ]; then
+    printf 'ERROR: next-step text is empty\n' >&2
+    return 2
+  fi
+
+  local result rc=0
+  if result=$(_resolve_kind "$input"); then
+    :
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    case "$rc" in
+      1) printf 'ERROR: file not found: %s\n' "$input" >&2 ;;
+      2) printf 'ERROR: file is not under $PLANS_DIR or $RESEARCH_DIR: %s\n' "$input" >&2 ;;
+      3) printf 'ERROR: scaffold file (README.md / .gitkeep) is not a plan/research entry: %s\n' "$input" >&2 ;;
+      4) printf 'ERROR: path may not contain ".." or "." segments: %s\n' "$input" >&2 ;;
+    esac
+    return "$rc"
+  fi
+  local abs="${result#* }"
+
+  if ! _has_fm "$abs"; then
+    printf 'ERROR: %s has no frontmatter block — add one before setting next-step\n' "${abs#"$PROJECT_ROOT/"}" >&2
+    return 3
+  fi
+
+  local enc="$text"
+  enc="${enc//\\/\\\\}"
+  enc="${enc//\"/\\\"}"
+  enc="\"$enc\""
+
+  local crlf="" tmp
+  if head -5 "$abs" 2>/dev/null | grep -q $'\r$'; then
+    crlf=$'\r'
+  fi
+  tmp=$(mktemp "${abs}.XXXXXX")
+
+  KOJI_NEXT_STEP="$enc" awk -v crlf="$crlf" '
+    BEGIN { in_fm = 0; done = 0; val = ENVIRON["KOJI_NEXT_STEP"] }
+    { sub(/\r$/, "") }
+    NR == 1 {
+      if ($0 == "---") { in_fm = 1 }
+      print $0 crlf; next
+    }
+    in_fm && /^---[[:space:]]*$/ {
+      if (!done) { print "next-step: " val crlf; done = 1 }
+      in_fm = 0
+      print $0 crlf
+      next
+    }
+    in_fm && /^next-step[[:space:]]*:/ && !done {
+      print "next-step: " val crlf
+      done = 1
+      next
+    }
+    { print $0 crlf }
+  ' "$abs" > "$tmp"
+
+  mv "$tmp" "$abs"
+  printf 'set %s next-step=%s\n' "${abs#"$PROJECT_ROOT/"}" "$text"
+}
+
 # --- filtered views ---
 #
 # cmd_filter and cmd_count exist because SKILL.md cannot reliably embed inline
@@ -384,6 +478,10 @@ case "${1:-}" in
     [ $# -ge 3 ] || { echo "ERROR: --set-status requires <path> <new-status>" >&2; exit 1; }
     cmd_set_status "$2" "$3"
     ;;
+  --set-next-step)
+    [ $# -ge 3 ] || { echo "ERROR: --set-next-step requires <path> <text>" >&2; exit 1; }
+    cmd_set_next_step "$2" "$3"
+    ;;
   --filter)
     [ $# -ge 2 ] || { echo "ERROR: --filter requires a name (active-plan|active-research|active|invalid)" >&2; exit 1; }
     cmd_filter "$2"
@@ -400,6 +498,7 @@ Usage:
   koji-plans-research --list
   koji-plans-research --get <path>
   koji-plans-research --set-status <path> <new-status>
+  koji-plans-research --set-next-step <path> "<one-line text>"
   koji-plans-research --filter <name>
   koji-plans-research --count <name>
 
@@ -407,6 +506,11 @@ Output (--list, --get, --filter) is tab-separated:
   <path>\t<kind>\t<status>\t<status_source>\t<origin>\t<target>\t<next_step>
 
 --count prints a single integer (number of records matching the filter).
+
+--set-next-step rewrites only the `next-step:` frontmatter line (inserted if
+absent). The text must be a single line; it is stored as a double-quoted YAML
+scalar so `#`, `:` and quotes round-trip through --get. Files without a
+frontmatter block are refused (exit 3) — this flag never invents one.
 
 Filter names:
   active-plan      plans with status ∈ {pending, in-progress}, excluding invalid

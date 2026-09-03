@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# koji-permission-mode — resolve Claude Code's effective `permissions.defaultMode`
+# from settings files the way Claude Code ≥ 2.1.257 does, and report which
+# project-scope bypass keys are inert.
+#
+#   source <(~/.claude/skills/koji/bin/koji-permission-mode)   # report (sourceable)
+#   ~/.claude/skills/koji/bin/koji-permission-mode --remove-inert
+#
+# Why this exists: /wrap Step 4 used to read `defaultMode` from the two PROJECT
+# files only. Since Claude Code 2.1.257, `bypassPermissions` and `auto` set in
+# `.claude/settings.json` or `.claude/settings.local.json` do NOT take effect —
+# only managed settings, `~/.claude/settings.json`, or the CLI flag can set them.
+# So the old check inspected exactly the two files that can no longer set bypass
+# and ignored the two that can. (Older koji-init wrote the now-inert key itself.)
+#
+# Resolution (approximate — see APPROXIMATE below):
+#   1. managed  = managed-settings.json, then managed-settings.d/*.json (alphabetical,
+#                 later wins per key)
+#   2. walk managed → local → project → user; the FIRST scope that sets defaultMode
+#      wins, except that on ≥ 2.1.257 a local/project value of bypassPermissions or
+#      auto is inert: it is recorded in INERT_*_MODE and the walk continues.
+#      (Assumption: Claude Code skips an inert value and applies the next scope;
+#      the docs only say the value "doesn't take effect".)
+#   3. `disableBypassPermissionsMode: "disable"` / `disableAutoMode: "disable"` in
+#      any scope force the corresponding mode back to `default`.
+#
+# Emits (sourceable, printf %q):
+#   EFFECTIVE_MODE      default | acceptEdits | plan | auto | bypassPermissions | dontAsk | unknown
+#   MODE_SOURCE         managed | local | project | user | project-legacy | disabled | default
+#   EFFECTIVE_BYPASS    true | false   (the only field /wrap Step 4 branches on)
+#   INERT_LOCAL_MODE    mode found in .claude/settings.local.json that is inert, or ""
+#   INERT_PROJECT_MODE  mode found in .claude/settings.json that is inert, or ""
+#   CLAUDE_VERSION      detected `claude --version`, or "unknown" (treated as current)
+#   SETTINGS_ROOT       directory whose .claude/ was inspected (main checkout for worktrees)
+#   APPROXIMATE=true    always: `--permission-mode` / `--dangerously-skip-permissions`
+#                       CLI flags and non-file managed policy are not visible here.
+#
+# --remove-inert: delete `permissions.defaultMode` from each project-scope file
+# where it is inert (atomic tmp+rename, other keys preserved). Idempotent.
+#
+# Env overrides (tests): KOJI_USER_SETTINGS, KOJI_MANAGED_DIR, KOJI_CLAUDE_VERSION,
+#                        KOJI_SETTINGS_ROOT
+set -euo pipefail
+
+_emit() { printf '%s=%q\n' "$1" "$2"; }
+
+# --- locate the .claude/ root: Claude Code writes settings.local.json at the MAIN
+#     checkout, resolved through worktrees; $PROJECT_ROOT (show-toplevel) would be
+#     the worktree. ---
+if [ -n "${KOJI_SETTINGS_ROOT:-}" ]; then
+  ROOT="$KOJI_SETTINGS_ROOT"
+elif TOP="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  # A submodule is its own repository: its checkout is the root (parent-of-
+  # `--git-common-dir` would land in <super>/.git/modules). A linked worktree
+  # resolves to the main checkout, where Claude Code writes settings.local.json.
+  if [ -n "$(cd "$TOP" && git rev-parse --show-superproject-working-tree 2>/dev/null)" ]; then
+    ROOT="$TOP"
+  else
+    COMMON="$(cd "$TOP" && git rev-parse --git-common-dir 2>/dev/null || echo .git)"
+    case "$COMMON" in /*) ;; *) COMMON="$TOP/$COMMON" ;; esac
+    ROOT="$(cd "$COMMON" 2>/dev/null && cd .. && pwd -P)" || ROOT="$TOP"
+  fi
+else
+  ROOT="$PWD"
+fi
+
+USER_SETTINGS="${KOJI_USER_SETTINGS:-$HOME/.claude/settings.json}"
+LOCAL_SETTINGS="$ROOT/.claude/settings.local.json"
+PROJECT_SETTINGS="$ROOT/.claude/settings.json"
+
+if [ -n "${KOJI_MANAGED_DIR:-}" ]; then
+  MANAGED_DIR="$KOJI_MANAGED_DIR"
+else
+  case "$(uname -s 2>/dev/null)" in
+    Darwin) MANAGED_DIR="/Library/Application Support/ClaudeCode" ;;
+    MINGW*|MSYS*|CYGWIN*) MANAGED_DIR="C:/Program Files/ClaudeCode" ;;
+    *)      MANAGED_DIR="/etc/claude-code" ;;
+  esac
+fi
+
+# --- Claude Code version (project-scope bypass was effective before 2.1.257) ---
+if [ -n "${KOJI_CLAUDE_VERSION:-}" ]; then
+  VERSION="$KOJI_CLAUDE_VERSION"
+else
+  VERSION="$(claude --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  [ -n "$VERSION" ] || VERSION=unknown
+fi
+
+MODE="${1:-}"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  # Fail-safe: without a JSON parser we cannot prove bypass is in force, so /wrap
+  # runs its promotion filter (the judgment filter still guards against noise).
+  _emit EFFECTIVE_MODE unknown
+  _emit MODE_SOURCE default
+  _emit EFFECTIVE_BYPASS false
+  _emit INERT_LOCAL_MODE ""
+  _emit INERT_PROJECT_MODE ""
+  _emit CLAUDE_VERSION "$VERSION"
+  _emit SETTINGS_ROOT "$ROOT"
+  _emit APPROXIMATE true
+  echo "koji-permission-mode: python3 not found — effective mode unknown" >&2
+  exit 0
+fi
+
+RESULT="$(python3 - "$VERSION" "$MANAGED_DIR" "$USER_SETTINGS" "$LOCAL_SETTINGS" "$PROJECT_SETTINGS" "$MODE" <<'PY'
+import glob, json, os, sys, tempfile
+
+version, managed_dir, user_f, local_f, project_f, mode = sys.argv[1:7]
+INERT_CANDIDATES = ("bypassPermissions", "auto")
+
+def load(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+def perm(data, key):
+    if not isinstance(data, dict):
+        return None
+    p = data.get("permissions")
+    return p.get(key) if isinstance(p, dict) else None
+
+def is_current(v):
+    if v == "unknown":
+        return True
+    try:
+        parts = tuple(int(x) for x in v.split(".")[:3])
+        while len(parts) < 3:
+            parts += (0,)
+        return parts >= (2, 1, 257)
+    except Exception:
+        return True
+
+current = is_current(version)
+
+# 1. managed: base then drop-ins alphabetical; later wins per key
+managed_files = []
+base = os.path.join(managed_dir, "managed-settings.json")
+if os.path.isfile(base):
+    managed_files.append(base)
+managed_files += sorted(glob.glob(os.path.join(managed_dir, "managed-settings.d", "*.json")))
+m_mode = None
+m_dis = {"disableBypassPermissionsMode": False, "disableAutoMode": False}
+for f in managed_files:
+    d = load(f)
+    if d is None:
+        continue
+    v = perm(d, "defaultMode")
+    if v is not None:
+        m_mode = v
+    for k in m_dis:
+        if perm(d, k) == "disable":
+            m_dis[k] = True
+
+local_d, project_d, user_d = load(local_f), load(project_f), load(user_f)
+scopes = [
+    ("managed", m_mode),
+    ("local", perm(local_d, "defaultMode")),
+    ("project", perm(project_d, "defaultMode")),
+    ("user", perm(user_d, "defaultMode")),
+]
+
+# Inert keys are recorded for BOTH project-scope files up front, independent of
+# where the precedence walk stops — a local `default` that wins must not hide a
+# stale project `bypassPermissions` from the report or from --remove-inert.
+inert = {"local": "", "project": ""}
+if current:
+    for name, v in scopes[1:3]:
+        if isinstance(v, str) and v in INERT_CANDIDATES:
+            inert[name] = v
+
+effective, source = None, "default"
+for name, v in scopes:
+    if not isinstance(v, str) or not v:
+        continue
+    if name in ("local", "project") and v in INERT_CANDIDATES:
+        if current:
+            continue
+        effective, source = v, "project-legacy"
+        break
+    effective, source = v, name
+    break
+if effective is None:
+    effective = "default"
+
+# 3. disable keys, any scope
+def disabled(key):
+    if m_dis[key]:
+        return True
+    return any(perm(d, key) == "disable" for d in (local_d, project_d, user_d))
+
+if effective == "bypassPermissions" and disabled("disableBypassPermissionsMode"):
+    effective, source = "default", "disabled"
+if effective == "auto" and disabled("disableAutoMode"):
+    effective, source = "default", "disabled"
+
+if mode == "--remove-inert":
+    removed = []
+    for name, path, d in (("local", local_f, local_d), ("project", project_f, project_d)):
+        if not inert[name] or d is None:
+            continue
+        d["permissions"].pop("defaultMode", None)
+        dir_ = os.path.dirname(path) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=dir_)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(d, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+        removed.append("%s (defaultMode=%s)" % (path, inert[name]))
+    for r in removed:
+        print("removed inert " + r)
+    if not removed:
+        print("nothing to remove")
+    sys.exit(0)
+
+# Unit separator, not TAB: `read` treats TAB as IFS whitespace and collapses an
+# empty field, which would shift a project value into the local slot.
+print("\x1f".join([
+    effective, source,
+    "true" if effective == "bypassPermissions" else "false",
+    inert["local"], inert["project"],
+]))
+PY
+)"
+
+if [ "$MODE" = "--remove-inert" ]; then
+  printf '%s\n' "$RESULT"
+  exit 0
+fi
+
+IFS=$'\x1f' read -r EFF SRC BYP INERT_L INERT_P <<< "$RESULT"
+_emit EFFECTIVE_MODE "$EFF"
+_emit MODE_SOURCE "$SRC"
+_emit EFFECTIVE_BYPASS "$BYP"
+_emit INERT_LOCAL_MODE "${INERT_L:-}"
+_emit INERT_PROJECT_MODE "${INERT_P:-}"
+_emit CLAUDE_VERSION "$VERSION"
+_emit SETTINGS_ROOT "$ROOT"
+_emit APPROXIMATE true
