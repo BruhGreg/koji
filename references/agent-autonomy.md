@@ -13,7 +13,7 @@ Shared across all `/duet-*` skills. The duet skills execute autonomously. Humans
 
 - **Deadlocked planning consensus** — after N rounds of debate, agents still disagree on a contested decision. Surface the disagreement summary, present both paths, ask which to take.
 - **Implementation blind spot** — BOTH agents stuck on the same uncertainty after trying to resolve together. Examples: ambiguous intent in the spec, external API behavior neither can verify, judgment call about scope.
-- **Policy decisions** — what to remember/apply/skip. These are user choices, not technical answers. Example: `/duet-review`'s 4-choice auto-apply prompt (Apply / Hold / Apply + remember for repo / Apply + remember for session).
+- **Policy decisions** — what to remember/apply/skip. These are user choices, not technical answers. Examples: `/duet-review`'s 4-choice auto-apply prompt (Apply / Hold / Apply + remember for repo / Apply + remember for session); the duet setup question every duet run opens with (reviewer strategy, effort, Claude reviewer model — a budget choice, remembered, so the next run is one keystroke; see `reviewer-backend.md`).
 - **Cost safety checks** — prompts that guard against runaway resource use (e.g., reviewing a 5000-line diff). Allowed even when no technical question exists. Keep these narrow and rare.
 
 ## How each duet skill implements this
@@ -24,7 +24,7 @@ Multi-round Claude ↔ codex dialogue with consensus detection. Default round li
 
 ### /duet-impl (Phase 2, future)
 
-At each gate (foundation / mid / final), codex reviews. The implementer first tries fix-and-proceed. If unsure, consults codex with a clarifying question. Escalates to user only when both are stuck on the same blind spot.
+At each gate (foundation / mid / final), the reviewer(s) the duet setup chose review — codex, a fresh-context Claude, both, or Claude with a codex confirmation. The implementer first tries fix-and-proceed. If unsure, consults the gate reviewer with a clarifying question. Intermediate gates never block: an unresolved finding is recorded as a deferral and the walk proceeds. Escalates to user only when both are stuck on the same blind spot.
 
 ### /duet-review (Phase 1, shipped v0.6.0)
 

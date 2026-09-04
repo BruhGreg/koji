@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# koji-duet-setup — the duet setup tuple: validate, merge, summarize.
+#
+# The tuple is one string of four `|`-joined fields:
+#
+#   STRATEGY|CODEX_EFFORT|CLAUDE_EFFORT|CLAUDE_MODEL      e.g. both|max|max|inherit
+#
+#   STRATEGY       both | claude-then-codex | codex | claude
+#   CODEX_EFFORT   max | xhigh | high
+#   CLAUDE_EFFORT  max | xhigh | high | inherit
+#   CLAUDE_MODEL   inherit | fable | opus | sonnet
+#
+# Usage:
+#   koji-duet-setup validate <tuple>        normalized tuple on stdout; exit 1 + reason on stderr when invalid
+#   koji-duet-setup defaults                codex|xhigh|xhigh|inherit
+#   koji-duet-setup merge <base> <overlay>  field-wise: overlay field when non-empty, else base; validated
+#   koji-duet-setup summary <tuple>         one human line, e.g. "both families · codex max · claude max/inherit"
+#   koji-duet-setup field <tuple> <1-4>     one field
+#
+# This is the only place tuple syntax is known. Every consumer (saved pick,
+# embedded phrase, user phrase, dialog answer) runs `validate` before writing
+# the tuple anywhere. Exit 2 on usage error.
+set -euo pipefail
+
+STRATEGIES="both claude-then-codex codex claude"
+CODEX_EFFORTS="max xhigh high"
+CLAUDE_EFFORTS="max xhigh high inherit"
+CLAUDE_MODELS="inherit fable opus sonnet"
+DEFAULTS="codex|xhigh|xhigh|inherit"
+
+_usage() {
+  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2
+  exit 2
+}
+
+_in() {  # _in <value> <list...>
+  local v="$1" x; shift
+  for x in "$@"; do [ "$v" = "$x" ] && return 0; done
+  return 1
+}
+
+# _split <tuple> — sets F1..F4; fails when the separator count is not 3.
+_split() {
+  local t seps
+  t="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  seps="$(printf '%s' "$t" | tr -cd '|' | wc -c | tr -d ' ')"
+  if [ "$seps" != "3" ]; then
+    echo "koji-duet-setup: invalid tuple '$1' — expected 4 fields STRATEGY|CODEX_EFFORT|CLAUDE_EFFORT|CLAUDE_MODEL" >&2
+    return 1
+  fi
+  IFS='|' read -r F1 F2 F3 F4 <<< "$t"
+}
+
+_validate() {
+  _split "$1" || return 1
+  # shellcheck disable=SC2086
+  _in "$F1" $STRATEGIES    || { echo "koji-duet-setup: unknown strategy '$F1' (want: $STRATEGIES)" >&2; return 1; }
+  # shellcheck disable=SC2086
+  _in "$F2" $CODEX_EFFORTS || { echo "koji-duet-setup: unknown codex effort '$F2' (want: $CODEX_EFFORTS)" >&2; return 1; }
+  # shellcheck disable=SC2086
+  _in "$F3" $CLAUDE_EFFORTS || { echo "koji-duet-setup: unknown claude effort '$F3' (want: $CLAUDE_EFFORTS)" >&2; return 1; }
+  # shellcheck disable=SC2086
+  _in "$F4" $CLAUDE_MODELS || { echo "koji-duet-setup: unknown claude model '$F4' (want: $CLAUDE_MODELS)" >&2; return 1; }
+  printf '%s|%s|%s|%s\n' "$F1" "$F2" "$F3" "$F4"
+}
+
+_label() {
+  case "$1" in
+    both)              printf 'both families' ;;
+    claude-then-codex) printf 'Claude reviews, codex confirms' ;;
+    codex)             printf 'codex only' ;;
+    claude)            printf 'Claude only' ;;
+  esac
+}
+
+case "${1:-}" in
+  validate)
+    [ $# -eq 2 ] || _usage
+    _validate "$2"
+    ;;
+  defaults)
+    printf '%s\n' "$DEFAULTS"
+    ;;
+  merge)
+    [ $# -eq 3 ] || _usage
+    BASE="$(_validate "$2")" || exit 1
+    _split "$BASE"; B1="$F1"; B2="$F2"; B3="$F3"; B4="$F4"
+    _split "$3" || exit 1
+    _validate "${F1:-$B1}|${F2:-$B2}|${F3:-$B3}|${F4:-$B4}"
+    ;;
+  summary)
+    [ $# -eq 2 ] || _usage
+    T="$(_validate "$2")" || exit 1
+    _split "$T"
+    printf '%s · codex %s · claude %s/%s\n' "$(_label "$F1")" "$F2" "$F3" "$F4"
+    ;;
+  field)
+    [ $# -eq 3 ] || _usage
+    T="$(_validate "$2")" || exit 1
+    _split "$T"
+    case "$3" in
+      1) printf '%s\n' "$F1" ;;
+      2) printf '%s\n' "$F2" ;;
+      3) printf '%s\n' "$F3" ;;
+      4) printf '%s\n' "$F4" ;;
+      *) echo "koji-duet-setup: field index must be 1-4" >&2; exit 2 ;;
+    esac
+    ;;
+  *)
+    _usage
+    ;;
+esac

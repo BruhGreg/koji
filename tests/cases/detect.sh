@@ -1,4 +1,4 @@
-# koji-detect: config cascade, enum resolver, comment stripping, sourceability.
+# koji-detect: config cascade, comment stripping, sourceability, retired keys.
 # Each test writes a scratch project with its own .koji.yaml; KOJI_STATE_DIR is
 # pointed at $TMP so the real global config can't leak in.
 
@@ -13,6 +13,10 @@ _var() {      # _var "<yaml>" VAR → value of VAR after sourcing the output
   ( eval "$out"; eval "printf '%s' \"\${$2:-}\"" )
 }
 
+# A v0.8.0-era block: the `prompts`, `commit_prompt` and `duet:` keys were
+# retired in v0.9.0 (wrap never prompts; the duet skills ask at run start).
+# They must be ignored silently — no variable, no warning — so an old
+# .koji.yaml keeps working.
 README_BLOCK='docs_dir: .koji              # where session docs live
 template: default            # "default" (full) or "simple" (minimal)
 archive:
@@ -22,21 +26,17 @@ archive:
   keep: 2
 wrap:
   starter_prompt: false      # existing key
-  prompts: off               # on|off
-  commit_prompt: on          # explicit on overrides prompts: off
+  prompts: off               # retired key
+  commit_prompt: on          # retired key
   commit_gate: "npm run lint:check"   # quoted, with a colon inside
 duet:
-  reviewer: claude-rounds+codex-final   # hybrid
+  reviewer: claude-rounds+codex-final   # retired block
   claude_reviewer_model: opus
   codex_effort: high'
 
 test_defaults_without_config() {
-  assert_eq on     "$(_var "" WRAP_PROMPTS)" WRAP_PROMPTS
-  assert_eq on     "$(_var "" WRAP_COMMIT_PROMPT)" WRAP_COMMIT_PROMPT
   assert_eq auto   "$(_var "" WRAP_COMMIT_GATE)" WRAP_COMMIT_GATE
-  assert_eq codex  "$(_var "" DUET_REVIEWER)" DUET_REVIEWER
-  assert_eq inherit "$(_var "" DUET_CLAUDE_MODEL)" DUET_CLAUDE_MODEL
-  assert_eq xhigh  "$(_var "" DUET_CODEX_EFFORT)" DUET_CODEX_EFFORT
+  assert_eq true   "$(_var "" WRAP_STARTER)" WRAP_STARTER
   assert_eq docs   "$(_var "" DOCS_DIR)" DOCS_DIR
 }
 
@@ -47,38 +47,26 @@ test_readme_block_with_trailing_comments() {
   assert_eq 7       "$(_var "$README_BLOCK" ARCHIVE_THRESHOLD)"
   assert_eq 2       "$(_var "$README_BLOCK" ARCHIVE_KEEP)" "survives full-line comment in block"
   assert_eq false   "$(_var "$README_BLOCK" WRAP_STARTER)"
-  assert_eq off     "$(_var "$README_BLOCK" WRAP_PROMPTS)"
-  assert_eq on      "$(_var "$README_BLOCK" WRAP_COMMIT_PROMPT)" "explicit on beats prompts: off"
   assert_eq "npm run lint:check" "$(_var "$README_BLOCK" WRAP_COMMIT_GATE)" "quoted value keeps colon, drops comment"
-  assert_eq claude-rounds+codex-final "$(_var "$README_BLOCK" DUET_REVIEWER)"
-  assert_eq opus    "$(_var "$README_BLOCK" DUET_CLAUDE_MODEL)"
-  assert_eq high    "$(_var "$README_BLOCK" DUET_CODEX_EFFORT)"
   assert_eq ""      "$(cat "$TMP/detect.err")" "no warnings for a valid block"
 }
 
-test_boolean_aliases_for_toggles() {
-  assert_eq off "$(_var $'wrap:\n  prompts: false' WRAP_PROMPTS)" "false → off"
-  assert_eq off "$(_var $'wrap:\n  prompts: false' WRAP_COMMIT_PROMPT)" "commit_prompt follows prompts"
-  assert_eq on  "$(_var $'wrap:\n  prompts: yes' WRAP_PROMPTS)" "yes → on"
-  assert_eq off "$(_var $'wrap:\n  prompts: 0' WRAP_PROMPTS)" "0 → off"
-  assert_eq on  "$(_var $'wrap:\n  prompts: off\n  commit_prompt: true' WRAP_COMMIT_PROMPT)" "true → on"
+test_retired_keys_are_ignored_silently() {
+  local out
+  out="$(_detect "$README_BLOCK")"
+  for v in WRAP_PROMPTS WRAP_COMMIT_PROMPT DUET_REVIEWER DUET_CLAUDE_MODEL DUET_CODEX_EFFORT; do
+    assert_not_contains "$v=" "$out" "$v is not emitted"
+  done
+  assert_eq "" "$(cat "$TMP/detect.err")" "retired keys produce no warning"
+  assert_not_contains "WARN" "$out" "no warning on stdout either"
 }
 
-test_invalid_enum_warns_on_stderr_and_falls_back() {
-  assert_eq codex "$(_var $'duet:\n  reviewer: gpt5' DUET_REVIEWER)" "typo → default"
-  assert_contains "duet.reviewer" "$(cat "$TMP/detect.err")" "WARN names the key"
-  assert_eq on "$(_var $'wrap:\n  prompts: typo' WRAP_PROMPTS)" "prompts typo fails safe to on"
-  assert_eq xhigh "$(_var $'duet:\n  codex_effort: medium' DUET_CODEX_EFFORT)"
-  assert_eq inherit "$(_var $'duet:\n  claude_reviewer_model: haiku' DUET_CLAUDE_MODEL)"
-}
-
-test_output_is_sourceable_even_with_warning() {
+test_output_is_sourceable() {
   local out rc=0
-  out="$(_detect $'duet:\n  reviewer: nope\nwrap:\n  commit_gate: echo "hi there"  # spaces + quotes')"
+  out="$(_detect $'wrap:\n  commit_gate: echo "hi there"  # spaces + quotes')"
   ( set -e; eval "$out" ) || rc=$?
   assert_exit 0 "$rc" "eval under set -e"
   assert_eq 'echo "hi there"' "$( eval "$out"; printf '%s' "$WRAP_COMMIT_GATE" )" "%q round-trip"
-  assert_not_contains "WARN" "$out" "warning never lands on stdout"
 }
 
 test_single_quoted_and_url_values() {
@@ -92,9 +80,7 @@ test_escaped_quotes_inside_quoted_value_survive() {
   assert_eq 'unterminated' "$(_var $'wrap:\n  commit_gate: "unterminated' WRAP_COMMIT_GATE)" "missing closing quote degrades to naive cut"
 }
 
-test_mixed_case_enum_values_are_accepted() {
-  assert_eq claude "$(_var $'duet:\n  reviewer: Claude' DUET_REVIEWER)"
-  assert_eq on     "$(_var $'wrap:\n  prompts: On' WRAP_PROMPTS)"
-  assert_eq off    "$(_var $'wrap:\n  prompts: FALSE' WRAP_PROMPTS)"
-  assert_eq ""     "$(cat "$TMP/detect.err")" "no warning for case variants"
+test_commit_gate_none_and_command() {
+  assert_eq none "$(_var $'wrap:\n  commit_gate: none' WRAP_COMMIT_GATE)"
+  assert_eq "make lint" "$(_var $'wrap:\n  commit_gate: make lint' WRAP_COMMIT_GATE)"
 }

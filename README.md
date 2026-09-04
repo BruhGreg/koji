@@ -19,7 +19,7 @@ cd ~/.claude/skills/koji && ./setup
 > /koji-init       # creates .koji/ + TODO.md, asks 2 setup questions
 > /kick-off        # start a session (blank context first time)
 ... work, take notes ...
-> /wrap            # writes session log + lessons + handoff, proposes commit
+> /wrap            # writes session log + lessons + handoff, commits
 ```
 
 Next day:
@@ -50,7 +50,7 @@ TODO.md                      # task tracking
 | `/koji-init` | Bootstrap: create docs scaffolding and `.koji.yaml` in any project |
 | `/kick-off` | Start session: load handoff, lessons, last session. `/kick-off <focus>` for a custom direction |
 | `/take-note` | Mid-session: save progress. `/take-note <note>` to skip the inference |
-| `/wrap` | End session: update lessons + handoff + session log, archive, propose commit |
+| `/wrap` | End session: update lessons + handoff + session log, archive, commit |
 | `/inspect-doc-drift` | Audit docs tagged with `covers:` frontmatter for drift vs the code they describe |
 
 **Duet workflow** — cross-model agent collaboration. The `duet` keyword is required to invoke; casual "let's plan" or "review this" will not trigger these.
@@ -58,7 +58,7 @@ TODO.md                      # task tracking
 | Skill | What it does |
 |-------|-------------|
 | `/duet-plan` | Multi-round Claude↔codex planning dialogue. Locks plan to `$DOCS_PATH/plans/<slug>.md` on consensus |
-| `/duet-impl` | Walks a locked plan gate-by-gate, tracking progress as a task list. Implements each phase, codex single-reviews at `<!-- gate: NAME -->`, runs `/duet-review` at the end |
+| `/duet-impl` | Walks a locked plan gate-by-gate, tracking progress as a task list. Implements each phase, gate-reviews at `<!-- gate: NAME -->` with the reviewer(s) your duet setup picked, runs `/duet-review` at the end |
 | `/duet-review` | 2-reviewer adversarial code review. Claude + codex run in parallel as **background tasks** — keep working while they run — cross-review on disagreement, prompt to apply high-confidence fixes. Scopes `base..HEAD`, staged, or the uncommitted **working tree** |
 
 All duet skills follow the [agent-autonomy principle](references/agent-autonomy.md): agents resolve technical questions together; users see prompts only for deadlocks and policy choices.
@@ -92,16 +92,10 @@ agents:                      # tags for session entries
   - Claude
 wrap:
   starter_prompt: true       # print a starter prompt for the next session
-  prompts: on                # off = /wrap runs with zero prompts (its documented auto policy)
-  commit_prompt: on          # defaults to `prompts`; keep just the commit prompt on
   commit_gate: auto          # auto = `npm run lint:check` if present | none | "<command>"
-duet:
-  reviewer: codex            # codex | claude | claude-rounds+codex-final
-  claude_reviewer_model: inherit   # inherit | fable | opus | sonnet
-  codex_effort: xhigh        # xhigh | high (natural-language signals still override)
 ```
 
-Global preferences (`commit_strategy` — `together` | `split` | `amend-if-same-session` — and `auto_update`) live in `~/.config/koji/config.yaml`.
+Global preferences (`commit_strategy` — `together` | `split` | `amend-if-same-session` —, `duet_setup` — the last duet setup you picked — and `auto_update`) live in `~/.config/koji/config.yaml`.
 
 ## Notable features
 
@@ -111,11 +105,11 @@ Global preferences (`commit_strategy` — `together` | `split` | `amend-if-same-
 
 **Doc drift detection.** Tag any doc with `covers:` frontmatter listing the code paths it describes. `/kick-off` warns when covered paths have drifted past a commit threshold since the doc was last edited. `/inspect-doc-drift` audits the whole repo. Deterministic — no LLM needed.
 
-**Wrap autonomy.** `wrap.prompts: off` runs `/wrap` end-to-end with zero prompts, using the same auto policy it already applies when no prompt is available (adds apply, deterministic removes apply, judgment removes only once established). `wrap.commit_gate` runs your commit gate before `/wrap` commits — `auto` picks `npm run lint:check` when `package.json` has one; a failing gate never commits silently, and a missing gate is skipped, never fatal. `commit_strategy: amend-if-same-session` folds a docs-only wrap into your own unpushed same-session commit (`git commit --amend --trailer`, subject preserved) instead of trailing it with a `docs(koji)` commit.
+**Wrap without prompts.** `/wrap` runs end-to-end with no prompts: adds apply, deterministic removes apply, judgment removes only once established, and the commit goes in with its message printed, never waited on. The one question it ever asks is how to commit (one commit, or code then docs), once per machine; the answer is saved. `wrap.commit_gate` runs your commit gate before `/wrap` commits — `auto` picks `npm run lint:check` when `package.json` has one; a failing gate never commits silently, and a missing gate is skipped, never fatal. `commit_strategy: amend-if-same-session` folds a docs-only wrap into your own unpushed same-session commit (`git commit --amend --trailer`, subject preserved) instead of trailing it with a `docs(koji)` commit.
 
-**Duet workflow.** Cross-model agent collaboration that doesn't block the user. `/duet-plan` runs a multi-round Claude↔codex dialogue till consensus, locks the plan. `/duet-impl` walks the plan gate-by-gate with codex review at each, then audits the cumulative diff against every explicit promise the locked plan made — contract verification distinct from the quality reviews. `/duet-review` does a 2-reviewer adversarial pass with severity-aware cross-review on any reviewer-exclusive medium/high disagreement; a hard gate, a `-PRELIMINARY` verdict suffix, and a caller-side re-check under `/duet-impl` make sure the cross-review pass can't be silently skipped. All three run reviewers as background tasks — you can keep working while they progress. Codex defaults to `xhigh` effort; opt down with a natural-language signal in the invocation phrase. `/duet-review`'s Claude side scales with effort too: at `/effort max` — or an explicit "full review" / "fan out" / "deep review" — it fans out into five angle reviewers (correctness, removed-behavior, cross-file, reuse, altitude) that the main agent consolidates into one finding set, while lighter effort runs a single holistic pass and "quick" / "save tokens" forces the single pass even at max.
+**Duet workflow.** Cross-model agent collaboration that doesn't block the user. `/duet-plan` runs a multi-round Claude↔codex dialogue till consensus, locks the plan. `/duet-impl` walks the plan gate-by-gate with a gate review at each (who reviews is your duet setup, below), then audits the cumulative diff against every explicit promise the locked plan made — contract verification distinct from the quality reviews. `/duet-review` does a 2-reviewer adversarial pass with severity-aware cross-review on any reviewer-exclusive medium/high disagreement; a hard gate, a `-PRELIMINARY` verdict suffix, and a caller-side re-check under `/duet-impl` make sure the cross-review pass can't be silently skipped. All three run reviewers as background tasks — you can keep working while they progress; `/duet-impl`'s intermediate gates never block. `/duet-review`'s Claude side scales with the effort you pick: at `max` — or an explicit "full review" / "fan out" / "deep review" — it fans out into five angle reviewers (correctness, removed-behavior, cross-file, reuse, altitude) that the main agent consolidates into one finding set, while `xhigh` and `high` run a single holistic pass and "quick" / "save tokens" forces the single pass even at max.
 
-**Reviewer backend.** `duet.reviewer` picks the adversarial voice for the duet skills: `codex` (default), `claude`, or `claude-rounds+codex-final`. `claude` runs a fresh-context Claude subagent — never a fork of the authoring session — as the reviewer. It is a quota escape hatch, and the signal is weaker: both sides are the same model family, so consensus means two independent contexts agreed, not two vendors. The hybrid has Claude review every round and spends one codex call per lock attempt to gate the lock — exactly one in the clean case. Quota rule: when codex hits its limit (or fails to start) on a review that isn't the final one, koji substitutes a fresh-context Claude reviewer for that review and tries codex again on the next; only the final review waits for codex.
+**Duet setup.** Each duet run starts with one question: how to spend budget. Pick a reviewer strategy — `both` (Claude and codex both review every round and gate; at gates and in the final review they cross-review what they disagree on), `claude-then-codex` (a fresh-context Claude reviews every round and gate, and one codex call confirms each lock or pass), `codex` (codex reviews everything), or `claude` (no codex at all — same model family, weaker signal, the quota escape hatch) — plus an effort tier for both families (`max` / `xhigh` / `high`) and a Claude reviewer model. The pick is remembered, so the next run is one keystroke: reuse or change. Say it in the invocation phrase ("duet impl the oauth plan with both reviewers at max") and there is no question at all. Claude reviewers run at the effort you chose through the `koji-reviewer-*` agents that `setup` installs — always a fresh context, never a fork of the authoring session; codex runs at that `model_reasoning_effort`. Quota rule: when codex hits its limit (or fails to start) on a review that isn't the final one, koji substitutes a fresh-context Claude reviewer for that review and tries codex again on the next; only the final review waits for codex.
 
 **Codebase fit.** The duet skills hold new code to *this project's* conventions — file structure, naming, idioms, layering — not just correctness. `/duet-plan` records a Codebase Fit Contract in every plan; `/duet-impl` gate reviews and `/duet-review` carry a `codebase-fit` lens. The shared reference is `CODEBASE_CONVENTIONS.md` in your koji docs dir: a hub that *points* (never copies) to the project's own convention docs — `CONTRIBUTING.md`, `AGENTS.md`, `.cursorrules`, a `STYLE.md` — via a `sources:` list, and accumulates a canonical-exemplar index plus a rejected-patterns log from what review actually catches. `/koji-init` scaffolds it for new projects; `/kick-off` backfills it into existing ones.
 

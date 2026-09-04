@@ -129,41 +129,10 @@ _emit LESSONS_FILE "lessons.md"
 
 _emit WRAP_STARTER "$(_resolve "wrap.starter_prompt" "true")"
 
-# _resolve_enum <key> <default> <valid>... — like _resolve, but the value must be
-# one of <valid>. Anything else warns on STDERR and falls back to <default>:
-# stdout is `source`d by every skill, so a warning there would execute as shell.
-# Fail-safe matters here — a typo in `wrap.prompts` must keep prompts ON, and a
-# typo in `duet.reviewer` must keep codex. Boolean spellings normalize for the
-# on/off toggles (true/yes/1 → on, false/no/0 → off) because `starter_prompt:
-# true` sits in the same block and users will write `prompts: false`.
-_resolve_enum() {
-  local key="$1" default="$2"; shift 2
-  local val v
-  # Every valid token is lowercase, so compare case-insensitively (`Claude`, `On`).
-  val="$(_resolve "$key" "$default" | tr '[:upper:]' '[:lower:]')"
-  case "$val" in
-    true|yes|1)  val=on ;;
-    false|no|0)  val=off ;;
-  esac
-  for v in "$@"; do
-    [ "$val" = "$v" ] && { printf '%s' "$val"; return; }
-  done
-  echo "koji-detect: WARN invalid $key='$val' — using '$default'" >&2
-  printf '%s' "$default"
-}
-
-# /wrap autonomy toggles (v0.8.0). `commit_prompt` follows `prompts` unless set
-# explicitly — the commit prompt is the riskier one, so it can stay on alone.
-WRAP_PROMPTS="$(_resolve_enum "wrap.prompts" "on" on off)"
-_emit WRAP_PROMPTS "$WRAP_PROMPTS"
-_emit WRAP_COMMIT_PROMPT "$(_resolve_enum "wrap.commit_prompt" "$WRAP_PROMPTS" on off)"
-# Free-form: `auto` (npm run lint:check when present), `none`, or a shell command.
+# /wrap commit gate. Free-form: `auto` (npm run lint:check when present), `none`,
+# or a shell command. /wrap itself never prompts; the duet skills ask for their
+# reviewer setup at run start (koji-duet-setup), so neither has yaml keys here.
 _emit WRAP_COMMIT_GATE "$(_resolve "wrap.commit_gate" "auto")"
-
-# Duet reviewer backend (v0.8.0). Default = today's behavior (codex).
-_emit DUET_REVIEWER "$(_resolve_enum "duet.reviewer" "codex" codex claude claude-rounds+codex-final)"
-_emit DUET_CLAUDE_MODEL "$(_resolve_enum "duet.claude_reviewer_model" "inherit" inherit fable opus sonnet)"
-_emit DUET_CODEX_EFFORT "$(_resolve_enum "duet.codex_effort" "xhigh" xhigh high)"
 
 # Commit strategy preference (persisted via koji-config)
 COMMIT_STRATEGY="$("$KOJI_SKILLS/bin/koji-config" get commit_strategy 2>/dev/null || true)"

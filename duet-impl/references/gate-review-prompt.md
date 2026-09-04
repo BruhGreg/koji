@@ -1,13 +1,14 @@
 # Gate Review Prompt (intermediate gates)
 
-Used by `/duet-impl` at each intermediate gate (agent identifies gates from plan structure per `/duet-impl` SKILL.md "Gating Strategy"). The implementer's diff for that gate is reviewed by the configured gate reviewer (single reviewer — codex by default, or a fresh-context Claude subagent per `.koji.yaml` `duet.reviewer`; see `../../references/reviewer-backend.md`). The FINAL phase (cumulative diff at end of run) uses `/duet-review` instead — two reviewers + cross-review pass.
+Used by `/duet-impl` at each intermediate gate (agent identifies gates from plan structure per `/duet-impl` SKILL.md "Review checkpoint strategy"). The implementer's diff for that gate is reviewed by the gate reviewer(s) the run's duet setup chose — codex, a fresh-context Claude subagent, both in parallel, or Claude with a codex confirmation; see `../../references/reviewer-backend.md`. Every leg fills this same template; the backend never changes the prompt. The FINAL phase (cumulative diff at end of run) uses `/duet-review` instead — two reviewers + cross-review pass.
 
 ## Reviewer prompt
 
 ```
-You are reviewing the implementation of one phase of a plan. You are the
-SINGLE reviewer for this intermediate checkpoint. The phase is named:
-"{gate_name}".
+You are reviewing the implementation of one phase of a plan at an
+intermediate checkpoint. Review independently: another reviewer may be
+reading the same diff in parallel, and you are not shown their findings.
+The phase is named: "{gate_name}".
 
 The diff below shows what the implementer did since the previous gate (or
 since the start of work, if this is the first gate).
@@ -22,6 +23,7 @@ Check:
 - **Correctness, security, data loss** in the changes themselves.
 - **Codebase fit** — does this diff match the conventions of the files it touches (naming, structure, idioms, layering), and `CODEBASE_CONVENTIONS.md` (in the koji docs dir, `.koji/` by default) — including the convention docs it lists under `sources:` — if the project has one? Read sibling files to learn the local idiom; fit is judged against *this* project, not generic best practice.
 - **Dead code** — does this segment leave behind any code path the new work makes unreachable? Look for: superseded helpers with no remaining callers in the diff scope, branches that became structurally dead after a refactor, `match`/`switch` arms a new path can never reach. Surface as `deadcode`; severity per the guide below; carve-outs apply.
+- **Docstrings and comments describe the code, not its history.** New or changed docstrings and comments must read to open-source product standard: what the thing does, what it needs, what it returns, any constraint a caller must know; usage examples are fine where the language's docstring convention supports them. Flag any that carry dates, version numbers, plan or gate names, reviewer references, "per X", "see plan Y", or a decision's rationale. A "why" that explains a non-obvious constraint in the code itself ("must run before X because Y holds the lock") is about the code and is fine. Surface as `style`, severity `medium`.
 
 ## Output — STRICT JSON ONLY
 
@@ -53,6 +55,8 @@ relative to the plan's intent for this phase). Use it when the work strays.
 - **low** — Skip unless directly relevant to this phase.
 
 **Codebase-fit severity.** A `codebase-fit` finding is `high` (blocks the gate) **only when the misfit becomes a dependency surface later work builds on** — a competing construct or helper that duplicates a canonical one, a crossed layer boundary, a divergent public shape that forces consumers to special-case it, or a diff that contradicts a pattern `CODEBASE_CONVENTIONS.md` records as rejected. Every other fit finding is `medium` — logged to the gate-report, non-blocking. Pure taste (formatting, name bikeshedding) is not a `codebase-fit` finding at all — drop it.
+
+**Docstring / comment history.** A docstring or comment that narrates history instead of describing the code (see "Check" above) is `style` at **medium**: it never blocks the gate, but `/duet-impl` applies it as a comment-only edit before moving on, since the fix is mechanical and changes no behaviour. Put the offending line in `description` and the rewritten text in `suggested_fix.details` (`type: mechanical`).
 
 **Dead-code carve-outs.** Gate reviews fire during substrate-shipping phases where "add the new path alongside the old one" is the intended pattern — the plan may explicitly preserve the old path until a later phase cleans it up. Before raising `deadcode`, check:
 

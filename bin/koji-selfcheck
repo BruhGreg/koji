@@ -88,11 +88,14 @@ case "$SKILL" in
       "caller-side structural backstop"
       "recorded deferral, not a blocking prompt"
       "a codex reply that is not a findings array is not a review"
+      "claude+codex-confirm"
+      "A slot file exists only when it holds a validated array"
     )
-    # 2c Claude leg + 3a promise auditor.
+    # Literal call phrase: 2c Claude leg, both-mode cross leg, consult leg, 3a
+    # promise auditor. Never-a-fork rule: the three reviewer legs (not the auditor).
     COUNTED=(
-      2 'Call the `Agent` tool'
-      1 'fresh Agent context, never a fork'
+      4 'Call the `Agent` tool'
+      3 'fresh Agent context, never a fork'
     )
     ;;
   duet-plan)

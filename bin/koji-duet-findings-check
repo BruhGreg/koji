@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""koji-duet-findings-check: exit 0 iff FILE holds a validated reviewer array.
+
+Usage:
+  koji-duet-findings-check <file>             reviewer findings (default schema)
+  koji-duet-findings-check --cross <file>     cross-review verdicts
+  koji-duet-findings-check --consult <file>   consult replies
+
+Schemas (an empty array passes in every mode):
+  findings  each entry is an object with severity in {high, medium, low},
+            non-empty string file, integer line, non-empty string category
+            and description; suggested_fix, when present, is an object
+  cross     each entry has a non-empty string fingerprint and verdict in
+            {AGREE-HIGH, AGREE-MEDIUM, AGREE-LOW, DISAGREE, NEEDS-MORE-CONTEXT}
+  consult   each entry has a non-empty string fingerprint and verdict in
+            {RECONFIRM, WITHDRAW}
+
+Exit 1 with one stderr line naming the first problem. Exit 2 on usage error.
+
+The duet skills run this on every array before it lands in a slot file, so a
+reply that parses as JSON but is not a review (a list of strings, objects
+without a severity, a verdict outside the label set) is treated as a
+malformed reply — retried once, then unavailable — rather than as "reviewed,
+found nothing". The synthesizer's own loader drops nonconforming entries
+silently; without this check a garbage array would read as a clean pass.
+file and line are required because the synthesizer keys consensus on
+file:line:category — a finding without them collapses onto every other such
+finding and manufactures agreement.
+"""
+import json
+import sys
+
+SEVERITIES = {"high", "medium", "low"}
+CROSS_VERDICTS = {"AGREE-HIGH", "AGREE-MEDIUM", "AGREE-LOW", "DISAGREE", "NEEDS-MORE-CONTEXT"}
+CONSULT_VERDICTS = {"RECONFIRM", "WITHDRAW"}
+
+
+def fail(msg: str) -> None:
+    print(f"koji-duet-findings-check: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def usage() -> None:
+    print("usage: koji-duet-findings-check [--cross|--consult] <file>", file=sys.stderr)
+    sys.exit(2)
+
+
+def nonempty_str(value) -> bool:
+    return isinstance(value, str) and value.strip() != ""
+
+
+def check_finding(path: str, i: int, entry: dict) -> None:
+    if entry.get("severity") not in SEVERITIES:
+        fail(f"{path}[{i}]: severity must be one of {sorted(SEVERITIES)}, got {entry.get('severity')!r}")
+    for key in ("file", "category", "description"):
+        if not nonempty_str(entry.get(key)):
+            fail(f"{path}[{i}]: {key} must be a non-empty string")
+    line = entry.get("line")
+    if isinstance(line, bool) or not isinstance(line, int):
+        fail(f"{path}[{i}]: line must be an integer, got {line!r}")
+    if "suggested_fix" in entry and not isinstance(entry["suggested_fix"], dict):
+        fail(f"{path}[{i}]: suggested_fix must be an object")
+
+
+def check_verdict(path: str, i: int, entry: dict, allowed: set) -> None:
+    if not nonempty_str(entry.get("fingerprint")):
+        fail(f"{path}[{i}]: fingerprint must be a non-empty string")
+    if entry.get("verdict") not in allowed:
+        fail(f"{path}[{i}]: verdict must be one of {sorted(allowed)}, got {entry.get('verdict')!r}")
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    mode = "findings"
+    for flag, name in (("--cross", "cross"), ("--consult", "consult")):
+        if flag in args:
+            if mode != "findings":
+                usage()
+            mode = name
+            args.remove(flag)
+    if len(args) != 1:
+        usage()
+    path = args[0]
+
+    try:
+        text = open(path).read()
+    except OSError as e:
+        fail(f"cannot read {path}: {e}")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        fail(f"{path}: not JSON ({e})")
+    if not isinstance(data, list):
+        fail(f"{path}: top-level is not a list")
+
+    for i, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            fail(f"{path}[{i}]: not an object")
+        if mode == "findings":
+            check_finding(path, i, entry)
+        elif mode == "cross":
+            check_verdict(path, i, entry, CROSS_VERDICTS)
+        else:
+            check_verdict(path, i, entry, CONSULT_VERDICTS)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

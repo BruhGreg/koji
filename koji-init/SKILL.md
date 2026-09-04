@@ -260,10 +260,7 @@ agents:
   - Claude
 wrap:
   starter_prompt: true
-  # prompts: on         # off = no AskUserQuestion during /wrap (documented auto policy applies)
   # commit_gate: auto   # auto = `npm run lint:check` when package.json has it | none | "<command>"
-# duet:
-#   reviewer: codex     # codex | claude | claude-rounds+codex-final
 ```
 
 Set `docs_dir` to the value determined by the workflow: `.koji` for fresh installs and relocations, `docs` if the user chose to keep files in `docs/`.

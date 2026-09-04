@@ -73,6 +73,27 @@ create_link "duet-review" "duet-review"
 create_link "triangulate" "triangulate"
 create_link "plan-triangulate-review" "plan-triangulate-review"
 
+# --- Link reviewer agents ---
+# The duet skills dispatch Claude reviewers as `koji-reviewer-<effort>` so the
+# reviewer runs at the effort the user picked (an agent's effort lives in its
+# definition file's frontmatter, not on the Agent call). ~/.claude/agents does
+# not exist on a fresh install.
+AGENTS_DIR="$(dirname "$SKILLS_DIR")/agents"
+mkdir -p "$AGENTS_DIR"
+echo "Agents:"
+for effort in high xhigh max; do
+  name="koji-reviewer-$effort"
+  link_path="$AGENTS_DIR/$name.md"
+  target_abs="$KOJI_DIR/agents/$name.md"
+  remove_existing "$link_path"
+  if is_windows; then
+    cp "$target_abs" "$link_path"     # file junctions don't exist; a copy is refreshed by re-running setup
+  else
+    ln -s "../skills/koji/agents/$name.md" "$link_path"
+  fi
+  echo "  $name -> koji/agents/$name.md"
+done
+
 # --- Verify ---
 echo ""
 echo "Installed skills:"
@@ -83,6 +104,21 @@ for skill in wrap take-note kick-off koji-init inspect-doc-drift duet-plan duet-
     echo "  /$skill  FAILED" >&2
   fi
 done
+
+echo ""
+echo "Installed agents:"
+AGENTS_FAILED=0
+for effort in high xhigh max; do
+  f="$AGENTS_DIR/koji-reviewer-$effort.md"
+  if [ -f "$f" ] && grep -q "^effort: $effort\$" "$f"; then
+    echo "  koji-reviewer-$effort  OK"
+  else
+    echo "  koji-reviewer-$effort  FAILED (missing, dangling, or wrong effort)" >&2
+    AGENTS_FAILED=1
+  fi
+done
+[ "$AGENTS_FAILED" = 0 ] || { echo "  AGENT INSTALL FAILED — the duet skills would fall back to inherited effort." >&2; exit 1; }
+echo "  (a running Claude Code session must restart to see new agent types)"
 
 echo ""
 echo "Self-check (load-bearing skill markers):"

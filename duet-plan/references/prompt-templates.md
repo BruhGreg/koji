@@ -1,6 +1,6 @@
 # /duet-plan — Round Prompt Templates
 
-Both agents — Claude as drafter, and the reviewer (codex by default, or a fresh-context Claude subagent per `.koji.yaml` `duet.reviewer`; see `../../references/reviewer-backend.md`) as critic — end every turn with a `VERDICT:` line. The skill parses these to detect consensus.
+Both agents — Claude as drafter, and the critic(s) the run's duet setup chose (codex, a fresh-context Claude subagent, or both in parallel; see `../../references/reviewer-backend.md`) — end every turn with a `VERDICT:` line. The skill parses these to detect consensus. Every critic leg fills the same reviewer template; the backend never changes the prompt.
 
 ## Verdict markers
 

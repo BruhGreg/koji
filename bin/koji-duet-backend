@@ -1,76 +1,66 @@
 #!/usr/bin/env bash
-# koji-duet-backend — resolve which model backs a duet role, from one table.
+# koji-duet-backend — resolve which model(s) back a duet role, from one table.
 #
-# Usage: koji-duet-backend <plan-round|impl-gate|review-b>
+# Usage: koji-duet-backend <plan-round|impl-gate|review-b> [setup-file]
 #
-# Prints exactly one token on stdout: `codex` or `claude`. Nothing else — the
-# caller is expected to use it inline (`backend=$(koji-duet-backend review-b)`).
-# Exit 0 on success, 2 on usage error (missing or unknown context).
+# Prints exactly one token on stdout: `codex`, `claude` or `both`. Nothing
+# else — the caller uses it inline (`leg=$(koji-duet-backend impl-gate "$RUN_DIR/duet-setup") || exit 1`).
+# Exit 0 on success, 2 on usage error (missing or unknown context), 3 when a
+# setup file was given but is missing or invalid.
 #
-# The decision reads $DUET_REVIEWER (self-sources koji-detect when unset, the
-# same idiom as koji-plans-research). Recognised values:
+# Strategy source, in order:
+#   1. <setup-file> when given — the run's `$RUN_DIR/duet-setup` tuple written
+#      by the skill's Step 1 (STRATEGY|CODEX_EFFORT|CLAUDE_EFFORT|CLAUDE_MODEL,
+#      see koji-duet-setup). The file is AUTHORITATIVE: a missing or invalid
+#      file means run state was lost, and defaulting to codex there would
+#      silently turn a `both` or `claude-then-codex` run into a weaker review.
+#      So: stderr + exit 3 + empty stdout. Callers stop.
+#   2. $DUET_STRATEGY when no file was given (tests, ad-hoc use).
+#   3. `codex` when neither is present.
 #
-#   codex                       codex reviews everything          (default)
-#   claude                      a second Claude reviews everything
-#   claude-rounds+codex-final   Claude for the cheap iterative roles,
-#                               codex for the final adversarial B-side
+# Strategies:
+#   both                both families every time
+#   claude-then-codex   Claude reviews; one codex call confirms a pass / lock
+#   codex               codex reviews everything          (default)
+#   claude              a second Claude reviews everything
 #
 # The mapping below is the single source of truth for three skills
 # (/duet-plan, /duet-impl, /duet-review). Do not re-derive it in SKILL.md — a
 # second copy is a second thing to drift.
 #
-#   context     | codex | claude | claude-rounds+codex-final | anything else
-#   ------------+-------+--------+---------------------------+--------------
-#   plan-round  | codex | claude | claude                    | codex
-#   impl-gate   | codex | claude | claude                    | codex
-#   review-b    | codex | claude | codex                     | codex
+#   context     | codex | claude | claude-then-codex | both  | (no file, no env)
+#   ------------+-------+--------+-------------------+-------+------------------
+#   plan-round  | codex | claude | claude            | both  | codex
+#   impl-gate   | codex | claude | claude            | both  | codex
+#   review-b    | codex | claude | codex             | codex | codex
 #
-# Matching is done with `case`, never a regex: the `+` in
-# `claude-rounds+codex-final` is a literal character in a case glob but a
-# repetition operator in ERE, so a regex port of this table silently
-# mis-matches.
+# review-b never returns `both`: /duet-review is natively two-family (Reviewer
+# A is always Claude), so every strategy but `claude` puts codex in slot B.
 set -euo pipefail
 
 CONTEXT="${1:-}"
-
-if [ -z "${DUET_REVIEWER:-}" ]; then
-  # koji-detect resolves duet.reviewer (and warns + falls back to codex on an
-  # invalid config value). The `:-codex` fallback below still stands on its own
-  # so this script answers even where koji-detect emits nothing for the key.
-  eval "$(~/.claude/skills/koji/bin/koji-detect)"
-fi
-
-REVIEWER="${DUET_REVIEWER:-codex}"
+SETUP_FILE="${2:-}"
+KOJI_BIN="$(cd "$(dirname "$0")" && pwd)"
 
 _usage() {
   cat >&2 <<'USAGE'
-koji-duet-backend — which model backs a duet role.
+koji-duet-backend — which model(s) back a duet role.
 
-Usage: koji-duet-backend <context>
+Usage: koji-duet-backend <context> [setup-file]
 
 Contexts:
   plan-round   a /duet-plan dialogue round
   impl-gate    a /duet-impl foundation or post-foundation gate
   review-b     the B-side reviewer of /duet-review
 
-Prints `codex` or `claude`. Reads $DUET_REVIEWER
-(codex | claude | claude-rounds+codex-final; default codex).
+Prints `codex`, `claude` or `both`. The strategy comes from <setup-file>
+(the run's duet-setup tuple; authoritative — missing/invalid → exit 3), else
+$DUET_STRATEGY, else codex.
 USAGE
 }
 
 case "$CONTEXT" in
-  plan-round|impl-gate)
-    case "$REVIEWER" in
-      claude|claude-rounds+codex-final) printf 'claude\n' ;;
-      *)                                printf 'codex\n' ;;
-    esac
-    ;;
-  review-b)
-    case "$REVIEWER" in
-      claude) printf 'claude\n' ;;
-      *)      printf 'codex\n' ;;
-    esac
-    ;;
+  plan-round|impl-gate|review-b) ;;
   "")
     printf 'ERROR: missing context argument\n' >&2
     _usage
@@ -80,5 +70,37 @@ case "$CONTEXT" in
     printf 'ERROR: unknown context: %s\n' "$CONTEXT" >&2
     _usage
     exit 2
+    ;;
+esac
+
+if [ -n "$SETUP_FILE" ]; then
+  if [ ! -r "$SETUP_FILE" ]; then
+    printf 'ERROR: duet setup file missing: %s — run state lost\n' "$SETUP_FILE" >&2
+    exit 3
+  fi
+  TUPLE="$("$KOJI_BIN/koji-duet-setup" validate "$(head -n1 "$SETUP_FILE")")" || {
+    printf 'ERROR: duet setup file invalid: %s — run state lost\n' "$SETUP_FILE" >&2
+    exit 3
+  }
+  STRATEGY="$("$KOJI_BIN/koji-duet-setup" field "$TUPLE" 1)"
+else
+  STRATEGY="${DUET_STRATEGY:-codex}"
+fi
+
+# Matching is done with `case`, never a regex, so a literal strategy token can
+# never be read as a pattern.
+case "$CONTEXT" in
+  plan-round|impl-gate)
+    case "$STRATEGY" in
+      both)                     printf 'both\n' ;;
+      claude|claude-then-codex) printf 'claude\n' ;;
+      *)                        printf 'codex\n' ;;
+    esac
+    ;;
+  review-b)
+    case "$STRATEGY" in
+      claude) printf 'claude\n' ;;
+      *)      printf 'codex\n' ;;
+    esac
     ;;
 esac

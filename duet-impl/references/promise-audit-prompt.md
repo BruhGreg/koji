@@ -104,7 +104,7 @@ If JSON parsing fails or the agent times out, write `[]` and continue. The audit
 
 | Pass | Job | Plan access | Output shape |
 |---|---|---|---|
-| Gate review (codex single, per gate) | Quality + phase completeness for the segment | Gate-text only | Severity-ranked findings |
+| Gate review (per gate; the reviewer(s) the duet setup chose) | Quality + phase completeness for the segment | Gate-text only | Severity-ranked findings |
 | Final `/duet-review` | Quality of cumulative diff | NONE — diff only | Severity-ranked findings (claude + codex cross-reviewed) |
 | **Promise audit** (this prompt) | **Contract verification — every explicit promise has evidence** | **Full locked plan** | **Per-promise binary: evidence or GAP** |
 

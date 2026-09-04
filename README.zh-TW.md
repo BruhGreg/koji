@@ -19,7 +19,7 @@ cd ~/.claude/skills/koji && ./setup
 > /koji-init       # 建立 .koji/ 與 TODO.md,詢問 2 個設定問題
 > /kick-off        # 開始工作階段(第一次為空白上下文)
 ... 進行工作、記下筆記 ...
-> /wrap            # 寫入工作階段日誌 + 教訓 + 交接,並提議提交
+> /wrap            # 寫入工作階段日誌 + 教訓 + 交接,並提交
 ```
 
 隔天:
@@ -50,7 +50,7 @@ TODO.md                      # 任務追蹤
 | `/koji-init` | 初始化:在任何專案中建立文件骨架和 `.koji.yaml` |
 | `/kick-off` | 開始工作階段:載入交接、教訓、上次紀錄。`/kick-off <焦點>` 指定方向 |
 | `/take-note` | 工作階段中途:儲存進度。`/take-note <註記>` 直接使用你的說明 |
-| `/wrap` | 結束工作階段:更新教訓 + 交接 + 日誌、歸檔、提議提交 |
+| `/wrap` | 結束工作階段:更新教訓 + 交接 + 日誌、歸檔、提交 |
 | `/inspect-doc-drift` | 掃描帶有 `covers:` frontmatter 的文件,檢查與所覆蓋程式碼的漂移狀況 |
 
 **Duet 工作流程** — 跨模型代理協作。必須使用 `duet` 關鍵字才會觸發;一般的「來規劃一下」或「審查這個」不會觸發這些技能。
@@ -58,7 +58,7 @@ TODO.md                      # 任務追蹤
 | 技能 | 功能 |
 |------|------|
 | `/duet-plan` | 多輪 Claude↔codex 規劃對話。達成共識後將計畫鎖定到 `$DOCS_PATH/plans/<slug>.md` |
-| `/duet-impl` | 依照鎖定的計畫逐關卡實作,並以任務清單追蹤進度。每個 `<!-- gate: NAME -->` 由 codex 單一審查,最後執行 `/duet-review` |
+| `/duet-impl` | 依照鎖定的計畫逐關卡實作,並以任務清單追蹤進度。每個 `<!-- gate: NAME -->` 由你的 duet 設定所選的審查者關卡審查,最後執行 `/duet-review` |
 | `/duet-review` | 雙審查者對抗式程式碼審查。Claude + codex 並行**背景執行**——你可以繼續做其他事——意見分歧時交叉審查,高信心修正提示你套用。範圍可為 `base..HEAD`、已暫存(staged)、或未提交的**工作目錄(working tree)** |
 
 所有 duet 技能皆遵循 [代理自主原則](references/agent-autonomy.md):代理之間共同解決技術問題;只有在無法協商或涉及政策選擇時才會詢問使用者。
@@ -92,16 +92,10 @@ agents:                      # 工作階段條目的標籤
   - Claude
 wrap:
   starter_prompt: true       # 為下個工作階段印出 starter prompt
-  prompts: on                # off = /wrap 全程零提示（依其既定的自動策略）
-  commit_prompt: on          # 預設跟隨 `prompts`；可單獨保留提交確認
   commit_gate: auto          # auto = 有的話跑 `npm run lint:check` | none | "<指令>"
-duet:
-  reviewer: codex            # codex | claude | claude-rounds+codex-final
-  claude_reviewer_model: inherit   # inherit | fable | opus | sonnet
-  codex_effort: xhigh        # xhigh | high（自然語言訊號仍可覆寫）
 ```
 
-全域偏好設定（`commit_strategy` — `together` | `split` | `amend-if-same-session` — 與 `auto_update`）放在 `~/.config/koji/config.yaml`。
+全域偏好設定（`commit_strategy` — `together` | `split` | `amend-if-same-session` —、`duet_setup` — 你上次選的 duet 設定 — 與 `auto_update`）放在 `~/.config/koji/config.yaml`。
 
 ## 重要功能
 
@@ -111,11 +105,11 @@ duet:
 
 **文件漂移偵測。** 任何文件都可以用 `covers:` frontmatter 標記它所描述的程式碼路徑。當被覆蓋路徑自文件最後編輯以來的提交數超過閾值時,`/kick-off` 會警告。`/inspect-doc-drift` 會稽核整個專案。完全確定性——不需要 LLM。
 
-**Wrap 自主模式。** `wrap.prompts: off` 讓 `/wrap` 全程零提示跑完，採用它在無法提示時本來就會用的自動策略（新增照做、確定性的移除照做、判斷式移除只在項目已「established」時才動手）。`wrap.commit_gate` 會在 `/wrap` 提交前先跑你的提交閘門——`auto` 會在 `package.json` 有 `npm run lint:check` 時使用它；閘門失敗絕不默默提交，閘門不存在則略過、絕不致命。`commit_strategy: amend-if-same-session` 會把僅含文件的 wrap 併入你自己本工作階段、尚未推送的最後一次提交（`git commit --amend --trailer`，保留原標題），而不是在後面多掛一個 `docs(koji)` 提交。
+**Wrap 零提示。** `/wrap` 全程不提示：新增照做、確定性的移除照做、判斷式移除只在項目已「established」時才動手，提交則印出訊息後直接進行、不等待確認。它唯一會問的是提交方式（一次提交，或先程式碼再文件），每台機器問一次，答案會被記住。`wrap.commit_gate` 會在 `/wrap` 提交前先跑你的提交閘門——`auto` 會在 `package.json` 有 `npm run lint:check` 時使用它；閘門失敗絕不默默提交，閘門不存在則略過、絕不致命。`commit_strategy: amend-if-same-session` 會把僅含文件的 wrap 併入你自己本工作階段、尚未推送的最後一次提交（`git commit --amend --trailer`，保留原標題），而不是在後面多掛一個 `docs(koji)` 提交。
 
-**Duet 工作流程。** 不會卡住使用者的跨模型代理協作。`/duet-plan` 執行多輪 Claude↔codex 對話直到共識,鎖定計畫。`/duet-impl` 依關卡逐步走過計畫,每關 codex 審查,接著針對鎖定計畫中每一項明確承諾稽核累積 diff——這是與品質審查不同的契約驗證。`/duet-review` 進行雙審查者對抗式檢查,對於審查者間任何 medium/high 不一致皆觸發嚴重程度感知的交叉審查;硬性閘門、`-PRELIMINARY` 後綴,加上由 `/duet-impl` 內聯驅動時的呼叫端事後檢查,確保交叉審查不會被悄悄略過。三個技能皆以背景任務執行審查者——進行中你可以繼續工作。codex 預設使用 `xhigh` 推理強度;在叫用語句中用自然語言訊號可降回 high。`/duet-review` 的 Claude 端也會隨功夫調整深度：在 `/effort max`（或明確說「完整審查」、「扇出」、「深度審查」）時，會扇出成五個角度審查者（正確性、移除行為、跨檔呼叫、重用簡化、設計高度），由主代理綜整成單一發現集；較低功夫則跑單次整體審查，而說「快一點」、「省 token」即使在 max 下也會強制單次。
+**Duet 工作流程。** 不會卡住使用者的跨模型代理協作。`/duet-plan` 執行多輪 Claude↔codex 對話直到共識,鎖定計畫。`/duet-impl` 依關卡逐步走過計畫,每關都有關卡審查（由誰審查依下方的 duet 設定）,接著針對鎖定計畫中每一項明確承諾稽核累積 diff——這是與品質審查不同的契約驗證。`/duet-review` 進行雙審查者對抗式檢查,對於審查者間任何 medium/high 不一致皆觸發嚴重程度感知的交叉審查;硬性閘門、`-PRELIMINARY` 後綴,加上由 `/duet-impl` 內聯驅動時的呼叫端事後檢查,確保交叉審查不會被悄悄略過。三個技能皆以背景任務執行審查者——進行中你可以繼續工作；`/duet-impl` 的中間關卡從不卡住。`/duet-review` 的 Claude 端會隨你選的功夫調整深度：在 `max`（或明確說「完整審查」、「扇出」、「深度審查」）時，會扇出成五個角度審查者（正確性、移除行為、跨檔呼叫、重用簡化、設計高度），由主代理綜整成單一發現集；`xhigh` 與 `high` 則跑單次整體審查，而說「快一點」、「省 token」即使在 max 下也會強制單次。
 
-**審查者後端。** `duet.reviewer` 決定 duet 技能的對抗聲音：`codex`（預設）、`claude`，或 `claude-rounds+codex-final`。`claude` 會以一個全新上下文的 Claude 子代理——絕不是撰寫端工作階段的 fork——擔任審查者。它是配額耗盡時的逃生口，訊號也較弱：兩邊是同一個模型家族，所以「共識」代表兩個獨立上下文同意，而非兩家廠商。混合模式由 Claude 審查每一輪，每次嘗試鎖定花一次 codex 呼叫來把關——順利的情況下正好一次。配額規則：當 codex 在「非最終」的審查上撞到配額（或無法啟動）時，koji 會為該次審查改用全新上下文的 Claude 審查者，下一次再試 codex；只有最終審查會等 codex。
+**Duet 設定。** 每次 duet 執行都從一個問題開始：預算怎麼花。選一種審查策略——`both`（Claude 與 codex 每一輪、每一關都審查；在關卡與最終審查時交叉審查彼此不一致之處）、`claude-then-codex`（全新上下文的 Claude 審查每一輪與每一關，每次鎖定或通過由一次 codex 呼叫確認）、`codex`（codex 審查一切），或 `claude`（完全不用 codex——同一模型家族、訊號較弱，是配額耗盡時的逃生口）——再加上兩個家族共用的功夫層級（`max` / `xhigh` / `high`）與 Claude 審查者模型。選擇會被記住，下一次只需一鍵：沿用或更改。直接在叫用語句裡說出來（「duet impl the oauth plan with both reviewers at max」）就完全不會問。Claude 審查者透過 `setup` 安裝的 `koji-reviewer-*` 代理以你選的功夫執行——永遠是全新上下文，絕不是撰寫端工作階段的 fork；codex 則以該 `model_reasoning_effort` 執行。配額規則：當 codex 在「非最終」的審查上撞到配額（或無法啟動）時，koji 會為該次審查改用全新上下文的 Claude 審查者，下一次再試 codex；只有最終審查會等 codex。
 
 **程式碼契合（codebase fit）。** duet 技能會讓新程式碼契合「這個專案」既有的慣例——檔案結構、命名、慣用寫法、分層——而不只看正確性。`/duet-plan` 會在每份計畫中寫入一段 Codebase Fit Contract,`/duet-impl` 的關卡審查與 `/duet-review` 都帶有 `codebase-fit` 審查視角。共用的參考是 koji 文件目錄中的 `CODEBASE_CONVENTIONS.md`:一個中樞,它透過 `sources:` 清單「指向」（而非複製）專案自己的慣例文件——`CONTRIBUTING.md`、`AGENTS.md`、`.cursorrules`、`STYLE.md`——並從審查實際抓到的問題逐步累積標準範例索引與「已否決模式」紀錄。`/koji-init` 為新專案建立它,`/kick-off` 則把它回填到既有專案。
 
