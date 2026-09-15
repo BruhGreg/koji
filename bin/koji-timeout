@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# koji-timeout <seconds> <command> [args...]
+#
+# Runs a command under a deadline. Stock macOS ships neither gtimeout nor
+# timeout(1), and koji's codex dispatch must not run uncapped there.
+#
+# Two paths on purpose: the real gtimeout/timeout binary when present, the bash
+# supervisor otherwise. The fallback is the fully tested one, but the binary is
+# a C implementation that has been correct for decades, so it stays preferred
+# where it exists; the notifier below runs on BOTH paths so the two agree about
+# what a deadline is rather than each having its own semantics.
+#
+# Contract: exit 124 when the deadline fired, 125 when the supervisor itself
+# could not start (as timeout(1) uses it), otherwise the command's own status. (124 is not exclusive — a command may return 124 on its own; koji
+# treats that the same way, as "no usable reply".) stdin/stdout/stderr pass
+# through untouched. Nothing survives the deadline: the whole process group is
+# swept, not just the direct child.
+set -u
+
+_usage() { echo "usage: koji-timeout <seconds> <command> [args...]" >&2; exit 2; }
+[ "$#" -ge 2 ] || _usage
+DUR="$1"; shift
+# A silent empty/garbage duration is how this fails in practice: a fresh-shell
+# dispatch block that never restored $TIMEOUT. gtimeout answers 125 in 20ms and
+# the run reads it as a reviewer error. Refuse instead.
+case "$DUR" in ''|*[!0-9]*) echo "koji-timeout: duration must be a positive integer of seconds, got '$DUR'" >&2; exit 2 ;; esac
+[ "$DUR" -gt 0 ] || { echo "koji-timeout: duration must be greater than 0" >&2; exit 2; }
+
+TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
+
+# Job control gives each background job its own process group. That fixes two
+# things the naive `cmd &` form gets wrong: POSIX would otherwise redirect an
+# async command's stdin from /dev/null (losing a prompt fed on stdin), and a
+# group-wide signal can reach descendants that outlive their parent.
+set -m
+# A coarse lower bound on elapsed time, used only to catch a notifier whose
+# deletion failed. SECONDS advances on wall-clock second boundaries, so it can
+# read one second HIGH but never low: `-gt "$DUR"` therefore guarantees at
+# least $DUR real seconds have passed (measured: 1.58-1.93s for DUR=1). `-ge`
+# would not, which is why an earlier revision using it discarded fast replies.
+SECONDS=0
+# 125, not 2: an unusable TMPDIR is a supervisor failure, not a bad argument.
+# Call sites treat an unknown non-zero as ERROR and degrade, which is right here;
+# reporting it as a caller error would hard-stop an unattended run instead.
+# Every self-diagnostic carries the `koji-timeout:` prefix — wrap's commit gate
+# uses it to tell a supervisor failure from a gate command that exits 125 on its
+# own (docker and git bisect both do). A bare `|| exit 125` here left the log
+# with only mktemp's message and broke that discriminator for the most likely
+# failure of all.
+MARKDIR=$(mktemp -d "${TMPDIR:-/tmp}/koji-timeout.XXXXXX") \
+  || { echo "koji-timeout: cannot create a deadline marker dir in ${TMPDIR:-/tmp}" >&2; exit 125; }
+MARK="$MARKDIR/fired"
+CMD=""; WATCH=""
+
+_sig() {  # _sig <pid> <signal> — group first, then the bare pid
+  [ -n "${1:-}" ] || return 0
+  kill -"$2" -"$1" 2>/dev/null || kill -"$2" "$1" 2>/dev/null || true
+}
+_cleanup() { [ -n "$WATCH" ] && _sig "$WATCH" KILL; rm -rf "$MARKDIR" 2>/dev/null; return 0; }
+_cancel() {   # the wrapper itself was cancelled — do not leave codex burning quota
+  _sig "$CMD" TERM; sleep 2; _sig "$CMD" KILL; _cleanup; exit 143
+}
+# The marker is created NOW, while mktemp's success is still fresh, and the
+# notifier DELETES it at the deadline. "Deadline fired" is therefore the marker
+# being *absent*, which makes every failure mode fail closed: a marker that
+# could not be created refuses the run outright, and a temp directory that
+# disappears mid-run reads as a timeout rather than as a clean exit.
+#
+# Three earlier channels were tried and each had a hole an adversarial review
+# found: creating the marker at the deadline (the create can fail after thirty
+# minutes, reporting success), bash's SECONDS (it advances on wall-clock second
+# boundaries, so it can read as expired a third of a second after launch), and
+# a SIGUSR1 from the notifier (any command can send USR1 to its parent and
+# fabricate a timeout; and a USR1 ignored when bash started cannot be trapped
+# at all). Marker-absence depends on none of it.
+: > "$MARK" 2>/dev/null || { echo "koji-timeout: cannot create deadline marker in $MARKDIR" >&2; exit 125; }
+[ -e "$MARK" ] || { echo "koji-timeout: deadline marker missing right after creation" >&2; exit 125; }
+trap _cleanup EXIT
+trap _cancel TERM INT HUP
+# A command that signals its own parent (codex will not, but the contract should
+# not depend on that) would otherwise kill this wrapper outright: USR1's default
+# disposition is terminate, and the run would see 158 instead of the command's
+# status. A no-op handler, not `trap ""` — an explicitly ignored signal is
+# inherited by the child, a trapped one is reset to default for it.
+INTR=0
+trap 'INTR=1' USR1 USR2
+
+# Both paths background + wait, so the traps above can fire while the command
+# runs (bash defers a trap until a foreground command finishes).
+if [ -n "$TO" ]; then
+  "$TO" -k 10 "$DUR" "$@" <&0 &
+  CMD=$!
+else
+  "$@" <&0 &
+  CMD=$!
+fi
+
+# The deadline notifier runs on BOTH paths, so the evidence that a deadline
+# fired is the same either way. On the gtimeout path it only reports: that
+# binary owns the killing. Without it, a -k escalation returns 137, which is
+# indistinguishable from a command that exits 137 by itself, and the two paths
+# disagree about the same run.
+( sleep "$DUR"
+  rm -f "$MARK" 2>/dev/null
+  if [ -e "$MARK" ]; then
+    # Deletion failed, so the wrapper will not see the deadline and would
+    # report the command's own status. If that status were 0 with a complete
+    # reply already written, koji's classifier would read it as OK — a false
+    # PASS, the one outcome this whole design exists to prevent. Skip the
+    # graceful TERM and make the death unmistakable: a signalled exit can
+    # never be mistaken for a clean answer.
+    kill -KILL -"$CMD" 2>/dev/null || kill -KILL "$CMD" 2>/dev/null
+    exit 0
+  fi
+  [ -n "$TO" ] && exit 0
+  kill -TERM -"$CMD" 2>/dev/null || kill -TERM "$CMD" 2>/dev/null
+  sleep 10
+  kill -KILL -"$CMD" 2>/dev/null || kill -KILL "$CMD" 2>/dev/null
+) >/dev/null 2>&1 &
+WATCH=$!
+# Nothing ever waits on the notifier, so drop it from the job table: that is
+# what stops bash announcing its death on the wrapper's stderr, which in koji
+# is the run's .err file. The pid and its process group stay signalable.
+disown "$WATCH" 2>/dev/null || true
+set +m
+
+# `wait` returns early when a trap fires, so re-wait until the child is really
+# gone; otherwise a signal arriving mid-wait would look like the command
+# finishing.
+# A trap fires, `wait` returns 128+signo, and the child is still running: its
+# real status is still to come. Testing liveness instead of interruption loses
+# it — if the child exits in the gap before the check, the loop breaks holding
+# the signal's status rather than the command's. Loop on interruption, and let
+# the second `wait` collect the status bash has stored.
+while :; do
+  INTR=0
+  wait "$CMD"; RC=$?
+  [ "$INTR" = 1 ] || break
+done
+
+# Deadline evidence. Never the child's exit status — a TERM handler may exit
+# with anything, including 0 or 7.
+FIRED=0
+[ -e "$MARK" ] || FIRED=1
+# Deletion is itself a late filesystem write, and an unwritable MARKDIR leaves
+# the marker in place past the deadline. The clock is a second, independent
+# witness: it cannot fire early, so it costs a correct run nothing.
+[ "$SECONDS" -gt "$DUR" ] && FIRED=1
+# The real timeout binary owns its own clock, which can expire fractionally
+# before the notifier is scheduled. Its 124 is authoritative on its own, so the
+# group sweep below cannot be skipped by that race. 137 stays ambiguous (a
+# command may exit 137 itself) and is left to the marker.
+[ -n "$TO" ] && [ "$RC" = "124" ] && FIRED=1
+
+# The leader is gone; group members that ignored TERM are not. The sweep is
+# unconditional, not conditional on the deadline: whether the command exited on
+# its own or was killed, nothing it left behind may outlive this wrapper. That
+# is what closes the case where a TERM handler exits cleanly while a descendant
+# ignores TERM — the wrapper would report the handler's status and walk away
+# from a live process. koji supervises one-shot commands (a codex call, a test
+# gate); none of them is meant to daemonize.
+_sig "$CMD" KILL
+
+[ "$FIRED" = 1 ] && RC=124
+exit "$RC"

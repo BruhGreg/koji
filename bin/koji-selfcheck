@@ -33,7 +33,7 @@ KOJI_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # Skills that carry load-bearing markers (defined in the case below). A no-arg
 # run checks them ALL; adding a newly-pinned skill here is all it takes to wire
 # it into install-time lint (setup calls this script with no argument).
-ALL_WITH_MARKERS=(plan-triangulate-review duet-review duet-impl duet-plan)
+ALL_WITH_MARKERS=(plan-triangulate-review duet-review duet-impl duet-plan triangulate)
 
 if [ -z "${1:-}" ]; then
   rc=0
@@ -66,6 +66,13 @@ case "$SKILL" in
       "big-picture lens"
       "from finding #1"
       "nothing is written to the plan until you ratify"
+      "Never substitute a fresh-context Claude reviewer for it"
+    )
+    COUNTED=(
+      1 'koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT"'
+      1 'exit 78'
+      1 'exit 79'
+      1 'koji-dispatch-abort'
     )
     ;;
   duet-review)
@@ -74,12 +81,22 @@ case "$SKILL" in
       "There is no verdict without the synthesizer"
       "Fan-out priming trap"
       "codex quota is not zero findings"
+      "Never substitute a fresh-context Claude reviewer for it"
     )
     # Reviewer-backend dispatch sites: 2b Reviewer A (single) + 2a Claude leg +
     # 4b Claude cross leg. The two Claude-backend sites carry the never-a-fork rule.
     COUNTED=(
       3 'Call the `Agent` tool'
       2 'fresh Agent context, never a fork'
+      # Both codex dispatch sites (2a and the 4b cross leg) must route through
+      # the wrapper AND carry the terminal-exit guard. Pin the full invocation,
+      # not the bare program name: `koji-codex-exec` also appears in prose here,
+      # so a count of 2 against the name alone would still pass after a real
+      # dispatch site was deleted.
+      2 'koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT"'
+      2 'exit 78 ;;'
+      2 'exit 79 ;;'
+      4 'koji-dispatch-abort'
     )
     ;;
   duet-impl)
@@ -88,18 +105,26 @@ case "$SKILL" in
       "caller-side structural backstop"
       "recorded deferral, not a blocking prompt"
       "a codex reply that is not a findings array is not a review"
+      "Never substitute a fresh-context Claude reviewer for it"
       "claude+codex-confirm"
       "A slot file exists only when it holds a validated array"
     )
     # Literal call phrase: 2c Claude leg, both-mode cross leg, consult leg, 3a
     # promise auditor. Never-a-fork rule: the three reviewer legs (not the auditor).
+    # Plus the codex dispatch shape and BOTH terminal arms — pinned by the full
+    # invocation, not the bare program name, which also appears in prose.
     COUNTED=(
       4 'Call the `Agent` tool'
       3 'fresh Agent context, never a fork'
+      1 'koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT"'
+      1 'exit 78 ;;'
+      1 'exit 79 ;;'
+      2 'koji-dispatch-abort'
     )
     ;;
   duet-plan)
     MARKERS=(
+      "Never substitute a fresh-context Claude reviewer for it"
       "CONSENSUS REACHED at round"
       'rm "$CODEX_FILE"'
       "--prose"
@@ -109,8 +134,25 @@ case "$SKILL" in
     COUNTED=(
       3 'Call the `Agent` tool'
       1 'fresh Agent context, never a fork'
+      1 'koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT"'
+      1 'exit 78 ;;'
+      1 'exit 79 ;;'
+      2 'koji-dispatch-abort'
     )
     ;;
+  triangulate)
+    MARKERS=(
+      "Never substitute a fresh-context Claude reviewer for it"
+      "restore the pair Step 1 resolved, never re-default it here"
+    )
+    COUNTED=(
+      1 'koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT"'
+      1 'exit 78'
+      2 'exit 79'
+      1 'koji-dispatch-abort'
+    )
+    ;;
+
   *)
     echo "koji-selfcheck: no markers defined for '$SKILL' — nothing to check."
     exit 0

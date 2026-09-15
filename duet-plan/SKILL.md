@@ -25,10 +25,16 @@ Multi-round Claude↔codex planning dialogue. Each round, Claude drafts/updates 
 
 ```bash
 source <(~/.claude/skills/koji/bin/koji-detect)
+# Codex preflight: refuses to run when THIS session is itself under codex (an
+# outside voice cannot be the same model), and warns on a known-bad CLI.
+# Exit 78 = harness mismatch. It must STOP THE RUN, not just this block.
+~/.claude/skills/koji/bin/koji-codex-preflight || exit $?
 echo "=== koji duet-plan ==="
 echo "Project: $PROJECT_NAME"
 echo "Docs: $DOCS_PATH"
 ```
+
+**If the preamble exits 78 — harness mismatch.** (The `claude` strategy dispatches no codex at all; if the user has already asked for it in the invocation phrase, skip the preflight — `koji-codex-exec` still fails closed at any dispatch that does happen.) This session is running under codex, so codex cannot be the outside voice. Stop the run and report *"codex outside review unavailable: harness mismatch; no outside process started. Missing coverage."* **Never substitute a fresh-context Claude reviewer for it** — the quota-substitution rule does not apply here. Under codex that substitution makes Reviewer A review itself, which is exactly the two-placeholders-into-a-PASS failure koji forbids. A failed Bash block does not halt the agent; stopping is your job.
 
 ## Arguments / topic extraction
 
@@ -81,15 +87,14 @@ STRATEGY=$("$KDS" field "$TUPLE" 1)        # both | claude-then-codex | codex | 
 EFFORT=$("$KDS" field "$TUPLE" 2)          # codex model_reasoning_effort
 CLAUDE_EFFORT=$("$KDS" field "$TUPLE" 3)   # koji-reviewer-<effort> agent; inherit → general-purpose
 CLAUDE_MODEL=$("$KDS" field "$TUPLE" 4)    # Agent `model` param; inherit → omit
-TIMEOUT="${TIMEOUT:-1800}"
 ROUND_LIMIT="${ROUNDS:-5}"
 QUOTA_BACKOFF="${QUOTA_BACKOFF:-900}"      # codex quota back-off at the LOCK GATE only (s), default 15 min
 QUOTA_MAX_WAITS="${QUOTA_MAX_WAITS:-20}"   # cap on lock-gate back-offs (~5h)
 # Loop state — re-substituted by the agent each block (each Bash block is a fresh shell).
 LOCK_WAITS="${LOCK_WAITS:-0}"              # lock-gate quota back-offs used so far (the gate itself is read from round-N-backend.txt, not a variable)
 B_RETRIED="${B_RETRIED:-0}"                # Claude-leg missing-VERDICT retry used this round (0/1)
-TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
-PROMPT_TEMPLATES="$KOJI_SKILLS/duet-plan/references/prompt-templates.md"
+PROMPT_TEMPLATES=~/.claude/skills/koji/duet-plan/references/prompt-templates.md   # literal: $KOJI_SKILLS is an unexported koji-detect assignment
+[ -s "$PROMPT_TEMPLATES" ] || { echo "FATAL: prompt templates missing at $PROMPT_TEMPLATES" >&2; exit 1; }   # Step 1, before any .exit path exists
 PROJECT_CONTEXT="(repo: $(basename "$PROJECT_ROOT"); branch: $(git branch --show-current 2>/dev/null || echo unknown))"
 
 echo "Topic: $TOPIC"
@@ -156,6 +161,20 @@ Then **run the leg(s) matching `ROUND_BACKEND`**. Every leg fills the same "## R
 ##### 2b — codex leg (`ROUND_BACKEND=codex`)
 
 ```bash
+# Fresh shell: these come from earlier blocks and are EMPTY here unless the
+# agent re-substitutes them. Unset, they do not fail — they build a prompt with
+# a hole in it, or write output to the wrong path, and the reviewer's honest
+# answer to the wrong question then classifies as a clean pass.
+: "${RUN_DIR:?RUN_DIR unset — re-substitute it in this block}"
+# The draft is what the critic is being asked to review. $CLAUDE_FILE comes from
+# an earlier block, so in a fresh shell `cat` fails while the surrounding prompt
+# still builds — codex then critiques nothing, and an honest `VERDICT: AGREE`
+# classifies as OK and can lock.
+: "${CLAUDE_FILE:?CLAUDE_FILE unset — re-substitute it in this block}"
+: "${PROJECT_ROOT:?PROJECT_ROOT unset — koji-detect assigns, never exports; re-source it in this block}"
+: "${CODEX_FILE:?CODEX_FILE unset — re-substitute it in this block}"
+[ -s "$CLAUDE_FILE" ] || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$CODEX_FILE.exit" 79 "plan draft missing or empty — not dispatching a critique of nothing"
+: "${TOPIC:?TOPIC unset — re-substitute it in this block}"
 # The agent fills the template into $CODEX_PROMPT inline — example shape:
 CODEX_PROMPT="You are the adversarial reviewer for a plan drafted by another agent in a separate context...
 
@@ -182,20 +201,20 @@ End with VERDICT line."
 PROMPT_TXT="$CODEX_FILE.prompt"
 printf '%s\n' "$CODEX_PROMPT" > "$PROMPT_TXT"
 # Fresh shell: the effort comes from the run's setup file, not a Step 1 variable.
-EFFORT=$(~/.claude/skills/koji/bin/koji-duet-setup field "$(head -n1 "$RUN_DIR/duet-setup")" 2) || exit 1
+EFFORT=$(~/.claude/skills/koji/bin/koji-duet-setup field "$(head -n1 "$RUN_DIR/duet-setup")" 2) \
+  || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$CODEX_FILE.exit" 79 "cannot read the run's duet setup — effort unresolved"
+case "$EFFORT" in high) TIMEOUT=900 ;; *) TIMEOUT=1800 ;; esac   # derived, not re-defaulted: an unexported TIMEOUT=900 does not cross a shell boundary
 
-if [ -n "$TO" ]; then
-  "$TO" "$TIMEOUT" codex exec - \
-    -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" \
-    < "$PROMPT_TXT" > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
-else
-  codex exec - \
-    -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" \
-    < "$PROMPT_TXT" > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
+~/.claude/skills/koji/bin/koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" \
+  < "$PROMPT_TXT" > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
+CE=$?; echo "$CE" > "$CODEX_FILE.exit"
+# Exit 78 is a harness mismatch, NOT a reviewer failure: stop the run, report
+# missing coverage, and do not substitute a Claude reviewer. An `if` block, not
+# `[ ... ] && ...`: as the last command of the block the && form returns 1 on a
+# SUCCESSFUL review, so the harness would report every good dispatch as failed.
+if [ "$CE" = "78" ]; then
+  echo "FATAL: codex harness mismatch — stop the run, do not classify, do not substitute" >&2
 fi
-echo $? > "$CODEX_FILE.exit"
 ```
 
 Run this Bash block with **`run_in_background: true`**. Tell the user: *"Round $ROUND: codex critiquing in the background."* Then return control.
@@ -203,6 +222,18 @@ Run this Bash block with **`run_in_background: true`**. Tell the user: *"Round $
 When the notification arrives, **classify in prose mode** — `--prose` is mandatory here (see "Reviewer backend": this output is a prose critique, and without `--prose` a healthy critique that mentions quota is labeled `QUOTA`):
 
 ```bash
+# 78 is a harness mismatch, not a reviewer state. It must be caught BEFORE the
+# classifier, which would call it ERROR and route it into Claude substitution —
+# the one substitution that is never valid, because under codex the substitute
+# is Reviewer A. Stop the run instead.
+# A MISSING status file is terminal too, not ERROR: the dispatch block died
+# before recording anything, and koji-codex-classify defaults a missing file to
+# 1 — which is the substitution path. No status means no review happened.
+[ -f "$CODEX_FILE.exit" ] || { echo "FATAL: the dispatch block never recorded a status — it did not run to completion. Fix the block; do not substitute." >&2; exit 79; }
+case "$(cat "$CODEX_FILE.exit" 2>/dev/null)" in
+  78) echo "FATAL: codex harness mismatch — no outside review happened. Stop the run; do not substitute." >&2; exit 78 ;;
+  79) echo "FATAL: the dispatch block was malformed (bad timeout/effort/root/prompt) — no call was made. Fix the block; do not substitute." >&2; exit 79 ;;
+esac
 CODEX_STATE=$(~/.claude/skills/koji/bin/koji-codex-classify \
   "$CODEX_FILE.raw" "$CODEX_FILE.err" "$CODEX_FILE.exit" --prose)
 case "$(cat "$RUN_DIR/round-${ROUND}-backend.txt" 2>/dev/null)" in *+codex-final) LOCK_GATE=1 ;; *) LOCK_GATE=0 ;; esac
@@ -223,7 +254,7 @@ esac
 On `QUOTA` / `ERROR` / `TIMEOUT`:
 
 - **Ordinary round (`LOCK_GATE=0`, record `codex` — never a `both*` record, see the `both` bullet)** — this review is not final, so **do not wait**: print `⚠ codex $CODEX_STATE — round $ROUND reviewed by fresh-context Claude`, overwrite the backend record (`printf 'codex-quota-substituted\n'` for `QUOTA`, `printf 'codex-error-substituted\n'` otherwise) into `$RUN_DIR/round-${ROUND}-backend.txt`, and run the **Claude leg below** for this same round with the same filled prompt. The next round tries codex again — substitution is per-review, not a mode switch. If the substituted round then reaches AGREE+AGREE, 2c's lock gate fires (the record is not `codex`), so `reviewer: codex` plus a quota hit can never lock on a Claude-only verdict.
-- **Lock gate (`LOCK_GATE=1`)** — this review IS final; **never substitute**. `QUOTA` → if `LOCK_WAITS < QUOTA_MAX_WAITS`: tell the user *"lock gate: codex quota — backing off ${QUOTA_BACKOFF}s, retry $((LOCK_WAITS+1))/${QUOTA_MAX_WAITS}"*, dispatch a backgrounded `sleep "$QUOTA_BACKOFF"; <the codex exec - … block above>` reading the same `$PROMPT_TXT` (an identical retry; keepawake is already held), increment `LOCK_WAITS`, return control, re-classify on notification. Cap reached → go to **Deadlock at round limit** with the reason *"codex unavailable at the lock gate"* (its option 5 waits and retries). `ERROR` / `TIMEOUT` → `echo "VERDICT: DISAGREE: codex $CODEX_STATE at the lock gate" > "$CODEX_FILE"`: no lock this round; `ROUND++` and the next round re-resolves its backend.
+- **Lock gate (`LOCK_GATE=1`)** — this review IS final; **never substitute**. `QUOTA` → if `LOCK_WAITS < QUOTA_MAX_WAITS`: tell the user *"lock gate: codex quota — backing off ${QUOTA_BACKOFF}s, retry $((LOCK_WAITS+1))/${QUOTA_MAX_WAITS}"*, dispatch a backgrounded `sleep "$QUOTA_BACKOFF"; <the koji-codex-exec block above>` reading the same `$PROMPT_TXT` (an identical retry; keepawake is already held), increment `LOCK_WAITS`, return control, re-classify on notification. Cap reached → go to **Deadlock at round limit** with the reason *"codex unavailable at the lock gate"* (its option 5 waits and retries). `ERROR` / `TIMEOUT` → `echo "VERDICT: DISAGREE: codex $CODEX_STATE at the lock gate" > "$CODEX_FILE"`: no lock this round; `ROUND++` and the next round re-resolves its backend.
 
 - **`both` round (record `both` or `both:claude-unavailable`)** — the Claude critic is already running, in, or terminally failed; **never dispatch a second Claude**. `QUOTA` / `ERROR` / `TIMEOUT`, and `EMPTY` (no VERDICT) too. If the record already reads `both:claude-unavailable` (the Claude critic failed first), both families are gone: `printf 'both:unavailable\n' > "$RUN_DIR/round-${ROUND}-backend.txt"` and the DISAGREE terminal below. Otherwise, once the Claude critique is in with a VERDICT line, **first** `printf 'both:codex-unavailable\n' > "$RUN_DIR/round-${ROUND}-backend.txt"`, **then** `cp "$RUN_DIR/round-${ROUND}-claude-critique.md" "$CODEX_FILE"` so the slot carries a critique. Record before slot: an interruption between the two leaves an empty slot under a terminal record (no consensus possible), never a Claude `AGREE` in the slot under a record that still says `both` (which 2c would read as two-family consensus). If that round then reaches AGREE+AGREE, 2c's lock gate fires (record ≠ codex), so the lock still carries a codex verdict. If the Claude critic is *also* unavailable (below), record `both:unavailable` and use the DISAGREE terminal.
 

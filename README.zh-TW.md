@@ -121,6 +121,8 @@ wrap:
 
 **離線(walk-away)工作階段。** `/duet-plan`、`/duet-impl` 與 `/plan-triangulate-review` 會在背景 AI 任務執行期間讓機器保持喚醒(`caffeinate` / `systemd-inhibit`),並在結束時釋放,讓你能啟動一段長時間執行後離開。(單獨的 `/triangulate` 是互動式的——它把每個決定交給你——因此跟 `/duet-review` 一樣略過喚醒。)僅這些流程採用(絕不包含一般的 `/kick-off`);採用引用計數,重疊執行共用同一個喚醒程序,且具擁有權安全:絕不會關閉你自己啟動的喚醒程序。`/duet-impl` 天生就適合無人值守:遇到卡住的關卡絕不凍結。某個關卡在用盡重試後仍無法通過時,會被記錄成 `deferred-findings.md` 中的延後項目——待你回來時一次全部呈現——並繼續往下走,而不是卡在彈窗提示上。而 codex 的配額回覆或啟動失敗也絕不會被誤讀為「零發現→通過」:最後一關之前的關卡會改用全新上下文的 Claude 審查者繼續往下走,只有最終的 `/duet-review` 關卡會退避（約 15 分鐘）並在 codex 的 5 小時視窗內恢復——配額耗盡只會讓流程變慢,絕不會默默記下一次不實的通過審查。
 
+**Codex 派送。** koji 發出的每一次 codex 呼叫都在期限內、並透過同一個包裝器執行——在每一台機器上皆然,包含未安裝 `coreutils` 的原生 macOS(舊路徑會在此悄悄地不設上限地執行)。審查過程衍生的任何程序都不會存活得比它久。各種失敗模式被明確區分,因此沒有一種能被讀成一次乾淨的審查:當工作階段「本身」就跑在 codex 之下時,整個執行會直接停止(外部聲音不能是同一個模型,而在此改用 Claude 審查者等於讓審查者 A 為自己評分);派送區塊若遺失變數或組出空白提示,會被回報為區塊有誤,絕不會被悄悄降級成替代審查者;而真正的環境失敗——暫存目錄滿了、CLI 卡住——則依照審查者失敗一貫的方式降級,並附上明說的橫幅。koji 也會對已知有 stdin 死鎖問題的 codex CLI 版本提出警告,因為 koji 正是以 stdin 餵入每一份提示。
+
 **計畫與研究工作文件。** `.koji/plans/`(已決定、待實作的工作)與 `.koji/research/`(調查發現,待驗證)。研究檔案以主題為定址單位——新發現會累積進現有主題檔案(`## Decisions` 段落由新到舊),而不是另開以工作階段命名的平行檔案。輕量的 YAML frontmatter(`status:` 欄位,依類型而定:plans 為 pending/in-progress/completed/archived,research 為 unvalidated/validated/archived)。`/kick-off` 會在工作階段開始時列出待辦項目;`/duet-impl` 會在執行結束時將計畫標記為 `completed`;`koji-plans-research --set-status <path> <new>` 可從命令列修改,`--set-next-step <path> "<text>"` 則改寫 `next-step:` 那一行;只要本工作階段動到某個進行中的計畫,`/wrap` 就會重新確認它的 `next-step`。漂移豁免(不是程式碼覆蓋文件)。
 
 ## 更詳細的文件

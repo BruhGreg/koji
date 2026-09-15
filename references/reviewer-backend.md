@@ -128,6 +128,44 @@ A failed check — no array, not a list, an entry without a valid severity, a ve
 - `/duet-review` B → `CODEX_UNAVAILABLE=1` (the degraded path); the `[]` written to the slot there is the degraded-run placeholder the Step 6 banner declares, not a finding count. Reviewer A angles → `[]` for that angle with a note (a fan-out degrades, never hangs).
 - `/duet-plan` → the round records `VERDICT: DISAGREE: reviewer returned no VERDICT after retry` (cannot lock) and the deadlock prompt is surfaced.
 
+## Harness mismatch — terminal, and the one failure substitution may NOT cover
+
+`koji-codex-preflight` runs in every codex-calling skill's preamble and exits
+**78** when `CODEX_THREAD_ID` or `CODEX_SANDBOX` is set — i.e. when this session
+is itself running under codex. It is checked at preamble time, before any
+dispatch, because those are environment variables and therefore survive the
+fresh-shell boundary that a `koji-detect` assignment would not.
+
+78 is **not** a reviewer failure and the quota/error rule below does **not**
+apply to it. Under codex, substituting a fresh-context Claude reviewer makes
+Reviewer A review itself, which is precisely the two-placeholders-into-a-PASS
+outcome koji forbids. The run stops and reports *"codex outside review
+unavailable: harness mismatch; no outside process started. Missing coverage."*
+There is no escape hatch, by design.
+
+A failed Bash block does not halt the agent, so stopping is the agent's job;
+each skill carries that instruction in prose and `koji-selfcheck` pins it.
+
+`koji-codex-exec` re-checks and returns 78 as well, so a call site that somehow
+bypassed the preamble still fails closed rather than dispatching.
+
+### Exit 79 — the dispatch block is malformed
+
+`koji-codex-exec` returns **79** when the CALLER is wrong: an unrestored
+`$TIMEOUT` or `$EFFORT`, an effort outside `max|xhigh|high`, a project root that
+is not a directory, or a prompt that is empty or unreadable. No call is made.
+
+Like 78, it is **intercepted before `koji-codex-classify` at every collection
+site — first pass and cross leg alike** — and it is never substituted: nothing
+about a broken block is fixed by asking a different reviewer. The fix is the
+block.
+
+79 rather than 2 is deliberate. `codex exec --<bad-flag>` exits 2, and
+`koji-timeout` exits 2 for a bad duration and **125** when the supervisor itself
+cannot start. Carrying this meaning on 2 would let a codex flag rename, or a
+full temp dir, hard-stop every run with the wrong diagnosis; on their own codes
+they classify as `ERROR` and degrade the way any reviewer failure does.
+
 ## Quota / error rule — substitute on non-final reviews, wait on the final one
 
 A codex `QUOTA`, `ERROR` or `TIMEOUT` (from `koji-codex-classify`) on a **non-final** review is re-run **immediately** by the Claude backend with the same prompt, a visible `⚠`, and the round/gate backend file overwritten with `codex-quota-substituted` / `codex-error-substituted`. Substitution is per-review, not a mode switch: the **next** review tries codex again (the 5-hour window may have restored). A lock therefore always carries a codex verdict unless the strategy is `claude`.
@@ -152,6 +190,6 @@ A codex `QUOTA`, `ERROR` or `TIMEOUT` (from `koji-codex-classify`) on a **non-fi
 ## What does NOT apply to a Claude backend
 
 - **`koji-codex-classify`** — never run it on Claude output. Its `[…]` grab and its substring quota scan over review text (`quota`, `429`, `rate limit`) would turn a review *about* rate-limiting code into a phantom `QUOTA` and an endless back-off. Extract the array from the `Agent` result and run `koji-duet-findings-check`.
-- **`TIMEOUT`, `$TO`, exit 124, `.exit` files** — an `Agent` call has no wall clock here. A never-returning reviewer produces no wake-up of its own; it is declared unavailable when the orchestrator next acts (another notification, or the user's next message) with everything else in — fail closed per the malformed rule, never `[]`.
+- **`TIMEOUT`, exit 124, `.exit` files** — an `Agent` call has no wall clock here. A never-returning reviewer produces no wake-up of its own; it is declared unavailable when the orchestrator next acts (another notification, or the user's next message) with everything else in — fail closed per the malformed rule, never `[]`.
 - **`model_reasoning_effort`** — codex's knob. Claude's effort is the agent definition (`koji-reviewer-<effort>`), plus the parent session's `/effort` under `inherit`.
 - **`-s read-only`** — no sandbox; the read-only clause + tree fingerprint are the substitute.

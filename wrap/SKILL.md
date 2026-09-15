@@ -595,15 +595,32 @@ Otherwise, if `$SETTINGS_ROOT/.claude/settings.local.json` exists (treat missing
 
    ```bash
    GATE_LOG=$(mktemp)
-   TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
-   if [ -z "$TO" ]; then echo "note: no timeout binary — gate runs uncapped"; fi
    TREE_BEFORE=$(git -C "$PROJECT_ROOT" diff --binary | cksum)
-   if [ -n "$TO" ]; then
-     (cd "$PROJECT_ROOT" && "$TO" 300 bash -c "$GATE") > "$GATE_LOG" 2>&1
-   else
-     (cd "$PROJECT_ROOT" && bash -c "$GATE") > "$GATE_LOG" 2>&1
-   fi
+   # koji-timeout is real timeout(1) when present and a supervisor otherwise, so
+   # the gate is never uncapped and nothing it spawns outlives it.
+   (cd "$PROJECT_ROOT" && ~/.claude/skills/koji/bin/koji-timeout 300 bash -c "$GATE") > "$GATE_LOG" 2>&1
    GATE_EXIT=$?
+   # 124 and 125 are the supervisor's, not the gate's. Folding them into "the
+   # gate failed" would cost the user their wrap and name the wrong cause: 124
+   # is the 300s deadline, 125 means the supervisor could not start at all.
+   case "$GATE_EXIT" in
+     124) # A deadline IS an abort — the tree is unverified, so nothing is
+          # committed. Say so once, here, and let the decision list below skip
+          # its generic line rather than contradict this one.
+          echo "Commit gate TIMED OUT after 300s — the tree is unverified, so nothing is committed; changes remain staged."
+          echo "  Configure a faster gate via .koji.yaml (wrap.commit_gate), or set it to none."
+          ;;
+     125) # Only the SUPERVISOR's own 125. koji-timeout passes a command's status
+          # through unchanged, and docker run and git bisect both exit 125 — so a
+          # bare rewrite to 0 would take a failing gate's 125 and commit a red
+          # tree. koji-timeout prefixes every self-diagnostic with "koji-timeout:".
+          if grep -q '^koji-timeout:' "$GATE_LOG"; then
+            echo "note: the gate supervisor could not start (temp dir unusable) — gate SKIPPED, proceeding as if unavailable"
+            GATE_EXIT=0
+          else
+            echo "Commit gate failed (exit 125) — nothing committed."
+          fi ;;
+   esac
    TREE_AFTER=$(git -C "$PROJECT_ROOT" diff --binary | cksum)
    if [ "$TREE_BEFORE" = "$TREE_AFTER" ]; then GATE_TOUCHED=no; else GATE_TOUCHED=yes; fi
    echo "Gate exit: $GATE_EXIT | gate modified tracked files: $GATE_TOUCHED"
@@ -614,6 +631,7 @@ Otherwise, if `$SETTINGS_ROOT/.claude/settings.local.json` exists (treat missing
    - `GATE_EXIT=0` and `GATE_TOUCHED=no` → **pass**. Print nothing more.
    - `GATE_EXIT=127` or the log tail shows `command not found` (any gate), or — **only when the gate is a Node command** (`auto`, or a configured command starting with `npm` / `npx` / `node` / `pnpm` / `yarn`) — the log tail shows `Cannot find module` / `ENOENT`, or `package.json` exists but `$PROJECT_ROOT/node_modules` does not → **gate unavailable — skipped**. One warning line; continue as if there were no gate. An unavailable gate never aborts a wrap (a fresh clone must not lose its session log to a missing `node_modules`). A failing `cargo test` or `make check` is never waved through on a Node heuristic.
    - `GATE_TOUCHED=yes` (the gate formatted files) → restage the same set and re-run the gate block **once**: `if [ -n "$(git -C "$PROJECT_ROOT" diff --cached --name-only)" ]; then git -C "$PROJECT_ROOT" diff --cached --name-only -z | xargs -0 git -C "$PROJECT_ROOT" add --; fi`. A second `yes`, or a non-zero exit, → **failed**.
+   - `GATE_EXIT=124` → **failed (deadline)**. The block above already printed the reason; do **not** repeat the generic line. Show `tail -20 "$GATE_LOG"` and abort exactly as the failed case below does.
    - Any other non-zero exit → **failed**. Show `tail -20 "$GATE_LOG"`, then **abort**: `Commit gate failed (exit $GATE_EXIT) — nothing committed; changes remain staged.` Skip to sub-step 7 and **skip sub-step 8 as well** — nothing was committed, so the session-start sentinel and per-session state stay in place for the wrap that eventually lands the commit. Autonomy never means committing a red tree.
 
    In the **Split** strategy the gate runs once, before the first commit — a check-only gate reads the whole tree, so per-commit runs add nothing.

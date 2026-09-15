@@ -52,9 +52,15 @@ if ! command -v codex >/dev/null 2>&1; then
 fi
 
 source <(~/.claude/skills/koji/bin/koji-detect)
+# Codex preflight: refuses to run when THIS session is itself under codex (an
+# outside voice cannot be the same model), and warns on a known-bad CLI.
+# Exit 78 = harness mismatch. It must STOP THE RUN, not just this block.
+~/.claude/skills/koji/bin/koji-codex-preflight || exit $?
 echo "=== koji plan-triangulate-review ==="
 echo "Project: $PROJECT_NAME"
 ```
+
+**If the preamble exits 78 — harness mismatch.** This session is running under codex, so codex cannot be the outside voice. Stop the run and report *"codex outside review unavailable: harness mismatch; no outside process started. Missing coverage."* **Never substitute a fresh-context Claude reviewer for it** — the quota-substitution rule does not apply here. Under codex that substitution makes Reviewer A review itself, which is exactly the two-placeholders-into-a-PASS failure koji forbids. A failed Bash block does not halt the agent; stopping is your job.
 
 ## Arguments / plan resolution
 
@@ -84,6 +90,10 @@ Before any model spend or keep-awake, show a one-time estimate and get one opt-i
 ```bash
 ~/.claude/skills/koji/bin/koji-keepawake start || true   # once; torn down once in Step 8
 RUN_DIR=$(mktemp -d -t ptr-XXXXXX)   # per-finding debate artifacts
+# Persist the RESOLVED codex settings; every dispatch runs in a fresh shell and
+# restores them from here. Agent sets EFFORT=high TIMEOUT=900 BEFORE this block
+# when the user picked "Lighter".
+printf '%s|%s\n' "${EFFORT:-xhigh}" "${TIMEOUT:-1800}" > "$RUN_DIR/codex-settings"
 FINDING_N=0                           # incremented per DEBATED finding (file naming)
 ```
 
@@ -140,25 +150,51 @@ Then one paragraph: your reasoning + the crux.
 Dispatch both voices in parallel, backgrounded, each to its own file:
 
 - **Claude voice** — `Agent` tool, `run_in_background: true`, `general-purpose`. When it returns, **you (the main agent) write its full output to `$RUN_DIR/finding-$FINDING_N-r$ROUND-claude.md`** via the Write tool — the subagent does not write the file.
-- **codex voice** — embedded bash, `run_in_background: true` (the canonical koji dispatch; `< /dev/null` + timeout wrapper are the confirmed silent-hang guards):
+- **codex voice** — embedded bash, `run_in_background: true` (the canonical koji dispatch via `bin/koji-codex-exec` — prompt on stdin as a regular file, deadline enforced by `bin/koji-timeout`):
 
 ```bash
-EFFORT="${EFFORT:-xhigh}"; TIMEOUT="${TIMEOUT:-1800}"   # set EFFORT=high BEFORE this block if the user picked "Lighter" at Step 1
-TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
+# Fresh shell: these come from earlier blocks and are EMPTY here unless the
+# agent re-substitutes them. Unset, they do not fail — they build a prompt with
+# a hole in it, or write output to the wrong path, and the reviewer's honest
+# answer to the wrong question then classifies as a clean pass.
+: "${RUN_DIR:?RUN_DIR unset — re-substitute it in this block}"
+: "${PROJECT_ROOT:?PROJECT_ROOT unset — koji-detect assigns, never exports; re-source it in this block}"
+: "${CODEX_PROMPT:?CODEX_PROMPT unset — re-substitute it in this block}"
+: "${FINDING_N:?FINDING_N unset — re-substitute it in this block}"
+: "${ROUND:?ROUND unset — re-substitute it in this block}"
+# Restore the pair Step 1 resolved, never re-default it here: these are not
+# exported, so re-defaulting turns a user's "Lighter" high/900 back into
+# xhigh/1800 — raising effort and doubling the deadline against their choice.
+# $CF first: it is where every guard below records its terminal status, so a
+# guard that names it before it is assigned writes 79 to ./.exit in the agent's
+# CWD and the collector finds nothing where it looks.
 CF="$RUN_DIR/finding-$FINDING_N-r$ROUND-codex.md"
+IFS='|' read -r EFFORT TIMEOUT < "$RUN_DIR/codex-settings" \
+  || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$CF.exit" 79 "cannot read the run's codex settings — effort/timeout unresolved"
 # $CODEX_PROMPT = the finding + options + proposed resolution + lens + the
 # VERDICT-closing instruction above.
-if [ -n "$TO" ]; then
-  "$TO" "$TIMEOUT" codex exec "$CODEX_PROMPT" -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" < /dev/null > "$CF.raw" 2> "$CF.err"
-else
-  codex exec "$CODEX_PROMPT" -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" < /dev/null > "$CF.raw" 2> "$CF.err"
-fi
+# Prompt to a file, then codex reads it from stdin (`-`) — a prompt on argv can
+# exceed the argv ceiling; printf is a builtin and has no such limit.
+printf '%s\n' "$CODEX_PROMPT" > "$CF.prompt"
+
+~/.claude/skills/koji/bin/koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" \
+  < "$CF.prompt" > "$CF.raw" 2> "$CF.err"
 CE=$?; echo "$CE" > "$CF.exit"
+# Exit 78 is a harness mismatch, NOT a reviewer failure: stop the run, report
+# missing coverage, and do not substitute a Claude reviewer. An `if` block, not
+# `[ ... ] && ...`: as the last command of the block the && form returns 1 on a
+# SUCCESSFUL review, so the harness would report every good dispatch as failed.
 # Only a CLEAN exit is a real vote. Timeout (124) or any nonzero → DISAGREE, so a
 # half-finished "AGREE" can NEVER auto-lock. (Copy raw only on success.)
-if [ "$CE" = "0" ]; then
+# 78 and 79 are the exceptions: neither is a vote at all, and a DISAGREE for
+# either would read as a real cross-model objection and drive another round.
+if [ "$CE" = "78" ]; then
+  echo "FATAL: codex harness mismatch — no cross-model vote possible. Stop the run; do not record a vote." >&2
+  exit 78
+elif [ "$CE" = "79" ]; then
+  echo "FATAL: the codex dispatch block was malformed — no call was made. Fix the block; do not record a vote." >&2
+  exit 79
+elif [ "$CE" = "0" ]; then
   cp "$CF.raw" "$CF"
 else
   printf 'VERDICT: DISAGREE\n(codex exit %s — failed/timeout, not a real vote)\n' "$CE" > "$CF"

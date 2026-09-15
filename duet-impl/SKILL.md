@@ -28,9 +28,15 @@ Walks a saved plan from `/duet-plan` (or any structured plan). **Total reviewer 
 
 ```bash
 source <(~/.claude/skills/koji/bin/koji-detect)
+# Codex preflight: refuses to run when THIS session is itself under codex (an
+# outside voice cannot be the same model), and warns on a known-bad CLI.
+# Exit 78 = harness mismatch. It must STOP THE RUN, not just this block.
+~/.claude/skills/koji/bin/koji-codex-preflight || exit $?
 echo "=== koji duet-impl ==="
 echo "Project: $PROJECT_NAME"
 ```
+
+**If the preamble exits 78 — harness mismatch.** (The `claude` strategy dispatches no codex at all; if the user has already asked for it in the invocation phrase, skip the preflight — `koji-codex-exec` still fails closed at any dispatch that does happen.) This session is running under codex, so codex cannot be the outside voice. Stop the run and report *"codex outside review unavailable: harness mismatch; no outside process started. Missing coverage."* **Never substitute a fresh-context Claude reviewer for it** — the quota-substitution rule does not apply here. Under codex that substitution makes Reviewer A review itself, which is exactly the two-placeholders-into-a-PASS failure koji forbids. A failed Bash block does not halt the agent; stopping is your job.
 
 ## Arguments / plan-path resolution
 
@@ -63,7 +69,7 @@ Who reviews each gate, at what effort, on which Claude model is decided **at the
 - **`claude-then-codex`** — Claude reviews the gate; when Claude finds no HIGH, **one codex call confirms the pass on the same snapshot** before the gate passes. Codex HIGHs go into the fix loop like any others; the next attempt starts with Claude again. Cheap iteration, one expensive call per pass.
 - **`both`** — codex **and** a fresh-context Claude review the gate in parallel on the same prompt; findings merge through `koji-duet-synthesize`, and the two families cross-review what only one of them raised before the HIGH count is taken. Most calls, strongest signal.
 
-Codex runs at the tuple's codex effort (`max` / `xhigh` / `high`; ~30-min timeout at the top tiers); Claude reviewers run as `koji-reviewer-<effort>` agents. `TIMEOUT` may be lowered to `900` when the effort is `high`.
+Codex runs at the tuple's codex effort (`max` / `xhigh` / `high`; ~30-min timeout at the top tiers); Claude reviewers run as `koji-reviewer-<effort>` agents. The deadline is derived from that effort at each dispatch — 900s at `high`, 1800s otherwise — so it holds in every fresh shell without an exported variable.
 
 ## Review checkpoint strategy
 
@@ -116,7 +122,6 @@ STRATEGY=$("$KDS" field "$TUPLE" 1)        # both | claude-then-codex | codex | 
 EFFORT=$("$KDS" field "$TUPLE" 2)          # codex model_reasoning_effort
 CLAUDE_EFFORT=$("$KDS" field "$TUPLE" 3)   # koji-reviewer-<effort> agent for the Claude legs; inherit → general-purpose
 CLAUDE_MODEL=$("$KDS" field "$TUPLE" 4)    # Agent `model` param; inherit → omit
-TIMEOUT="${TIMEOUT:-1800}"
 RETRIES="${RETRIES:-2}"
 # Gate leg for gates 1..N-1 (gate N is the embedded /duet-review, handed the same tuple).
 GATE_LEG=$(~/.claude/skills/koji/bin/koji-duet-backend impl-gate "$RUN_DIR/duet-setup") || exit 1   # codex | claude | both
@@ -201,7 +206,8 @@ FINDINGS="$RUN_DIR/findings-${gate_id}-attempt-${attempt}.json"          # the s
 A_SLOT="$RUN_DIR/findings-${gate_id}-attempt-${attempt}-claude.json"   # both: Claude's family slot · claude-then-codex: the archived Claude array
 B_SLOT="$RUN_DIR/findings-${gate_id}-attempt-${attempt}-codex.json"    # both: codex's family slot
 V="$RUN_DIR/gate-${gate_id}-attempt-${attempt}-verdict.json"           # both: the merged verdict
-GATE_PROMPT_TEMPLATE="$KOJI_SKILLS/duet-impl/references/gate-review-prompt.md"
+GATE_PROMPT_TEMPLATE=~/.claude/skills/koji/duet-impl/references/gate-review-prompt.md   # literal: $KOJI_SKILLS is an unexported koji-detect assignment
+[ -s "$GATE_PROMPT_TEMPLATE" ] || { echo "FATAL: gate prompt template missing at $GATE_PROMPT_TEMPLATE" >&2; exit 1; }
 B_RETRIED=0
 case "$(cat "$REC" 2>/dev/null)" in
   claude+codex-confirm)
@@ -219,6 +225,12 @@ case "$(cat "$REC" 2>/dev/null)" in
     # attempt. Every leg reads this file; the backend never changes the prompt.
     # printf is a builtin (no argv ceiling — a gate diff can exceed ARG_MAX).
     printf '%s\n' "$GATE_PROMPT" > "$PROMPT_TXT"
+    # Guard at the WRITE site, so every leg is covered. The codex leg re-checks
+    # in its own fresh shell, but the Claude leg has no such check: an unfilled
+    # $GATE_PROMPT writes a lone newline, the reviewer is handed an empty prompt,
+    # honestly answers `[]`, koji-duet-findings-check accepts `[]`, and the gate
+    # passes clean — a false PASS on the leg the codex-side guard never sees.
+    grep -q '[^[:space:]]' "$PROMPT_TXT" || { echo "FATAL: gate prompt is empty — \$GATE_PROMPT was not filled; not dispatching a review of nothing on any leg" >&2; exit 1; }
     # The run's setup file is authoritative; a missing file is lost run state (exit 3), never "codex".
     LEG=$(~/.claude/skills/koji/bin/koji-duet-backend impl-gate "$RUN_DIR/duet-setup") || exit 1   # codex | claude | both
     printf '%s\n' "$LEG" > "$REC" ;;
@@ -231,22 +243,45 @@ echo "Gate $gate_name attempt $((attempt+1)): leg = $LEG"
 #### 2c — codex leg (`LEG=codex`, a `both` half, or the confirm step)
 
 ```bash
-TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
-# Fresh shell: effort from the run's setup file, never a Step 1 variable.
-EFFORT=$(~/.claude/skills/koji/bin/koji-duet-setup field "$(head -n1 "$RUN_DIR/duet-setup")" 2) || exit 1
+# Fresh shell: these come from earlier blocks and are EMPTY here unless the
+# agent re-substitutes them. Unset, they do not fail — they build a prompt with
+# a hole in it, or write output to the wrong path, and the reviewer's honest
+# answer to the wrong question then classifies as a clean pass.
+: "${RUN_DIR:?RUN_DIR unset — re-substitute it in this block}"
+: "${PROJECT_ROOT:?PROJECT_ROOT unset — koji-detect assigns, never exports; re-source it in this block}"
+: "${RAW:?RAW unset — re-substitute it in this block}"
+# Fresh shell: effort from the run's setup file, never a Step 1 variable — and
+# the same is true of TIMEOUT, which Step 1 set in a different shell.
+EFFORT=$(~/.claude/skills/koji/bin/koji-duet-setup field "$(head -n1 "$RUN_DIR/duet-setup")" 2) \
+  || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$RAW.exit" 79 "cannot read the run's duet setup — effort unresolved"
+case "$EFFORT" in high) TIMEOUT=900 ;; *) TIMEOUT=1800 ;; esac   # derived, not re-defaulted: an unexported TIMEOUT=900 does not cross a shell boundary
+# $PROMPT_TXT is written back in 2b and REUSED verbatim by a resumed
+# claude+codex-confirm attempt, so this block validates the file, never the
+# variable that built it. `-s` is true for a one-byte file, so a prompt that was
+# never filled — a lone newline — would pass it; require actual content. Failing
+# here rather than downstream matters: a preparation failure that reaches
+# collection classifies as ERROR and substitutes a Claude reviewer with the SAME
+# empty prompt, whose honest `[]` then passes the gate.
+: "${PROMPT_TXT:?PROMPT_TXT unset — re-substitute it in this block}"
+# Record the terminal code BEFORE failing. A bare `exit` here writes no .exit
+# file, and a missing .exit classifies as ERROR — which substitutes a Claude
+# reviewer on this same empty prompt, the exact outcome this guard forbids.
+grep -q '[^[:space:]]' "$PROMPT_TXT" 2>/dev/null \
+  || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$RAW.exit" 79 "gate prompt missing or empty — not dispatching a review of nothing, and not substituting either"
 
-# Prompt file → codex stdin (`-`). A regular-file redirect EOFs immediately, so
-# codex never blocks on stdin. `-` must be the ONLY positional.
-if [ -n "$TO" ]; then
-  "$TO" "$TIMEOUT" codex exec - \
-    -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" \
-    < "$PROMPT_TXT" > "$RAW" 2> "$RAW.err"
-else
-  codex exec - -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" < "$PROMPT_TXT" > "$RAW" 2> "$RAW.err"
+# Prompt file → koji-codex-exec on stdin. It owns the `-` positional,
+# `-s read-only`, `-C` and the effort flag, and hands codex a regular file, so
+# stdin EOFs immediately and codex never blocks on it.
+~/.claude/skills/koji/bin/koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" \
+  < "$PROMPT_TXT" > "$RAW" 2> "$RAW.err"
+CE=$?; echo "$CE" > "$RAW.exit"
+# Exit 78 is a harness mismatch, NOT a reviewer failure: stop the run, report
+# missing coverage, and do not substitute a Claude reviewer. An `if` block, not
+# `[ ... ] && ...`: as the last command of the block the && form returns 1 on a
+# SUCCESSFUL review, so the harness would report every good dispatch as failed.
+if [ "$CE" = "78" ]; then
+  echo "FATAL: codex harness mismatch — stop the run, do not classify, do not substitute" >&2
 fi
-echo $? > "$RAW.exit"
 ```
 
 Run this Bash block with **`run_in_background: true`**. Tell the user: *"Gate '$gate_name' attempt $((attempt+1)): codex reviewing in the background."* Then return control. When the notification arrives, **classify into a temp file and publish only a validated array**:
@@ -254,6 +289,18 @@ Run this Bash block with **`run_in_background: true`**. Tell the user: *"Gate '$
 ```bash
 SLOT="$FINDINGS"; [ "$(cat "$REC")" = "both" ] && SLOT="$B_SLOT"
 rm -f "$SLOT.tmp"
+# 78 is a harness mismatch, not a reviewer state. It must be caught BEFORE the
+# classifier, which would call it ERROR and route it into Claude substitution —
+# the one substitution that is never valid, because under codex the substitute
+# is Reviewer A. Stop the run instead.
+# A MISSING status file is terminal too, not ERROR: the dispatch block died
+# before recording anything, and koji-codex-classify defaults a missing file to
+# 1 — which is the substitution path. No status means no review happened.
+[ -f "$RAW.exit" ] || { echo "FATAL: the dispatch block never recorded a status — it did not run to completion. Fix the block; do not substitute." >&2; exit 79; }
+case "$(cat "$RAW.exit" 2>/dev/null)" in
+  78) echo "FATAL: codex harness mismatch — no outside review happened. Stop the run; do not substitute." >&2; exit 78 ;;
+  79) echo "FATAL: the dispatch block was malformed (bad timeout/effort/root/prompt) — no call was made. Fix the block; do not substitute." >&2; exit 79 ;;
+esac
 STATE=$(~/.claude/skills/koji/bin/koji-codex-classify "$RAW" "$RAW.err" "$RAW.exit" --json-out "$SLOT.tmp")
 case "$STATE" in
   OK) if ~/.claude/skills/koji/bin/koji-duet-findings-check "$SLOT.tmp"; then mv "$SLOT.tmp" "$SLOT"; else rm -f "$SLOT.tmp"; STATE=MALFORMED; fi ;;

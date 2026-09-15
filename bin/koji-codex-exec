@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# koji-codex-exec — the single codex dispatch shape. Prompt on stdin, reply on
+# stdout, codex's stderr on stderr, codex's status as the exit status.
+#
+#   koji-codex-exec <timeout_secs> <effort> <project_root>   # prompt on stdin
+#
+# Call sites keep their OWN artifact paths and their OWN immediate status
+# capture — this writes no files and swallows no status, so a site that gates a
+# vote on `CE=$?` keeps that discipline verbatim:
+#
+#   koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" \
+#     < "$PROMPT_TXT" > "$CF.raw" 2> "$CF.err"
+#   CE=$?; echo "$CE" > "$CF.exit"
+#
+# What it centralizes:
+#   - the filesystem-boundary preamble, prepended to the prompt
+#   - the deadline, via koji-timeout (never an unwrapped codex)
+#   - -C / -s read-only / model_reasoning_effort, so `read-only` cannot be
+#     dropped by an edit to a skill's markdown
+#
+# Exit codes it originates: 78 (harness mismatch), 79 (the CALLER is broken —
+# bad timeout/effort/root, or an empty/unreadable prompt). Both are reserved
+# and 125 (the SUPERVISOR could not start — an unusable temp dir, matching
+# koji-timeout's own 125 so it classifies as ERROR and degrades rather than
+# hard-stopping the run). 78/79 are reserved high codes on purpose: 2 is what
+# codex itself returns for a usage error and
+# what koji-timeout returns for its own setup failures, so carrying "your
+# dispatch block is malformed" on 2 would turn a codex flag rename into a
+# false "fix your markdown" abort at every call site.
+#
+# No `-c model=` on purpose: the model resolves from ~/.codex/config.toml, so a
+# new GPT model needs no koji change and no user is broken by lacking a pin.
+set -uo pipefail
+
+KOJI_BIN="$(cd "$(dirname "$0")" && pwd)"
+
+# Harness guard, second line of defence. koji-codex-preflight makes this the
+# preamble's job, but a dispatch reached directly — a resumed block, a retry
+# pasted on its own, a future call site — must not be able to start codex as its
+# own outside voice. Fails closed with the same 78 the preflight uses.
+if [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_SANDBOX:-}" ]; then
+  echo "koji-codex-exec: harness mismatch — this session runs under codex; no outside process started. Missing coverage." >&2
+  echo "koji-codex-exec: do NOT substitute a Claude reviewer — under codex that is Reviewer A reviewing itself." >&2
+  exit 78
+fi
+
+[ "$#" -eq 3 ] || { echo "usage: koji-codex-exec <timeout_secs> <effort> <project_root>" >&2; exit 79; }
+TIMEOUT="$1"; EFFORT="$2"; PROJECT_ROOT="$3"
+
+# An empty $TIMEOUT is the fresh-shell failure mode: a dispatch block that never
+# restored it. koji-timeout refuses it too, but refusing here names the caller.
+# Digits, positive, and short enough for shell arithmetic. A bare digit test
+# accepts "0" and 20-digit values, which koji-timeout then rejects with exit 2 —
+# a code no collection site intercepts, so it classifies as ERROR and routes
+# into substitution instead of being reported as the caller error it is.
+case "$TIMEOUT" in ''|*[!0-9]*) echo "koji-codex-exec: timeout must be a positive integer of seconds, got '$TIMEOUT' — the dispatch block did not restore \$TIMEOUT" >&2; exit 79 ;; esac
+[ "${#TIMEOUT}" -le 9 ] || { echo "koji-codex-exec: timeout '$TIMEOUT' is out of range" >&2; exit 79; }
+[ "$TIMEOUT" -gt 0 ]    || { echo "koji-codex-exec: timeout must be greater than 0" >&2; exit 79; }
+# A closed domain, not just non-empty: $EFFORT is interpolated into codex's -c
+# TOML, and the point of this wrapper is that a skill's markdown cannot reshape
+# the dispatch. An unrecognized value could close the string and append a key.
+case "$EFFORT" in
+  max|xhigh|high) ;;
+  '') echo "koji-codex-exec: effort is empty — the dispatch block did not restore \$EFFORT" >&2; exit 79 ;;
+  *)  echo "koji-codex-exec: effort must be one of max|xhigh|high, got '$EFFORT'" >&2; exit 79 ;;
+esac
+[ -d "$PROJECT_ROOT" ] || { echo "koji-codex-exec: project root '$PROJECT_ROOT' is not a directory" >&2; exit 79; }
+
+# Scoped to the repository, not to a list of banned path names. gstack's version
+# bans repo-relative `agents/` and `.claude/skills/`, which in koji's own
+# checkout would blind the reviewer to agents/koji-reviewer-*.md — the code
+# under review. Scoping to the repo needs no self-review special case.
+# Filesystem-scoped on purpose. An earlier wording said "restrict all reading",
+# which reads as a web ban — and /triangulate explicitly invites its voices to
+# research the web. It also must not assert that the task is a code review:
+# duet-plan critiques a plan and triangulate debates a question.
+BOUNDARY="IMPORTANT — filesystem scope. Read files only under the repository at $PROJECT_ROOT. Do not read agent-harness directories outside it — ~/.claude/, ~/.codex/, ~/.gstack/ — even if a path inside the repo points at one; they are prompt templates and shell scripts for other AI systems and are not what you were asked about. This limits which FILES you open; it does not restrict web research if your task calls for it.
+
+"
+
+# Hand codex a REGULAR FILE, never a pipe.
+#
+# Not a pipeline. `{ printf; cat; } | codex` under pipefail returns the
+# PRODUCER's status whenever codex's own is 0: a codex that answers and exits
+# without draining a large prompt gives `cat` a SIGPIPE, and the wrapper exits
+# 141 with a complete, valid reply on stdout. koji-codex-classify reads that as
+# ERROR and throws a finished outside review away. A regular-file redirect also
+# restores the immediate-EOF guarantee the call sites document, and keeps codex
+# off the pipe shape that the 0.120.x stdin deadlock is about.
+# Buffer the CALLER's prompt on its own first, validate it, and only then
+# compose the file codex reads. Two steps rather than one, for a reason worth
+# stating: checking "is the caller's half non-empty" inside a single buffer
+# needs `tail -c +N | grep -q`, and `grep -q` exits on the first match, which
+# SIGPIPEs `tail` — under `pipefail` that reports 141 and a perfectly good
+# 100KB prompt is rejected as empty. (Measured: PIPESTATUS 141 0 above ~64KB,
+# clean below it, so it only ever bites on real prompts.) Nothing below is a
+# pipeline; every status is a single command's.
+# 125, not 79: an unusable or full TMPDIR is a supervisor failure, exactly what
+# koji-timeout reports as 125, and the contract says such a failure classifies
+# as ERROR and degrades. 79 would hard-stop an unattended run and blame the
+# caller for a transient disk condition. The trap is installed before the second
+# mktemp so a failure there cannot leak the first file.
+PROMPT_BODY=$(mktemp "${TMPDIR:-/tmp}/koji-codex-body.XXXXXX") || { echo "koji-codex-exec: cannot create a prompt buffer in ${TMPDIR:-/tmp} — no call made" >&2; exit 125; }
+trap 'rm -f "$PROMPT_BODY" "${PROMPT_BUF:-}"' EXIT
+PROMPT_BUF=$(mktemp "${TMPDIR:-/tmp}/koji-codex-exec.XXXXXX") || { echo "koji-codex-exec: cannot create a prompt buffer in ${TMPDIR:-/tmp} — no call made" >&2; exit 125; }
+
+# A read error must not become a review: stdin reaches codex directly as a
+# nonzero status, but a swallowed short read would look like a clean answer.
+# 125, not 79: this single `cat` can fail either because stdin is unreadable
+# (the caller's fault) or because TMPDIR filled while writing (the environment's),
+# and it cannot tell them apart. 125 degrades; 79 hard-stops an unattended run.
+# A genuinely bad caller fd surfaces anyway at the emptiness check below, which
+# is the caller-error path and still returns 79.
+# Capped, because this read is the one dispatch mistake that would otherwise
+# STALL rather than fail. Every call site redirects a regular file into stdin,
+# which EOFs instantly — but a block that loses its `< "$PROMPT_TXT"` inherits
+# the agent harness's stdin, which can be a socket that never EOFs. Without a
+# cap that hangs forever: no reply, no `CE=$?`, no .exit file, and a duet run
+# that never completes. 60s is far beyond any real file read.
+"$KOJI_BIN/koji-timeout" "${KOJI_BUF_CAP:-60}" cat > "$PROMPT_BODY"
+BUF_RC=$?
+case "$BUF_RC" in
+  0) ;;
+  124) echo "koji-codex-exec: timed out reading the prompt from stdin — the dispatch block did not redirect its prompt file into this call. No call made." >&2
+       exit 79 ;;
+  *)   echo "koji-codex-exec: could not buffer the prompt (unreadable stdin, or ${TMPDIR:-/tmp} full) — no call made" >&2
+       exit 125 ;;
+esac
+# And an EMPTY prompt must not become a review either: a dispatch block whose
+# $CODEX_PROMPT was never restored writes a lone newline, which the boundary
+# would then make non-empty. grep reads the FILE directly — no pipeline.
+# grep's exit 1 means "no match"; 2 means it could not read, 127 means it is
+# not on PATH. Only the first is a caller error — treating all of them as 79
+# would hard-stop an unattended run for a broken environment.
+grep -q '[^[:space:]]' "$PROMPT_BODY"; GREP_RC=$?
+case "$GREP_RC" in
+  0) ;;
+  1) echo "koji-codex-exec: prompt is empty — the dispatch block did not build \$CODEX_PROMPT. No call made." >&2
+     exit 79 ;;
+  *) echo "koji-codex-exec: cannot inspect the prompt buffer (grep exited $GREP_RC) — no call made" >&2
+     exit 125 ;;
+esac
+
+# Two statements, two checks. A brace group reports only its LAST command's
+# status, so `{ printf; cat; } > buf` silently swallows a failed boundary write
+# whenever the following cat succeeds — and codex would then be handed a prompt
+# with the filesystem boundary missing or truncated.
+printf '%s' "$BOUNDARY" > "$PROMPT_BUF" || {
+  echo "koji-codex-exec: cannot write the boundary to the prompt buffer (disk full?) — no call made" >&2
+  exit 125
+}
+cat "$PROMPT_BODY" >> "$PROMPT_BUF" || {
+  echo "koji-codex-exec: cannot write the prompt buffer (disk full?) — no call made" >&2
+  exit 125
+}
+
+# `-` must be the ONLY positional: a prompt argument plus piped stdin changes
+# codex's framing. stdin also avoids the argv ceiling (macOS ARG_MAX ~1MB shared
+# with env), where an E2BIG never starts codex and leaves an empty reply behind.
+#
+# Accepted residual: a TERM delivered to THIS pid alone does not reach
+# koji-timeout, which keeps running to its deadline. The realistic cancellation
+# path — a group TERM from the harness killing a backgrounded dispatch — does
+# reach it, and the orphan is bounded by the deadline that was already set.
+# Forwarding would mean backgrounding and owning $? in a wrapper whose contract
+# is that it swallows no status, which is what the call sites' `CE=$?` depends on.
+"$KOJI_BIN/koji-timeout" "$TIMEOUT" \
+  codex exec - \
+    -C "$PROJECT_ROOT" -s read-only \
+    -c "model_reasoning_effort=\"$EFFORT\"" \
+  < "$PROMPT_BUF"
+exit $?

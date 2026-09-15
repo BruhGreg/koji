@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# koji-codex-preflight — run once, in a codex-calling skill's preamble, before
+# any dispatch. Two checks:
+#
+#   1. Harness guard (fail-closed, exit 78). koji's premise is that codex is an
+#      OUTSIDE voice — a different model family from the Claude reviewer. If
+#      this session is itself running under codex, that premise is false and a
+#      codex review is the same model grading itself. There is no escape hatch
+#      on purpose: it is koji's own "two placeholders must never synthesize into
+#      a PASS" rule applied one level up.
+#
+#   2. Known-bad CLI warning (non-blocking). codex-cli 0.120.0-0.120.2 have
+#      stdin deadlock bugs, and stdin is exactly how koji feeds prompts.
+#
+# Lives in the preamble, not in the exec wrapper, for two reasons. The wrapper's
+# stderr is the run's .err file, which a successful collection never displays —
+# a warning written there is invisible. And an exit 78 from the wrapper would
+# need handling at eight logical dispatch sites, two of which have no classifier
+# at all. The preamble is one site per skill and prints to the console.
+#
+#   koji-codex-preflight        — exit 0 (with warnings on stderr), or 78
+#
+# Exit 78 must STOP THE RUN, not just the block: a failed background Bash block
+# does not halt the agent. Each skill's prose carries that instruction.
+set -uo pipefail
+
+# --- 1. Harness guard ---------------------------------------------------------
+# Environment variables, so they survive the fresh-shell boundary that a
+# koji-detect assignment would not.
+if [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_SANDBOX:-}" ]; then
+  echo "koji: harness mismatch — this session runs under codex; codex cannot be the outside voice." >&2
+  echo "koji: no outside process started. Missing coverage." >&2
+  echo "koji: do NOT substitute a Claude reviewer — under codex that is Reviewer A reviewing itself." >&2
+  exit 78
+fi
+
+# --- 2. Known-bad CLI warning -------------------------------------------------
+if ! command -v codex >/dev/null 2>&1; then
+  echo "koji: codex not on PATH — codex-backed reviews will fail to start." >&2
+  exit 0
+fi
+
+# Capture the status from codex, NOT from a pipeline: a pipeline reports the
+# LAST command's status, which is how a CLI that only printed a spawn error once
+# read as healthy. Keep stderr — it carries the diagnosis.
+# Through koji-timeout, with stdin detached. This check exists BECAUSE of a
+# stdin deadlock in codex-cli 0.120.0-0.120.2, so on exactly the builds it
+# targets an unwrapped call could hang the preamble before the warning prints.
+KOJI_BIN="$(cd "$(dirname "$0")" && pwd)"
+VER_OUT=$("$KOJI_BIN/koji-timeout" 20 codex --version 2>&1 </dev/null); VER_CODE=$?
+
+if [ "$VER_CODE" -ne 0 ]; then
+  echo "koji: \`codex --version\` failed (exit $VER_CODE) — the CLI is on PATH but may not be runnable." >&2
+  [ -n "$VER_OUT" ] && echo "koji: it said: $(printf '%s' "$VER_OUT" | head -1)" >&2
+  exit 0
+fi
+
+# Search the WHOLE captured output for a version token rather than taking
+# `head -1`. A sandboxed codex prints a PATH-alias warning on stderr first, so
+# the merged-then-truncated parse reads the warning and misses the version.
+VER=$(printf '%s' "$VER_OUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*' | head -1)
+[ -n "$VER" ] || exit 0
+
+# Anchored so 0.120.10 and 0.120.20 do not match; 0.120.2-beta does, because it
+# IS the buggy release. Update this list when a new version regresses.
+if printf '%s' "$VER" | grep -Eq '(^|[^0-9.])0\.120\.(0|1|2)([^0-9.]|$)'; then
+  echo "koji: codex-cli $VER has known stdin deadlock bugs, and koji feeds prompts on stdin." >&2
+  echo "koji: run \`npm install -g @openai/codex@latest\`." >&2
+fi
+exit 0

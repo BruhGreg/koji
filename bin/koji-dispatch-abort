@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# koji-dispatch-abort <exit-file> <code> <message...>
+#
+# A dispatch block that aborts BEFORE codex runs must still record a terminal
+# status where the collection site looks for it. Otherwise the block exits, no
+# .exit file is written, and `koji-codex-classify` — which defaults a missing
+# exit file to 1 — reports ERROR. ERROR at a non-final review means "substitute
+# a fresh-context Claude reviewer", so a guard whose whole purpose is to say
+# "do not substitute" ends up causing exactly that, usually handing the
+# substitute the same broken prompt that tripped the guard.
+#
+# So: write the code first, then fail. Callers MUST invoke it with `exec`:
+#
+#   grep -q '[^[:space:]]' "$PROMPT_TXT" \
+#     || exec koji-dispatch-abort "$RAW.exit" 79 "gate prompt is empty — not dispatching a review of nothing"
+#
+# `exec` is load-bearing, not style. This is a separate process, so its `exit`
+# ends IT, not the block that called it — and these markdown blocks carry no
+# `set -e`. Without `exec` the guard prints, records the code, and then falls
+# straight through to the dispatch it exists to prevent, where `CE=$?` promptly
+# overwrites the recorded status with codex's own. `exec` replaces the block's
+# shell with this process, so the exit below becomes the block's exit and
+# nothing after the guard can run. tests/cases/dispatch-abort.sh pins it.
+#
+# The one case it cannot cover is an unset path variable ($RUN_DIR, $RAW): there
+# is nowhere to record. Those guards stay bare `:?` assertions and surface as a
+# failed block, which is visible to the agent immediately.
+set -u
+
+EXITFILE="${1:?usage: koji-dispatch-abort <exit-file> <code> <message...>}"
+CODE="${2:?usage: koji-dispatch-abort <exit-file> <code> <message...>}"
+shift 2
+
+case "$CODE" in ''|*[!0-9]*) echo "koji-dispatch-abort: code must be numeric, got '$CODE'" >&2; exit 79 ;; esac
+# 1-255, because `exit` truncates mod 256: a code of 256 would exit 0 and a
+# guard whose entire job is to fail terminally would report success, while the
+# exit FILE still read 256. Rejecting 0 for the same reason.
+[ "${#CODE}" -le 3 ] && [ "$CODE" -ge 1 ] && [ "$CODE" -le 255 ] || {
+  echo "koji-dispatch-abort: code must be 1-255, got '$CODE'" >&2; exit 79; }
+
+# Best-effort: if even this cannot be written the block still fails loudly, and
+# the collection site's missing-file branch is what catches it.
+printf '%s\n' "$CODE" > "$EXITFILE" 2>/dev/null || \
+  echo "koji-dispatch-abort: could not record status $CODE to $EXITFILE" >&2
+
+echo "FATAL: $*" >&2
+exit "$CODE"

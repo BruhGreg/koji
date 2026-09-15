@@ -25,10 +25,16 @@ Two-reviewer adversarial code review. **Reviewer A** is Claude (Agent subagent, 
 
 ```bash
 source <(~/.claude/skills/koji/bin/koji-detect)
+# Codex preflight: refuses to run when THIS session is itself under codex (an
+# outside voice cannot be the same model), and warns on a known-bad CLI.
+# Exit 78 = harness mismatch. It must STOP THE RUN, not just this block.
+~/.claude/skills/koji/bin/koji-codex-preflight || exit $?
 echo "=== koji duet-review ==="
 echo "Project: $PROJECT_NAME"
 echo "Session: $SESSION_DIR"
 ```
+
+**If the preamble exits 78 — harness mismatch.** (The `claude` strategy dispatches no codex at all; if the user has already asked for it in the invocation phrase, skip the preflight — `koji-codex-exec` still fails closed at any dispatch that does happen.) This session is running under codex, so codex cannot be the outside voice. Stop the run and report *"codex outside review unavailable: harness mismatch; no outside process started. Missing coverage."* **Never substitute a fresh-context Claude reviewer for it** — the quota-substitution rule does not apply here. Under codex that substitution makes Reviewer A review itself, which is exactly the two-placeholders-into-a-PASS failure koji forbids. A failed Bash block does not halt the agent; stopping is your job.
 
 ## Arguments
 
@@ -161,12 +167,21 @@ Mode wiring: `single` → run 2b (single pass) + the single-mode half of 2d, and
 #### 2a — codex leg (`REVIEWER_B=codex`)
 
 ```bash
+# Fresh shell: these come from earlier blocks and are EMPTY here unless the
+# agent re-substitutes them. Unset, they do not fail — they build a prompt with
+# a hole in it, or write output to the wrong path, and the reviewer's honest
+# answer to the wrong question then classifies as a clean pass.
+: "${RUN_DIR:?RUN_DIR unset — re-substitute it in this block}"
+: "${PROJECT_ROOT:?PROJECT_ROOT unset — koji-detect assigns, never exports; re-source it in this block}"
 # Codex effort from the run's setup file (fresh shell — never a Step 1 variable).
-# TIMEOUT=900 may be set BEFORE this block when the effort is `high`.
 EFFORT=$(~/.claude/skills/koji/bin/koji-duet-setup field "$(head -n1 "$RUN_DIR/duet-setup")" 2) || exit 1
-TIMEOUT="${TIMEOUT:-1800}"
-TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
-PROMPT_FILE="$KOJI_SKILLS/duet-review/references/reviewer-prompt.md"
+case "$EFFORT" in high) TIMEOUT=900 ;; *) TIMEOUT=1800 ;; esac   # derived, not re-defaulted: an unexported TIMEOUT=900 does not cross a shell boundary
+# Literal path, not "$KOJI_SKILLS/...": koji-detect emits an unexported
+# assignment, so in this fresh shell the variable is empty and the path becomes
+# /duet-review/references/... The failed `cat` is silent, and the prompt still
+# builds — just without the reviewer criteria or the findings schema.
+PROMPT_FILE=~/.claude/skills/koji/duet-review/references/reviewer-prompt.md
+[ -s "$PROMPT_FILE" ] || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$RUN_DIR/codex.exit" 79 "reviewer prompt template missing at $PROMPT_FILE"
 
 # Compose prompt inline (the prompt + diff together), write it to a file, and let
 # codex read it from stdin (`-`). A large diff can exceed the argv ceiling (macOS
@@ -175,6 +190,11 @@ PROMPT_FILE="$KOJI_SKILLS/duet-review/references/reviewer-prompt.md"
 # file write has no such limit. A redirect from a regular file EOFs immediately,
 # preserving the old `< /dev/null` guarantee that codex never blocks on stdin.
 # `-` must be the ONLY positional: a prompt arg plus piped stdin changes framing.
+# A review of nothing must never be dispatched. $DIFF_FILE unset makes `cat`
+# fail while the rest of the prompt still builds, so codex is asked to review an
+# empty diff and honestly answers `[]` — which classifies as OK and passes.
+: "${DIFF_FILE:?DIFF_FILE unset — re-substitute it in this block}"
+[ -s "$DIFF_FILE" ] || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$RUN_DIR/codex.exit" 79 "diff file missing or empty — not dispatching a review of nothing"
 CODEX_PROMPT="$(cat "$PROMPT_FILE")
 
 ---
@@ -186,18 +206,16 @@ $(cat "$DIFF_FILE")"
 PROMPT_TXT="$RUN_DIR/codex.prompt"
 printf '%s\n' "$CODEX_PROMPT" > "$PROMPT_TXT"
 
-if [ -n "$TO" ]; then
-  "$TO" "$TIMEOUT" codex exec - \
-    -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" \
-    < "$PROMPT_TXT" > "$RUN_DIR/codex.raw" 2> "$RUN_DIR/codex.err"
-else
-  codex exec - \
-    -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" \
-    < "$PROMPT_TXT" > "$RUN_DIR/codex.raw" 2> "$RUN_DIR/codex.err"
+~/.claude/skills/koji/bin/koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" \
+  < "$PROMPT_TXT" > "$RUN_DIR/codex.raw" 2> "$RUN_DIR/codex.err"
+CE=$?; echo "$CE" > "$RUN_DIR/codex.exit"
+# Exit 78 is a harness mismatch, NOT a reviewer failure: stop the run, report
+# missing coverage, and do not substitute a Claude reviewer. An `if` block, not
+# `[ ... ] && ...`: as the last command of the block the && form returns 1 on a
+# SUCCESSFUL review, so the harness would report every good dispatch as failed.
+if [ "$CE" = "78" ]; then
+  echo "FATAL: codex harness mismatch — stop the run, do not classify, do not substitute" >&2
 fi
-echo $? > "$RUN_DIR/codex.exit"
 ```
 
 Run this Bash block with **`run_in_background: true`**. The harness returns immediately with a task ID; you (the main agent) will be notified when the command completes. The output file path the harness gives you can also be polled if needed, but the notification is the primary signal.
@@ -284,6 +302,18 @@ Then **return control**. Do NOT poll, sleep, or proactively check on progress. T
 # on EMPTY, and a parseable-but-malformed array would otherwise sit in
 # codex.json where Step 3 reads it as a clean review.
 rm -f "$RUN_DIR/codex.json.tmp"
+# 78 is a harness mismatch, not a reviewer state. It must be caught BEFORE the
+# classifier, which would call it ERROR and route it into Claude substitution —
+# the one substitution that is never valid, because under codex the substitute
+# is Reviewer A. Stop the run instead.
+# A MISSING status file is terminal too, not ERROR: the dispatch block died
+# before recording anything, and koji-codex-classify defaults a missing file to
+# 1 — which is the substitution path. No status means no review happened.
+[ -f "$RUN_DIR/codex.exit" ] || { echo "FATAL: the dispatch block never recorded a status — it did not run to completion. Fix the block; do not substitute." >&2; exit 79; }
+case "$(cat "$RUN_DIR/codex.exit" 2>/dev/null)" in
+  78) echo "FATAL: codex harness mismatch — no outside review happened. Stop the run; do not substitute." >&2; exit 78 ;;
+  79) echo "FATAL: the dispatch block was malformed (bad timeout/effort/root/prompt) — no call was made. Fix the block; do not substitute." >&2; exit 79 ;;
+esac
 CODEX_STATE=$(~/.claude/skills/koji/bin/koji-codex-classify \
   "$RUN_DIR/codex.raw" "$RUN_DIR/codex.err" "$RUN_DIR/codex.exit" --json-out "$RUN_DIR/codex.json.tmp")
 case "$CODEX_STATE" in
@@ -304,7 +334,7 @@ Branch on `$CODEX_STATE` (per-run loop-state `CODEX_WAITS`, default `0`) — **c
 - **`OK`** → `codex.json` written and validated; proceed.
 - **`MALFORMED`** (no array, or the array failed `~/.claude/skills/koji/bin/koji-duet-findings-check`) → when `B_RETRIED=0`, set `B_RETRIED=1` and re-dispatch the 2a codex leg once with *"Your last response was not a JSON array of the requested shape — re-output ONLY the array, `[]` if none."* appended to the prompt; a second failure → treat as `ERROR` below.
 - **`TIMEOUT` / `ERROR`** → Reviewer B did not review. `WARN: codex $CODEX_STATE — Reviewer B unavailable; this review runs Claude-only (degraded)`; set `CODEX_UNAVAILABLE=1`; write `echo "[]" > "$RUN_DIR/codex.json"` as the degraded-run placeholder (not a finding count — the Step 6 banner declares it); proceed. A codex start failure at the final review must never read as a two-reviewer PASS.
-- **`QUOTA`** → do **not** treat as findings. If `CODEX_WAITS < QUOTA_MAX_WAITS`: tell the user *"codex quota/rate-limit — backing off ${QUOTA_BACKOFF}s, retry $((CODEX_WAITS+1))/${QUOTA_MAX_WAITS}"*, dispatch a backgrounded `sleep "$QUOTA_BACKOFF"; <the Step 2a codex exec …>` reading the **same `$PROMPT_TXT` already on disk** — an identical retry, no prompt rebuild (`run_in_background: true`), increment `CODEX_WAITS`, return control; re-classify on notification. If the cap is reached: `echo "WARN: codex unavailable (quota) after $QUOTA_MAX_WAITS back-offs — this review ran Claude-only (degraded, NOT a true duet)"`, set `CODEX_UNAVAILABLE=1`, write `echo "[]" > "$RUN_DIR/codex.json"`, and proceed. The degraded state surfaces in the Step 6 header so it is never a silent pass.
+- **`QUOTA`** → do **not** treat as findings. If `CODEX_WAITS < QUOTA_MAX_WAITS`: tell the user *"codex quota/rate-limit — backing off ${QUOTA_BACKOFF}s, retry $((CODEX_WAITS+1))/${QUOTA_MAX_WAITS}"*, dispatch a backgrounded `sleep "$QUOTA_BACKOFF"; <the Step 2a koji-codex-exec block …>` reading the **same `$PROMPT_TXT` already on disk** — an identical retry, no prompt rebuild (`run_in_background: true`), increment `CODEX_WAITS`, return control; re-classify on notification. If the cap is reached: `echo "WARN: codex unavailable (quota) after $QUOTA_MAX_WAITS back-offs — this review ran Claude-only (degraded, NOT a true duet)"`, set `CODEX_UNAVAILABLE=1`, write `echo "[]" > "$RUN_DIR/codex.json"`, and proceed. The degraded state surfaces in the Step 6 header so it is never a silent pass.
 
 ```bash
 echo "codex.json:  $(wc -c < "$RUN_DIR/codex.json") bytes"
@@ -453,6 +483,22 @@ Both cross legs keep the A/B boundary: Reviewer B assesses only Reviewer A's sol
 **Reviewer B cross-review — codex leg (`REVIEWER_B=codex`; Bash, background)** — codex reads `$RUN_DIR/codex-cross-targets.json` (Reviewer A's solo findings) and emits a JSON array of `{fingerprint, verdict, rationale}`:
 
 ```bash
+# Fresh shell: these come from earlier blocks and are EMPTY here unless the
+# agent re-substitutes them. Unset, they do not fail — they build a prompt with
+# a hole in it, or write output to the wrong path, and the reviewer's honest
+# answer to the wrong question then classifies as a clean pass.
+: "${RUN_DIR:?RUN_DIR unset — re-substitute it in this block}"
+: "${PROJECT_ROOT:?PROJECT_ROOT unset — koji-detect assigns, never exports; re-source it in this block}"
+# A review of nothing must never be dispatched. $DIFF_FILE unset makes `cat`
+# fail while the rest of the prompt still builds, so codex is asked to review an
+# empty diff and honestly answers `[]` — which classifies as OK and passes.
+: "${DIFF_FILE:?DIFF_FILE unset — re-substitute it in this block}"
+[ -s "$DIFF_FILE" ] || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$RUN_DIR/codex.cross.exit" 79 "diff file missing or empty — not dispatching a cross-review of nothing"
+# The targets ARE the review material here. Missing or empty still builds a
+# non-empty prompt, so the wrapper would not refuse it: codex would assess an
+# empty list, honestly return `[]`, and the cross-review would be recorded as
+# done having assessed nothing.
+[ -s "$RUN_DIR/codex-cross-targets.json" ] || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$RUN_DIR/codex.cross.exit" 79 "cross-review targets missing or empty — not dispatching a cross-review of nothing"
 CROSS_PROMPT="You are Reviewer B. Reviewer A — a separate reviewer — flagged the following findings on this diff that you did not catch in your first-pass review. For each, return your assessment using these severity-aware labels:
 
   AGREE-HIGH     | yes, ship-blocking
@@ -472,18 +518,21 @@ Output STRICT JSON only — array of {\"fingerprint\": \"...\", \"verdict\": \"A
 CROSS_PROMPT_TXT="$RUN_DIR/codex.cross.prompt"
 printf '%s\n' "$CROSS_PROMPT" > "$CROSS_PROMPT_TXT"
 
-if [ -n "$TO" ]; then
-  "$TO" "$TIMEOUT" codex exec - \
-    -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" \
-    < "$CROSS_PROMPT_TXT" > "$RUN_DIR/codex.cross.raw" 2> "$RUN_DIR/codex.cross.err"
-else
-  codex exec - \
-    -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" \
-    < "$CROSS_PROMPT_TXT" > "$RUN_DIR/codex.cross.raw" 2> "$RUN_DIR/codex.cross.err"
+# Fresh shell: EFFORT and TIMEOUT were set in the Step 2a block, a DIFFERENT
+# shell, so they are empty here unless restored. Empty $TIMEOUT used to reach
+# the timeout binary as an invalid interval — exit 125 in ~20ms, which reads as
+# a reviewer error rather than a reviewer that never started.
+EFFORT=$(~/.claude/skills/koji/bin/koji-duet-setup field "$(head -n1 "$RUN_DIR/duet-setup")" 2) || exit 1
+case "$EFFORT" in high) TIMEOUT=900 ;; *) TIMEOUT=1800 ;; esac   # derived, not re-defaulted: an unexported TIMEOUT=900 does not cross a shell boundary
+
+~/.claude/skills/koji/bin/koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" \
+  < "$CROSS_PROMPT_TXT" > "$RUN_DIR/codex.cross.raw" 2> "$RUN_DIR/codex.cross.err"
+CE=$?; echo "$CE" > "$RUN_DIR/codex.cross.exit"
+# An `if`, not `[ ... ] && ...`: as the block's last command the && form returns
+# 1 on a SUCCESSFUL cross-review and 0 on a harness mismatch — exactly backwards.
+if [ "$CE" = "78" ]; then
+  echo "FATAL: codex harness mismatch — stop the run, do not classify, do not substitute" >&2
 fi
-echo $? > "$RUN_DIR/codex.cross.exit"
 ```
 
 Run with **`run_in_background: true`**.
@@ -509,6 +558,14 @@ followed by the **read-only clause** from `../references/reviewer-backend.md` (t
 When BOTH notifications arrive, extract JSON arrays, check each with `~/.claude/skills/koji/bin/koji-duet-findings-check --cross`, and write the ones that pass to `$RUN_DIR/codex.cross.json` and `$RUN_DIR/claude.cross.json` (a failed check is the 4d fallback for that side: `[]`). Compare `$RUN_DIR/claude.cross.fp` against a fresh `~/.claude/skills/koji/bin/koji-tree-fingerprint` and print the `⚠ working tree changed …` line on mismatch — the A cross reviewer holds Edit/Write like every other Claude leg. When `REVIEWER_B=codex`, use `koji-codex-classify` for the B cross leg (as in Step 2d): a `QUOTA` state backs off + retries up to `QUOTA_MAX_WAITS` before falling to the 4d safe-degrade — never read a quota reply as an empty cross-review. When `REVIEWER_B=claude`, extract the array from the B cross Agent's response directly — no classifier — and compare `codex.cross.fp` against a fresh `koji-tree-fingerprint` (same `⚠` line as 2d on mismatch). Then re-run the synthesizer with the new inputs:
 
 ```bash
+# The cross leg needs the SAME pre-classifier guard as 2a — it was the one
+# dispatch site without it, so a malformed cross dispatch (79) degraded to `[]`
+# and read as "Reviewer B had nothing to say about A's findings".
+[ -f "$RUN_DIR/codex.cross.exit" ] || { echo "FATAL: the cross dispatch block never recorded a status — it did not run to completion. Fix the block; do not degrade to []." >&2; exit 79; }
+case "$(cat "$RUN_DIR/codex.cross.exit" 2>/dev/null)" in
+  78) echo "FATAL: codex harness mismatch — no cross-review happened. Stop the run; do not substitute." >&2; exit 78 ;;
+  79) echo "FATAL: the cross dispatch block was malformed — no call was made. Fix the block; do not degrade to []." >&2; exit 79 ;;
+esac
 REVIEWER_B=$(~/.claude/skills/koji/bin/koji-duet-backend review-b "$RUN_DIR/duet-setup") || exit 1   # fresh shell: the run file, never a remembered var; exit 3 = run state lost
 ~/.claude/skills/koji/bin/koji-duet-synthesize \
   --claude "$RUN_DIR/claude.json" \

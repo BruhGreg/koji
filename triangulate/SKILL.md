@@ -33,9 +33,17 @@ Don't auto-invoke on generic "let's decide" / "help me think this through" — t
 
 ```bash
 source <(~/.claude/skills/koji/bin/koji-detect)
+# Codex preflight: refuses to run when THIS session is itself under codex (an
+# outside voice cannot be the same model), and warns on a known-bad CLI.
+# Exit 78 = harness mismatch. It must STOP THE RUN, not just this block.
+# NO_CODEX dispatches no outside process, so the harness guard does not apply to
+# it — running it there would make a documented Claude-only mode unreachable.
+[ "${NO_CODEX:-}" = "1" ] || ~/.claude/skills/koji/bin/koji-codex-preflight || exit $?
 echo "=== koji triangulate ==="
 echo "Project: $PROJECT_NAME"
 ```
+
+**If the preamble exits 78 — harness mismatch.** This session is running under codex, so codex cannot be the outside voice. Stop the run and report *"codex outside review unavailable: harness mismatch; no outside process started. Missing coverage."* **Never substitute a fresh-context Claude reviewer for it** — the quota-substitution rule does not apply here. Under codex that substitution makes Reviewer A review itself, which is exactly the two-placeholders-into-a-PASS failure koji forbids. A failed Bash block does not halt the agent; stopping is your job.
 
 If codex is not on PATH, warn and continue in Claude-only mode (degraded — true triangulation needs both AI voices):
 
@@ -88,7 +96,13 @@ ROUND=1
 EFFORT="${EFFORT:-xhigh}"
 TIMEOUT="${TIMEOUT:-1800}"
 ROUND_LIMIT="${ROUNDS:-1}"
-TO=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
+
+# Persist the RESOLVED pair. Each dispatch runs in a fresh shell, so re-applying
+# these defaults there would silently overwrite a lighter invocation — the
+# user's EFFORT=high TIMEOUT=900 would come back as xhigh/1800, raising effort
+# and doubling the deadline against their explicit choice. Saved once, restored
+# verbatim, exactly as duet-setup works for the duet skills.
+printf '%s|%s\n' "$EFFORT" "$TIMEOUT" > "$RUN_DIR/codex-settings"
 
 # Optional opposing stances
 STANCE_CLAUDE=""
@@ -189,6 +203,13 @@ fi
 Otherwise dispatch normally:
 
 ```bash
+# Fresh shell: these come from earlier blocks and are EMPTY here unless the
+# agent re-substitutes them. Unset, they do not fail — they build a prompt with
+# a hole in it, or write output to the wrong path, and the reviewer's honest
+# answer to the wrong question then classifies as a clean pass.
+: "${RUN_DIR:?RUN_DIR unset — re-substitute it in this block}"
+: "${PROJECT_ROOT:?PROJECT_ROOT unset — koji-detect assigns, never exports; re-source it in this block}"
+: "${QUESTION:?QUESTION unset — re-substitute it in this block}"
 ROUND=1
 CLAUDE_FILE="$RUN_DIR/round-${ROUND}-claude.md"
 CODEX_FILE="$RUN_DIR/round-${ROUND}-codex.md"
@@ -225,18 +246,27 @@ Output structure (markdown):
 ## What I would want the other voice to defend
 <one question or angle you would push the other voice on>"
 
-if [ -n "$TO" ]; then
-  "$TO" "$TIMEOUT" codex exec "$CODEX_PROMPT" \
-    -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" \
-    < /dev/null > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
-else
-  codex exec "$CODEX_PROMPT" \
-    -C "$PROJECT_ROOT" -s read-only \
-    -c "model_reasoning_effort=\"$EFFORT\"" \
-    < /dev/null > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
+# Fresh shell: restore the pair Step 1 resolved, never re-default it here.
+IFS='|' read -r EFFORT TIMEOUT < "$RUN_DIR/codex-settings" \
+  || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$CODEX_FILE.exit" 79 "cannot read the run's codex settings — effort/timeout unresolved"
+
+# Prompt to a file, then codex reads it from stdin (`-`). A prompt on argv can
+# exceed the argv ceiling (macOS ARG_MAX ~1MB shared with env); printf is a
+# builtin and has no such limit. A regular-file redirect EOFs immediately, so
+# codex never blocks on stdin. `-` must be the ONLY positional.
+PROMPT_TXT="$CODEX_FILE.prompt"
+printf '%s\n' "$CODEX_PROMPT" > "$PROMPT_TXT"
+
+~/.claude/skills/koji/bin/koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" \
+  < "$PROMPT_TXT" > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
+CE=$?; echo "$CE" > "$CODEX_FILE.exit"
+# Exit 78 is a harness mismatch, NOT a reviewer failure: stop the run, report
+# missing coverage, and do not substitute a Claude reviewer. An `if` block, not
+# `[ ... ] && ...`: as the last command of the block the && form returns 1 on a
+# SUCCESSFUL review, so the harness would report every good dispatch as failed.
+if [ "$CE" = "78" ]; then
+  echo "FATAL: codex harness mismatch — stop the run, do not classify, do not substitute" >&2
 fi
-echo $? > "$CODEX_FILE.exit"
 ```
 
 Run this Bash block with **`run_in_background: true`** (only when `NO_CODEX` is unset). The two background tasks (Claude and codex) run truly in parallel — no sequential dependency in round 1.
@@ -246,8 +276,26 @@ Run this Bash block with **`run_in_background: true`** (only when `NO_CODEX` is 
 When the codex notification arrives (or immediately, in `NO_CODEX` mode where the placeholder file was already written):
 
 ```bash
-CODEX_EXIT=$(cat "$CODEX_FILE.exit")
-if [ "$CODEX_EXIT" = "124" ]; then
+# 2>/dev/null plus an explicit empty branch: a dispatch block that died before
+# writing .exit would otherwise fall through to the "codex failed to respond"
+# placeholder and let Step 3 synthesize a one-voice debate.
+CODEX_EXIT=$(cat "$CODEX_FILE.exit" 2>/dev/null)
+if [ -z "$CODEX_EXIT" ]; then
+  echo "FATAL: the codex dispatch block never ran to completion — no status recorded. Fix the block; do not synthesize." >&2
+  exit 79
+fi
+if [ "$CODEX_EXIT" = "79" ]; then
+  # The dispatch block was malformed (bad timeout/effort/root/prompt). That is
+  # not a codex failure, so an "unavailable position" placeholder would send the
+  # run on to synthesize a one-voice debate. Fix the block instead.
+  echo "FATAL: the codex dispatch block was malformed — no call was made. Fix the block; do not synthesize." >&2
+  exit 79
+elif [ "$CODEX_EXIT" = "78" ]; then
+  # Harness mismatch: no outside voice exists here, so a one-voice debate is not
+  # a degraded debate, it is no debate. Stop rather than synthesize.
+  echo "FATAL: codex harness mismatch — no outside voice. Stop the run." >&2
+  exit 78
+elif [ "$CODEX_EXIT" = "124" ]; then
   echo "WARN: codex timed out. Treating as empty position."
   printf '## Position\n(codex timeout — no position available)\n' > "$CODEX_FILE"
 elif [ "$CODEX_EXIT" != "0" ]; then
