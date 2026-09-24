@@ -95,7 +95,7 @@ wrap:
   commit_gate: auto          # auto = 有的話跑 `npm run lint:check` | none | "<指令>"
 ```
 
-全域偏好設定（`commit_strategy` — `together` | `split` | `amend-if-same-session` —、`duet_setup` — 你上次選的 duet 設定 — 與 `auto_update`）放在 `~/.config/koji/config.yaml`。
+全域偏好設定（`commit_strategy` — `together` | `split` | `amend-if-same-session` —、`duet_setup` — 你上次選的 duet 設定 —、`auto_update`，以及 `session_instructions` — `/kick-off` 在整個工作階段都會遵循的文字，例如回覆風格）放在 `~/.config/koji/config.yaml`。用 `koji-config set <key> "<value>"` 設定。
 
 ## 重要功能
 

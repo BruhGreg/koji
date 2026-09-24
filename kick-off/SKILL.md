@@ -37,6 +37,10 @@ echo "Has handoff: $HAS_HANDOFF"
 echo "Has lessons: $HAS_LESSONS"
 echo "Has TODO: $HAS_TODO"
 
+# --- Standing session instructions (optional, user-level) ---
+SESSION_INSTRUCTIONS=$(~/.claude/skills/koji/bin/koji-config get session_instructions 2>/dev/null || true)
+if [ -n "$SESSION_INSTRUCTIONS" ]; then echo "Session instructions: $SESSION_INSTRUCTIONS"; fi
+
 # --- Detect gstack ---
 if [ -d "$HOME/.claude/skills/gstack" ] && [ -f "$HOME/.claude/skills/gstack/VERSION" ]; then
   GSTACK_VERSION=$(cat "$HOME/.claude/skills/gstack/VERSION" 2>/dev/null | tr -d '[:space:]')
@@ -49,6 +53,8 @@ fi
 ```
 
 If `HAS_SESSION_LOG` is `false` or `HAS_HANDOFF` is `false`, tell the user to run `/koji-init` first and stop.
+
+**Standing session instructions.** If the preamble printed a `Session instructions:` line, follow that text for the whole session, exactly as if the user had typed it as their first message. It is the user's own standing request, set once with `koji-config set session_instructions "<text>"`.
 
 ---
 

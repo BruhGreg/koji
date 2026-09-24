@@ -95,7 +95,7 @@ wrap:
   commit_gate: auto          # auto = `npm run lint:check` if present | none | "<command>"
 ```
 
-Global preferences (`commit_strategy` — `together` | `split` | `amend-if-same-session` —, `duet_setup` — the last duet setup you picked — and `auto_update`) live in `~/.config/koji/config.yaml`.
+Global preferences (`commit_strategy` — `together` | `split` | `amend-if-same-session` —, `duet_setup` — the last duet setup you picked —, `auto_update`, and `session_instructions` — text `/kick-off` follows for the whole session, such as a reply style) live in `~/.config/koji/config.yaml`. Set one with `koji-config set <key> "<value>"`.
 
 ## Notable features
 

@@ -532,7 +532,7 @@ Otherwise, if `$SETTINGS_ROOT/.claude/settings.local.json` exists (treat missing
    - Build/run commands: `npm run`, `npm install`, `npx`, `cargo`, `go build`, `go test`, `python`, `pytest`, `make`
    - File ops: `mkdir`, `chmod`, `ls`, `cat`, `wc`
    - Tool permissions: `Read`, `Edit`, `Write`, `Glob`, `Grep`
-   - koji scripts: `source <(~/.claude/skills/koji/*)`
+   - koji scripts: `source <(~/.claude/skills/koji/bin/<script>)`, one exact rule per script — e.g. `Bash(source <(~/.claude/skills/koji/bin/koji-detect))`. Never a `*` in the path: with a trailing `:*`, Claude Code reads it as literal text and the rule never matches.
 
    **Auto-skip** (never promote):
    - Absolute paths specific to this machine (e.g., `/Users/h.b./specific/file`)
