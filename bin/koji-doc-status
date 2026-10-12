@@ -245,15 +245,7 @@ compute_status() {
 list_loko_bullets() {
   local session="$DOCS_PATH/agent-session.md"
   [ -f "$session" ] || return 0
-  awk '
-    /^## Load on Kick-Off[[:space:]]*$/ { in_section=1; next }
-    in_section && /^## / { exit }
-    in_section && /^[[:space:]]*[-*][[:space:]]+/ {
-      line = $0
-      sub(/^[[:space:]]*[-*][[:space:]]+/, "", line)
-      print line
-    }
-  ' "$session"
+  list_loko_bullets_from_stdin < "$session"
 }
 
 # Extract `.md` paths from LOKO bullets on stdin. Skips URLs and non-.md lines.
@@ -408,11 +400,17 @@ commits_per_path() {
 # --- LOKO history (presence + session-mention age) ---
 
 # Extract LOKO bullet bodies from a piece of agent-session.md content piped on stdin.
+# A line that opens with "<!--" starts an HTML comment that hides every line up
+# to the one holding "-->", as markdown renders it: the section's template
+# comment shows example bullets that are not real ones. A comment after a
+# bullet's text keeps the bullet.
 list_loko_bullets_from_stdin() {
   awk '
     /^## Load on Kick-Off[[:space:]]*$/ { in_section=1; next }
-    in_section && /^## / { exit }
-    in_section && /^[[:space:]]*[-*][[:space:]]+/ {
+    !in_section { next }
+    in_comment || /^[[:space:]]*<!--/ { in_comment = ($0 !~ /-->/); next }
+    /^## / { exit }
+    /^[[:space:]]*[-*][[:space:]]+/ {
       line = $0
       sub(/^[[:space:]]*[-*][[:space:]]+/, "", line)
       print line
@@ -677,16 +675,16 @@ lessons_relevant() {
 
 # --- kick-off FOCUS string ---
 
-# Build the kick-off lessons-focus signal: the "### Notes for Next Session"
-# block(s) from the session file (head-capped at 20 lines) + the top of the
+# Build the kick-off lessons-focus signal: the last "### Notes for Next
+# Session" block of the session file (head-capped at 20 lines) + the top of the
 # TODO file with the "## Completed" section onward dropped (head-capped at 30
 # lines), concatenated with single-space separators in that order.
 #
-# Byte-for-byte port of the former inline /kick-off step-2 block, including its
-# quirks: the Notes awk re-arms on EVERY "### Notes for Next Session" heading
-# (so multiple such blocks all contribute, not just the latest), capture halts
-# at the next "## " or "### " line, and each present segment is prefixed with a
-# leading space (the inline `FOCUS="$FOCUS $NOTES"` / `"$FOCUS $TODOS"` shape).
+# Only the last Notes block counts: /wrap appends each session at the bottom,
+# so that block is the newest session's direction, the "last session's Notes
+# for Next Session" of /kick-off step 2. Capture halts at the next "## " or
+# "### " line, and each present segment is prefixed with a leading space (the
+# inline `FOCUS="$FOCUS $NOTES"` / `"$FOCUS $TODOS"` shape).
 # A missing session file contributes nothing (not even the leading space); an
 # empty/absent todo arg likewise contributes nothing. Output carries no trailing
 # newline. The caller prepends any user-typed focus: FOCUS="$USER_FOCUS$(...)".
@@ -703,19 +701,19 @@ kickoff_focus() {
   local focus=""
 
   if [ -f "$session" ]; then
-    # Cap the first 20 captured lines INSIDE awk (line counter + exit) instead
-    # of `awk ... | head -20`. Under `set -euo pipefail`, head closes the pipe
-    # on the 21st line, SIGPIPE-kills the upstream producer (exit 141), and
-    # pipefail fails the whole helper on exactly the long-input case the cap is
-    # for. Any producer-into-head pipe has this hazard (so does a `printf | head`
-    # restage — the printf builtin takes the SIGPIPE too). Capping in awk drops
-    # the pipe entirely: same first-20 bytes, exit 0. `n == 20 { exit }` after
-    # the 20th print mirrors head's early stop without truncating line 20.
+    # Each Notes heading empties the buffer, so END prints the last block.
+    # Cap its first 20 lines INSIDE awk instead of `awk ... | head -20`. Under
+    # `set -euo pipefail`, head closes the pipe on the 21st line, SIGPIPE-kills
+    # the upstream producer (exit 141), and pipefail fails the whole helper on
+    # exactly the long-input case the cap is for. Any producer-into-head pipe
+    # has this hazard (so does a `printf | head` restage — the printf builtin
+    # takes the SIGPIPE too). Capping in awk drops the pipe entirely.
     local notes
     notes=$(awk '
-      /^### Notes for Next Session[[:space:]]*$/ { capturing=1; next }
+      /^### Notes for Next Session[[:space:]]*$/ { capturing=1; buf=""; n=0; next }
       capturing && /^## |^### / { capturing=0 }
-      capturing { print; if (++n == 20) exit }
+      capturing && n < 20 { buf = buf $0 "\n"; n++ }
+      END { printf "%s", buf }
     ' "$session" 2>/dev/null)
     focus="$focus $notes"
   fi
@@ -845,8 +843,8 @@ Usage:
 
   koji-doc-status --kickoff-focus <session-file> <todo-file-or-empty>
                                          # build /kick-off's lessons-focus
-                                         # signal: "### Notes for Next Session"
-                                         # block(s) (head 20) + top of TODO sans
+                                         # signal: the last "### Notes for Next
+                                         # Session" block (head 20) + top of TODO sans
                                          # "## Completed" (head 30), space-joined.
                                          # No trailing newline. Caller prepends
                                          # user focus: FOCUS="$USER_FOCUS$(...)".
