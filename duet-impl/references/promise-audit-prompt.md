@@ -105,7 +105,7 @@ If JSON parsing fails or the agent times out, write `[]` and continue. The audit
 | Pass | Job | Plan access | Output shape |
 |---|---|---|---|
 | Gate review (per gate; the reviewer(s) the duet setup chose) | Quality + phase completeness for the segment | Gate-text only | Severity-ranked findings |
-| Final `/duet-review` | Quality of cumulative diff | NONE — diff only | Severity-ranked findings (claude + codex cross-reviewed) |
+| Final `/duet-review` | Quality of cumulative diff | NONE — diff only | Severity-ranked findings (Claude + the outside voice, cross-reviewed) |
 | **Promise audit** (this prompt) | **Contract verification — every explicit promise has evidence** | **Full locked plan** | **Per-promise binary: evidence or GAP** |
 
 Folding the audit into either of the existing review prompts dilutes both jobs — quality review and contract verification have different shapes (severity vs binary), different scopes (per-diff vs per-promise), and different failure modes (missed bug vs missed contract). Keeping them separate keeps each prompt focused.

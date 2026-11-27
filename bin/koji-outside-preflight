@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# koji-outside-preflight — run once, in every outside-voice skill's preamble,
+# before any dispatch. Replaces koji-codex-preflight (kept as a forwarding shim).
+#
+#   1. Harness guard (fail-closed, exit 78). koji's premise is that the outside
+#      voice is a different model family from Reviewer A. If this session itself
+#      runs inside another agent's harness (codex, or an agy agent), every
+#      review this run produces is that agent's model grading itself. There is
+#      no escape hatch on purpose. The guard lives in koji-dispatch-lib, shared
+#      with every dispatch wrapper, so the lists cannot drift.
+#   2. The outside-voice order and which providers are installed (non-blocking).
+#   3. Known-bad codex CLI warning (non-blocking): codex-cli 0.120.0-0.120.2
+#      have stdin deadlock bugs, and stdin is exactly how koji feeds prompts.
+#
+# Lives in the preamble, not only in the wrappers: a wrapper's stderr is the
+# run's .err file, which a successful collection never displays, so a warning
+# written there is invisible. The preamble is one site per skill and prints to
+# the console.
+#
+#   koji-outside-preflight        — exit 0 (notes on stderr), or 78
+#
+# Exit 78 must STOP THE RUN, not just the block: a failed background Bash block
+# does not halt the agent. Each skill's prose carries that instruction.
+set -uo pipefail
+
+case "$0" in */*) KOJI_BIN="${0%/*}" ;; *) KOJI_BIN=. ;; esac
+KOJI_BIN="$(cd "$KOJI_BIN" 2>/dev/null && pwd)" || { echo "koji: cannot resolve koji's bin directory — run koji setup" >&2; exit 125; }
+# shellcheck source=koji-dispatch-lib
+. "$KOJI_BIN/koji-dispatch-lib" || { echo "koji: cannot load $KOJI_BIN/koji-dispatch-lib — koji's install is broken; run koji setup" >&2; exit 125; }
+
+# --- 1. Harness guard ---------------------------------------------------------
+koji_harness_guard koji || exit $?
+
+# --- 2. Order and presence ----------------------------------------------------
+ORDER=$(koji_outside_order)
+AVAILABLE=""
+for p in $ORDER; do
+  if command -v "$p" >/dev/null 2>&1; then
+    AVAILABLE="${AVAILABLE:+$AVAILABLE }$p"
+  else
+    echo "koji: $p is not on PATH — the outside voice skips it" >&2
+  fi
+done
+echo "koji: outside voice order: $(printf '%s' "$ORDER" | sed 's/ / → /g')" >&2
+case " $AVAILABLE " in
+  *" agy "*)
+    if [ "$("$KOJI_BIN/koji-config" get agy_bypass 2>/dev/null)" = yes ]; then
+      echo "koji: agy bypass: on (koji-config agy_bypass yes) — agy may run shell tools, under koji's deny rules" >&2
+    else
+      echo "koji: agy bypass: off — agy reads files only, and codex answers when it needs a shell. koji-config set agy_bypass yes to change it" >&2
+    fi ;;
+esac
+if [ -z "$AVAILABLE" ]; then
+  echo "koji: no outside voice is installed (agy or codex) — outside reviews will fail to start." >&2
+  exit 0
+fi
+
+# --- 3. Known-bad codex CLI warning -------------------------------------------
+case " $AVAILABLE " in *" codex "*) ;; *) exit 0 ;; esac
+
+# Capture the status from codex, NOT from a pipeline: a pipeline reports the
+# LAST command's status, which is how a CLI that only printed a spawn error once
+# read as healthy. Through koji-timeout, with stdin detached: this check exists
+# BECAUSE of a stdin deadlock, so an unwrapped call could hang the preamble on
+# exactly the builds it targets.
+VER_OUT=$("$KOJI_BIN/koji-timeout" 20 codex --version 2>&1 </dev/null); VER_CODE=$?
+
+if [ "$VER_CODE" -ne 0 ]; then
+  echo "koji: \`codex --version\` failed (exit $VER_CODE) — the CLI is on PATH but may not be runnable." >&2
+  [ -n "$VER_OUT" ] && echo "koji: it said: $(printf '%s' "$VER_OUT" | head -1)" >&2
+  exit 0
+fi
+
+# Search the WHOLE captured output for a version token rather than taking
+# `head -1`. A sandboxed codex prints a PATH-alias warning on stderr first, so
+# the merged-then-truncated parse reads the warning and misses the version.
+VER=$(printf '%s' "$VER_OUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*' | head -1)
+[ -n "$VER" ] || exit 0
+
+# Anchored so 0.120.10 and 0.120.20 do not match; 0.120.2-beta does, because it
+# IS the buggy release. Update this list when a new version regresses.
+if printf '%s' "$VER" | grep -Eq '(^|[^0-9.])0\.120\.(0|1|2)([^0-9.]|$)'; then
+  echo "koji: codex-cli $VER has known stdin deadlock bugs, and koji feeds prompts on stdin." >&2
+  echo "koji: run \`npm install -g @openai/codex@latest\`." >&2
+fi
+exit 0

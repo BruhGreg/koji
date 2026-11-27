@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# koji-outside-exec — the ONE outside-voice dispatch. It walks the provider
+# order (koji-config outside_order, default agy,codex), hands the same prompt to
+# each provider's adapter until one gives a usable reply, and records who
+# answered.
+#
+#   koji-outside-exec <timeout> <effort> <root> <record> --expect <kind> [--only <provider>]
+#                                          # prompt on stdin, reply on stdout
+#   koji-outside-exec --order              # the effective order, space-separated
+#   koji-outside-exec --available          # installed providers in order; exit 1 if none
+#
+# --expect is the caller's output contract, checked with the SAME helpers the
+# collection sites use, so a reply in the wrong shape moves to the next
+# provider instead of reaching the call site's malformed-reply retry first:
+#   findings  koji-codex-classify --json-out + koji-duet-findings-check
+#   cross     … + koji-duet-findings-check --cross
+#   consult   … + koji-duet-findings-check --consult
+#   verdict   koji-codex-classify --prose (a VERDICT line on a clean exit)
+#   prose     a non-blank reply on a clean exit (default)
+# --only pins one provider. The /duet-impl consult uses it: only the provider
+# that raised a HIGH may withdraw it, so it must never fall back to another.
+#
+# The record (<record>, e.g. "$RUN_DIR/codex.provider") is always written:
+#   line 1   <agy|codex|none> <effort|-> — <attempt summary> [(<model>)]
+#   then     one line per note the adapters printed (effort clamp, ⚠ tree moved, skips)
+# Each attempt's raw stdout and stderr stay next to it, numbered per dispatch:
+#   <record>.<n>.<provider>.out / .err   (n = 1, 2, … — a retry never overwrites)
+# Collection sites print it; `read -r B _ < record` gives the provider.
+#
+# Exit codes, so that none of the failure modes can read as a clean review:
+#   0    a usable reply is on stdout (that attempt's stdout and stderr only)
+#   78   harness mismatch — before any provider is looked at
+#   79   the CALLER is broken (bad args, missing record, empty or stuck stdin)
+#   125  the environment is broken (temp dir)
+#   127  no outside voice is installed; the record says `none`
+#   else every provider failed: the LAST attempt's stdout, stderr and exit
+#        code, plus one `koji-outside: <p> failed: <reason>` line per attempt
+#        when that last exit is non-zero, so an earlier provider's QUOTA is
+#        still visible to koji-codex-classify (the final review then waits
+#        instead of degrading). When the last attempt exited 0 with a reply in
+#        the wrong shape, nothing is added: the call site's own malformed-reply
+#        retry handles it, not a quota back-off.
+# Moving to the next provider is NOT a substitution: the record shows it, and
+# it never counts toward a call site's QUOTA_MAX_WAITS.
+set -uo pipefail
+
+case "$0" in */*) KOJI_BIN="${0%/*}" ;; *) KOJI_BIN=. ;; esac
+KOJI_BIN="$(cd "$KOJI_BIN" 2>/dev/null && pwd)" || { echo "koji-outside-exec: cannot resolve its own directory — no call made" >&2; exit 125; }
+# shellcheck source=koji-dispatch-lib
+. "$KOJI_BIN/koji-dispatch-lib" || { echo "koji-outside-exec: cannot load $KOJI_BIN/koji-dispatch-lib — no call made" >&2; exit 125; }
+
+# --- query modes ----------------------------------------------------------------
+case "${1:-}" in
+  --order) koji_outside_order; exit 0 ;;
+  --available)
+    AVAIL=""
+    for p in $(koji_outside_order); do command -v "$p" >/dev/null 2>&1 && AVAIL="${AVAIL:+$AVAIL }$p"; done
+    [ -n "$AVAIL" ] || exit 1
+    printf '%s\n' "$AVAIL"; exit 0 ;;
+esac
+
+# --- front door: guard, arguments, prompt — before any provider -----------------
+koji_harness_guard koji-outside-exec || exit $?
+
+USAGE="usage: koji-outside-exec <timeout> <effort> <root> <record> --expect findings|cross|consult|verdict|prose [--only agy|codex]"
+[ "$#" -ge 4 ] || { echo "$USAGE" >&2; exit 79; }
+TIMEOUT="$1"; EFFORT="$2"; PROJECT_ROOT="$3"; RECORD="$4"; shift 4
+EXPECT=""; ONLY=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --expect|--only)
+      [ "$#" -ge 2 ] || { echo "koji-outside-exec: $1 needs a value" >&2; exit 79; }
+      if [ "$1" = --expect ]; then EXPECT="$2"; else ONLY="$2"; fi
+      shift 2 ;;
+    *) echo "koji-outside-exec: unknown argument '$1'" >&2; echo "$USAGE" >&2; exit 79 ;;
+  esac
+done
+# Required, like the record: a call site that drops it would silently get the
+# weakest check, and a reply in the wrong shape would never reach the next provider.
+[ -n "$EXPECT" ] || { echo "koji-outside-exec: --expect <findings|cross|consult|verdict|prose> is required — the dispatch block must name its output contract" >&2; exit 79; }
+case "$EXPECT" in findings|cross|consult|verdict|prose) ;; *) echo "koji-outside-exec: --expect must be findings|cross|consult|verdict|prose, got '$EXPECT'" >&2; exit 79 ;; esac
+case "$ONLY" in ''|agy|codex) ;; *) echo "koji-outside-exec: --only must be agy or codex, got '$ONLY'" >&2; exit 79 ;; esac
+# A dropped record argument shifts --expect into its place; refuse it by shape.
+case "$RECORD" in
+  ''|-*) echo "koji-outside-exec: the record path is missing — the dispatch block must pass \"\$X.provider\" as the 4th argument" >&2; exit 79 ;;
+esac
+case "$RECORD" in */*) RECORD_DIR="${RECORD%/*}" ;; *) RECORD_DIR=. ;; esac
+[ -d "$RECORD_DIR" ] || { echo "koji-outside-exec: the record's directory '$RECORD_DIR' does not exist — the dispatch block did not restore \$RUN_DIR" >&2; exit 79; }
+koji_check_dispatch_args koji-outside-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" || exit $?
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/koji-outside.XXXXXX") || { echo "koji-outside-exec: cannot create a work dir in ${TMPDIR:-/tmp} — no call made" >&2; exit 125; }
+trap 'rm -rf "$WORK"' EXIT
+koji_buffer_prompt koji-outside-exec "$WORK/prompt" || exit $?
+
+# A dispatch that dies after this point still leaves a record that says `none`.
+printf 'none - — dispatch did not finish\n' > "$RECORD" 2>/dev/null \
+  || { echo "koji-outside-exec: cannot write the record '$RECORD' — no call made" >&2; exit 125; }
+
+# --- helpers ----------------------------------------------------------------------
+_refusal() {   # _refusal <reply-file> — shaped like a quota refusal, not like an answer
+  # The classifier owns the one definition, so this wrapper and every call
+  # site's classification can never disagree about a reply.
+  "$KOJI_BIN/koji-codex-classify" --refusal "$1" 2>/dev/null
+}
+_usable() {   # _usable <attempt-dir> — the reply meets --expect
+  local d="$1" st
+  [ "$(cat "$d/exit")" = 0 ] || return 1
+  case "$EXPECT" in
+    prose)
+      grep -q '[^[:space:]]' "$d/out" || return 1
+      # A short reply that is a quota refusal is not a position — /triangulate
+      # would show it as one. It must be short AND shaped like a refusal
+      # (_refusal), and the reply ALONE must read as a quota (no stderr), so a
+      # real position that discusses rate limits or a 429 stays a position.
+      if [ "$(wc -c < "$d/out" | tr -d ' ')" -lt 600 ] && _refusal "$d/out"; then
+        st=$("$KOJI_BIN/koji-codex-classify" "$d/out" /dev/null "$d/exit" --prose 2>/dev/null)
+        [ "$st" = QUOTA ] && return 1
+      fi
+      return 0 ;;
+    verdict) st=$("$KOJI_BIN/koji-codex-classify" "$d/out" "$d/err" "$d/exit" --prose 2>/dev/null); [ "$st" = OK ] ;;
+    *)
+      st=$("$KOJI_BIN/koji-codex-classify" "$d/out" "$d/err" "$d/exit" --json-out "$d/array" 2>/dev/null)
+      [ "$st" = OK ] || return 1
+      case "$EXPECT" in
+        findings) "$KOJI_BIN/koji-duet-findings-check" "$d/array" ;;
+        cross)    "$KOJI_BIN/koji-duet-findings-check" --cross "$d/array" ;;
+        consult)  "$KOJI_BIN/koji-duet-findings-check" --consult "$d/array" ;;
+      esac >/dev/null 2>&1 ;;
+  esac
+}
+_reason() {   # _reason <attempt-dir> — one short phrase; only a real quota says "quota"
+  local d="$1" rc st
+  rc=$(cat "$d/exit")
+  if [ "$rc" = 0 ]; then
+    # An exit-0 reply is a quota only when it is shaped like a refusal and the
+    # reply ALONE reads as one. A wrong-shape answer that discusses rate limits
+    # is a shape mismatch — never a five-hour back-off.
+    if _refusal "$d/out"; then
+      st=$("$KOJI_BIN/koji-codex-classify" "$d/out" /dev/null "$d/exit" --prose 2>/dev/null)
+      if [ "$st" = QUOTA ]; then echo "quota"; return 0; fi
+    fi
+    echo "reply did not match --expect $EXPECT"; return 0
+  fi
+  st=$("$KOJI_BIN/koji-codex-classify" "$d/out" "$d/err" "$d/exit" 2>/dev/null)
+  case "$st" in
+    QUOTA)   echo "quota" ;;
+    TIMEOUT) echo "timeout" ;;
+    *)       echo "error (exit $rc)" ;;
+  esac
+}
+_record() {   # _record <line-1> — line 1 plus every note
+  { printf '%s\n' "$1"; cat "$WORK/notes"; } > "$RECORD" 2>/dev/null || true
+}
+
+# --- the provider walk ----------------------------------------------------------------
+if [ -n "$ONLY" ]; then CANDIDATES="$ONLY"; else CANDIDATES=$(koji_outside_order); fi
+: > "$WORK/notes"
+# Breaker: a provider that timed out earlier in THIS run (same run dir) is
+# SKIPPED for the rest of it. Only moving it last was not enough: with the
+# other provider out of quota, every back-off cycle re-ran the hung one for its
+# full TIMEOUT. --only still runs it (consult ownership); a usable reply from it
+# clears the mark.
+BREAKER_SKIPPED=""
+if [ -z "$ONLY" ]; then
+  KEEP=""
+  for p in $CANDIDATES; do
+    if [ -e "$RECORD_DIR/.outside-timeout-$p" ]; then
+      BREAKER_SKIPPED="${BREAKER_SKIPPED:+$BREAKER_SKIPPED }$p"
+      printf '%s: timed out earlier in this run — skipped\n' "$p" >> "$WORK/notes"
+    else
+      KEEP="${KEEP:+$KEEP }$p"
+    fi
+  done
+  CANDIDATES="$KEEP"
+fi
+# Every dispatch keeps its attempts under its own number: a malformed-reply or
+# quota retry reuses the record path, and must not overwrite the reply that
+# explains why it was retried.
+N=1
+while [ -e "$RECORD.$N.agy.err" ] || [ -e "$RECORD.$N.codex.err" ]; do N=$((N+1)); done
+SUMMARY=""; TRIED=""; LAST=""; ANSWER=""; ANSWER_USED=""
+for p in $CANDIDATES; do
+  if ! command -v "$p" >/dev/null 2>&1; then
+    printf '%s: not installed — skipped\n' "$p" >> "$WORK/notes"
+    continue
+  fi
+  d="$WORK/$p"; mkdir -p "$d"
+  # Straight into the numbered artifacts, so a running or killed attempt can be
+  # inspected; the private copies are taken after. If the record dir refuses a
+  # file, the attempt runs into the private dir instead.
+  OUTF="$RECORD.$N.$p.out"; ERRF="$RECORD.$N.$p.err"
+  { : > "$OUTF" && : > "$ERRF"; } 2>/dev/null || { OUTF="$d/out"; ERRF="$d/err.all"; }
+  "$KOJI_BIN/koji-$p-exec" "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" < "$WORK/prompt" > "$OUTF" 2> "$ERRF"
+  rc=$?
+  printf '%s\n' "$rc" > "$d/exit"
+  [ "$OUTF" = "$d/out" ] || cp "$OUTF" "$d/out" 2>/dev/null || : > "$d/out"
+  [ "$ERRF" = "$d/err.all" ] || cp "$ERRF" "$d/err.all" 2>/dev/null || : > "$d/err.all"
+  [ "$rc" = 124 ] && { : > "$RECORD_DIR/.outside-timeout-$p"; } 2>/dev/null
+  # Notes go to the record, never to the call site's .err: a note that merely
+  # mentions quota must not turn a timeout into a five-hour back-off.
+  grep -E '^koji-note: ' "$d/err.all" | sed "s/^koji-note: /$p: /" >> "$WORK/notes"
+  USED=$(grep -E '^koji-used: ' "$d/err.all" | tail -1 | sed 's/^koji-used: //')
+  grep -v -E '^koji-(note|used): ' "$d/err.all" > "$d/err"
+  TRIED="${TRIED:+$TRIED }$p"; LAST="$p"
+
+  case "$rc" in
+    78|79)   # never retried elsewhere: a harness mismatch or a broken block is not fixed by another provider
+      _record "none - — $p: exit $rc"
+      cat "$d/out"; cat "$d/err" >&2
+      exit "$rc" ;;
+  esac
+  if _usable "$d"; then ANSWER="$p"; ANSWER_USED="$USED"; rm -f "$RECORD_DIR/.outside-timeout-$p"; break; fi
+  _reason "$d" > "$d/reason"
+  SUMMARY="${SUMMARY:+$SUMMARY; }$p: $(cat "$d/reason")"
+done
+
+if [ -n "$ANSWER" ]; then
+  EFF_USED="${ANSWER_USED%% *}"; [ -n "$EFF_USED" ] || EFF_USED="$EFFORT"
+  MODEL_USED=""; case "$ANSWER_USED" in *" "*) MODEL_USED=" (${ANSWER_USED#* })" ;; esac
+  if [ -n "$SUMMARY" ]; then _record "$ANSWER $EFF_USED — answered after $SUMMARY$MODEL_USED"
+  else _record "$ANSWER $EFF_USED — ok$MODEL_USED"; fi
+  cat "$WORK/$ANSWER/out"; cat "$WORK/$ANSWER/err" >&2
+  exit 0
+fi
+
+if [ -z "$TRIED" ] && [ -n "$BREAKER_SKIPPED" ]; then
+  # Every provider left was skipped by the breaker: a timeout, not a missing
+  # install — the call site degrades (final review) or substitutes (gate) now.
+  _record "none - — skipped: $BREAKER_SKIPPED timed out earlier in this run"
+  echo "koji-outside-exec: every outside voice still in the order timed out earlier in this run ($BREAKER_SKIPPED) — no call made" >&2
+  exit 124
+fi
+if [ -z "$TRIED" ]; then
+  _record "none - — no outside voice installed (order: $CANDIDATES)"
+  echo "koji-outside-exec: no outside voice is installed (order: $CANDIDATES) — no call made" >&2
+  exit 127
+fi
+
+# Every provider that ran failed. Hand back the last attempt as it was.
+_record "none - — $SUMMARY"
+d="$WORK/$LAST"; rc=$(cat "$d/exit")
+cat "$d/out"; cat "$d/err" >&2
+if [ "$rc" != 0 ]; then
+  for p in $TRIED; do
+    [ -f "$WORK/$p/reason" ] && printf 'koji-outside: %s failed: %s\n' "$p" "$(cat "$WORK/$p/reason")" >&2
+  done
+  exit "$rc"
+fi
+# The last attempt exited 0 with a reply in the wrong shape. JSON and verdict
+# sites own that case (their malformed-reply retry); prose sites have no such
+# path, so a blank or unusable prose reply must not pass as a position.
+if [ "$EXPECT" = prose ]; then
+  for p in $TRIED; do
+    [ -f "$WORK/$p/reason" ] && printf 'koji-outside: %s failed: %s\n' "$p" "$(cat "$WORK/$p/reason")" >&2
+  done
+  echo "koji-outside-exec: no outside voice gave a usable reply" >&2
+  exit 75
+fi
+exit 0

@@ -1,5 +1,5 @@
 ---
-description: "Multi-side debate on one question — Claude + codex argue in parallel, iterate across rounds as needed to converge. You synthesize the call. Web research per voice."
+description: "Multi-side debate on one question — Claude + an outside voice (agy → codex) argue in parallel, iterate across rounds as needed to converge. You synthesize the call. Web research per voice."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools:
@@ -14,7 +14,7 @@ allowed-tools:
 
 # /triangulate
 
-Three reference points → one decision. Claude voice + codex voice + **you**. Each AI runs in parallel with web + codebase research, presents its position, and you synthesize the call. **Multi-round when one pass isn't enough** — after the first synthesis you can dispatch another round (each voice gets the other's adversarial counter-prompt) until you've converged.
+Three reference points → one decision. Claude voice + outside voice (agy → codex) + **you**. Each AI runs in parallel with web + codebase research, presents its position, and you synthesize the call. **Multi-round when one pass isn't enough** — after the first synthesis you can dispatch another round (each voice gets the other's adversarial counter-prompt) until you've converged.
 
 Family relationship to `/duet-plan`: same multi-side debate pattern, but `/duet-plan` lets the agents detect `VERDICT: AGREE` and locks a plan file, while `/triangulate` keeps **you** as the synthesizer — user inside the loop, not just approver.
 
@@ -33,23 +33,24 @@ Don't auto-invoke on generic "let's decide" / "help me think this through" — t
 
 ```bash
 source <(~/.claude/skills/koji/bin/koji-detect)
-# Codex preflight: refuses to run when THIS session is itself under codex (an
-# outside voice cannot be the same model), and warns on a known-bad CLI.
+# Outside-voice preflight: refuses to run when THIS session is itself inside
+# another agent's harness (codex or agy — an outside voice cannot be the same
+# model), prints the outside-voice order, and warns on a known-bad codex CLI.
+# It runs under NO_CODEX too: inside such a harness the "Claude" voice is that
+# agent's model, so even a Claude-only run would be mislabeled.
 # Exit 78 = harness mismatch. It must STOP THE RUN, not just this block.
-# NO_CODEX dispatches no outside process, so the harness guard does not apply to
-# it — running it there would make a documented Claude-only mode unreachable.
-[ "${NO_CODEX:-}" = "1" ] || ~/.claude/skills/koji/bin/koji-codex-preflight || exit $?
+~/.claude/skills/koji/bin/koji-outside-preflight || exit $?
 echo "=== koji triangulate ==="
 echo "Project: $PROJECT_NAME"
 ```
 
-**If the preamble exits 78 — harness mismatch.** This session is running under codex, so codex cannot be the outside voice. Stop the run and report *"codex outside review unavailable: harness mismatch; no outside process started. Missing coverage."* **Never substitute a fresh-context Claude reviewer for it** — the quota-substitution rule does not apply here. Under codex that substitution makes Reviewer A review itself, which is exactly the two-placeholders-into-a-PASS failure koji forbids. A failed Bash block does not halt the agent; stopping is your job.
+**If the preamble exits 78 — harness mismatch.** This session is running inside another agent's harness (codex or agy), so no outside voice is possible here — `--no-codex` included. Stop the run and report *"outside review unavailable: harness mismatch; no outside process started. Missing coverage."* **Never substitute a fresh-context Claude reviewer for it** — the quota-substitution rule does not apply here. Inside another agent's harness that substitution makes Reviewer A review itself, which is exactly the two-placeholders-into-a-PASS failure koji forbids. A failed Bash block does not halt the agent; stopping is your job.
 
-If codex is not on PATH, warn and continue in Claude-only mode (degraded — true triangulation needs both AI voices):
+If no outside voice is installed (neither agy nor codex on PATH, in the configured order), warn and continue in Claude-only mode (degraded — true triangulation needs both AI voices):
 
 ```bash
-if ! command -v codex >/dev/null 2>&1; then
-  echo "WARN: codex not found on PATH. Running in Claude-only mode (no triangulation)."
+if ! ~/.claude/skills/koji/bin/koji-outside-exec --available >/dev/null 2>&1; then
+  echo "WARN: no outside voice on PATH (agy or codex). Running in Claude-only mode (no triangulation)."
   NO_CODEX=1
 fi
 ```
@@ -68,10 +69,10 @@ The question is whatever the user provided after the skill name:
 Flags (all optional — most users never need any):
 - `--stances=<a>,<b>` — assign opposing stances to each voice (e.g., `convention,principled`). Default: both voices get the same prompt and form their own takes from their own priors.
 - `--rounds N` — max rounds (default 1). The user opts into additional rounds via prompt after each synthesis.
-- `--no-codex` — Claude only (degraded — not really triangulation, but useful when codex is unavailable).
+- `--no-codex` — Claude only, no outside voice at all (degraded — not really triangulation, but useful when no outside voice is available). The name predates agy; it turns off agy too.
 - `--keep` — keep `/tmp/triangulate-<sha>/` for debugging (default: cleaned at end of run).
 
-**Codex effort: default xhigh, opt down by saying so.** Codex runs at `xhigh` (~30-min timeout, ~2.5× tokens). Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick triangulate", "lighter pass", "use high effort", "save tokens", "fast pass". Don't downgrade for "the question seems simple" or similar heuristics; only on explicit user signal. Claude inherits the parent session's effort level — set `/effort max` once before running if you want max-tier Claude.
+**Outside-voice effort: default xhigh, opt down by saying so.** The outside voice runs at `xhigh` (~30-min timeout per provider, ~2.5× tokens; agy clamps to the highest level its model offers). Drop to `high` ONLY when the user's invocation phrase signals lighter effort — e.g., "quick triangulate", "lighter pass", "use high effort", "save tokens", "fast pass". Don't downgrade for "the question seems simple" or similar heuristics; only on explicit user signal. Claude inherits the parent session's effort level — set `/effort max` once before running if you want max-tier Claude.
 - `--no-save` — in-session only; skip persistence entirely (no fold-in, no prompt, no file write).
 - `--save-as plans/<slug>.md` or `--save-as research/<slug>.md` — explicit override; skip the judgment and write a new file directly.
 - `--update <path>` — explicit override; skip the judgment and append a synthesis section to an existing plan/research file.
@@ -90,9 +91,9 @@ echo "$QUESTION" > "$RUN_DIR/question.txt"
 # it (would otherwise write `round--codex.md`) and Step 4 increments it.
 ROUND=1
 
-# Default codex effort: xhigh. Agent sets EFFORT=high TIMEOUT=900 BEFORE this
-# block only when the user's invocation phrase signals lighter effort (see
-# "Codex effort" note in Flags above).
+# Default outside-voice effort: xhigh. Agent sets EFFORT=high TIMEOUT=900 BEFORE
+# this block only when the user's invocation phrase signals lighter effort (see
+# "Outside-voice effort" note in Flags above).
 EFFORT="${EFFORT:-xhigh}"
 TIMEOUT="${TIMEOUT:-1800}"
 ROUND_LIMIT="${ROUNDS:-1}"
@@ -110,7 +111,7 @@ STANCE_CODEX=""
 if [ -n "${STANCES:-}" ]; then
   STANCE_CLAUDE="${STANCES%,*}"
   STANCE_CODEX="${STANCES#*,}"
-  echo "Stances: Claude=$STANCE_CLAUDE, codex=$STANCE_CODEX"
+  echo "Stances: Claude=$STANCE_CLAUDE, outside voice=$STANCE_CODEX"
 fi
 
 PROJECT_CONTEXT="(repo: $(basename "$PROJECT_ROOT"); branch: $(git branch --show-current 2>/dev/null || echo unknown))"
@@ -142,9 +143,10 @@ Claude voice prompt (substitute `{question}`, `{project_root}`, `{project_contex
 
 ```
 You are one of two AI voices being asked the same question in parallel. The
-other voice is codex (a different model with different training and priors).
-The user will read both perspectives and synthesize the call — you do NOT need
-to reach consensus with codex. Argue from your strongest reasoning.
+other voice is an outside model (agy or codex — a different model family with
+different training and priors). The user will read both perspectives and
+synthesize the call — you do NOT need to reach consensus with it. Argue from
+your strongest reasoning.
 
 QUESTION: {question}
 REPOSITORY: {project_root}
@@ -182,20 +184,21 @@ Be specific. The user is the synthesizer; give them material to weigh, not
 mush to defer to.
 ```
 
-**Do NOT return control yet** — Step 2b still has to dispatch codex (or write the NO_CODEX placeholder). Proceed to Step 2b before any user-facing "I'll come back with the synthesis" message; otherwise the second voice never starts.
+**Do NOT return control yet** — Step 2b still has to dispatch the outside voice (or write the NO_CODEX placeholder). Proceed to Step 2b before any user-facing "I'll come back with the synthesis" message; otherwise the second voice never starts.
 
 When the Claude Agent completion notification eventually arrives, write the result to `$RUN_DIR/round-${ROUND}-claude.md` via the Write tool.
 
-### 2b. Codex voice (Bash, background)
+### 2b. Outside voice — agy → codex (Bash, background)
 
-**Skip this step entirely if `$NO_CODEX` is set** (codex not on PATH, or user passed `--no-codex`). In that case, write a placeholder file so the synthesis step has something to read:
+**Skip this step entirely if `$NO_CODEX` is set** (no outside voice on PATH, or user passed `--no-codex`). In that case, write a placeholder file so the synthesis step has something to read:
 
 ```bash
 if [ "${NO_CODEX:-0}" = "1" ]; then
   CODEX_FILE="$RUN_DIR/round-${ROUND}-codex.md"
-  printf '## Position\n\n(codex unavailable — Claude-only triangulation; this is degraded mode, the user is the second perspective)\n' > "$CODEX_FILE"
+  printf '## Position\n\n(outside voice unavailable — Claude-only triangulation; this is degraded mode, the user is the second perspective)\n' > "$CODEX_FILE"
   echo "0" > "$CODEX_FILE.exit"
-  echo "Skipped codex dispatch (NO_CODEX=1). Synthesis will use Claude position + user judgment only."
+  printf 'none - — skipped (NO_CODEX=1)\n' > "$CODEX_FILE.provider"   # the record the persisted headings read
+  echo "Skipped the outside-voice dispatch (NO_CODEX=1). Synthesis will use Claude position + user judgment only."
   # Skip the rest of Step 2b.
 fi
 ```
@@ -250,14 +253,16 @@ Output structure (markdown):
 IFS='|' read -r EFFORT TIMEOUT < "$RUN_DIR/codex-settings" \
   || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$CODEX_FILE.exit" 79 "cannot read the run's codex settings — effort/timeout unresolved"
 
-# Prompt to a file, then codex reads it from stdin (`-`). A prompt on argv can
-# exceed the argv ceiling (macOS ARG_MAX ~1MB shared with env); printf is a
-# builtin and has no such limit. A regular-file redirect EOFs immediately, so
-# codex never blocks on stdin. `-` must be the ONLY positional.
+# Prompt to a file, then the outside voice reads it from stdin. A prompt on argv
+# can exceed the argv ceiling (macOS ARG_MAX ~1MB shared with env); printf is a
+# builtin and has no such limit. A regular-file redirect EOFs immediately, so no
+# provider blocks on stdin.
 PROMPT_TXT="$CODEX_FILE.prompt"
 printf '%s\n' "$CODEX_PROMPT" > "$PROMPT_TXT"
 
-~/.claude/skills/koji/bin/koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" \
+# The wrapper walks the outside-voice order (agy → codex); --expect prose moves a
+# blank reply on to the next provider. The .provider record says who answered.
+~/.claude/skills/koji/bin/koji-outside-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" "$CODEX_FILE.provider" --expect prose \
   < "$PROMPT_TXT" > "$CODEX_FILE.raw" 2> "$CODEX_FILE.err"
 CE=$?; echo "$CE" > "$CODEX_FILE.exit"
 # Exit 78 is a harness mismatch, NOT a reviewer failure: stop the run, report
@@ -265,48 +270,53 @@ CE=$?; echo "$CE" > "$CODEX_FILE.exit"
 # `[ ... ] && ...`: as the last command of the block the && form returns 1 on a
 # SUCCESSFUL review, so the harness would report every good dispatch as failed.
 if [ "$CE" = "78" ]; then
-  echo "FATAL: codex harness mismatch — stop the run, do not classify, do not substitute" >&2
+  echo "FATAL: harness mismatch (this session runs inside codex or agy) — stop the run, do not classify, do not substitute" >&2
 fi
 ```
 
-Run this Bash block with **`run_in_background: true`** (only when `NO_CODEX` is unset). The two background tasks (Claude and codex) run truly in parallel — no sequential dependency in round 1.
+Run this Bash block with **`run_in_background: true`** (only when `NO_CODEX` is unset). The two background tasks (Claude and the outside voice) run truly in parallel — no sequential dependency in round 1.
 
-**Only now (after both tasks have been created — Claude Agent + codex Bash, OR Claude Agent + NO_CODEX placeholder)** tell the user: *"Round ${ROUND}: Claude + codex dispatched in parallel. Each will research and present a position. I'll come back with the synthesis when both finish."* Then return control.
+**Only now (after both tasks have been created — Claude Agent + outside-voice Bash, OR Claude Agent + NO_CODEX placeholder)** tell the user: *"Round ${ROUND}: Claude + the outside voice (agy → codex) dispatched in parallel. Each will research and present a position. I'll come back with the synthesis when both finish."* Then return control.
 
-When the codex notification arrives (or immediately, in `NO_CODEX` mode where the placeholder file was already written):
+When the outside-voice notification arrives (or immediately, in `NO_CODEX` mode where the placeholder file was already written):
 
 ```bash
 # 2>/dev/null plus an explicit empty branch: a dispatch block that died before
-# writing .exit would otherwise fall through to the "codex failed to respond"
-# placeholder and let Step 3 synthesize a one-voice debate.
+# writing .exit would otherwise fall through to the "outside voice failed to
+# respond" placeholder and let Step 3 synthesize a one-voice debate.
 CODEX_EXIT=$(cat "$CODEX_FILE.exit" 2>/dev/null)
 if [ -z "$CODEX_EXIT" ]; then
-  echo "FATAL: the codex dispatch block never ran to completion — no status recorded. Fix the block; do not synthesize." >&2
+  echo "FATAL: the outside-voice dispatch block never ran to completion — no status recorded. Fix the block; do not synthesize." >&2
   exit 79
 fi
 if [ "$CODEX_EXIT" = "79" ]; then
-  # The dispatch block was malformed (bad timeout/effort/root/prompt). That is
-  # not a codex failure, so an "unavailable position" placeholder would send the
-  # run on to synthesize a one-voice debate. Fix the block instead.
-  echo "FATAL: the codex dispatch block was malformed — no call was made. Fix the block; do not synthesize." >&2
+  # The dispatch block was malformed (bad timeout/effort/root/record/prompt).
+  # That is not an outside-voice failure, so an "unavailable position"
+  # placeholder would send the run on to synthesize a one-voice debate. Fix the
+  # block instead.
+  echo "FATAL: the outside-voice dispatch block was malformed — no call was made. Fix the block; do not synthesize." >&2
   exit 79
 elif [ "$CODEX_EXIT" = "78" ]; then
   # Harness mismatch: no outside voice exists here, so a one-voice debate is not
   # a degraded debate, it is no debate. Stop rather than synthesize.
-  echo "FATAL: codex harness mismatch — no outside voice. Stop the run." >&2
+  echo "FATAL: harness mismatch (this session runs inside codex or agy) — no outside voice. Stop the run." >&2
   exit 78
-elif [ "$CODEX_EXIT" = "124" ]; then
-  echo "WARN: codex timed out. Treating as empty position."
-  printf '## Position\n(codex timeout — no position available)\n' > "$CODEX_FILE"
+fi
+sed 's/^/outside voice: /' "$CODEX_FILE.provider" 2>/dev/null || echo "outside voice: (no record)"
+# Any other non-zero (75 no usable reply, 127 none installed, …) is the LAST
+# provider's status: every provider in the order failed.
+if [ "$CODEX_EXIT" = "124" ]; then
+  echo "WARN: the outside voice timed out. Treating as empty position."
+  printf '## Position\n(outside voice timeout — no position available)\n' > "$CODEX_FILE"
 elif [ "$CODEX_EXIT" != "0" ]; then
-  echo "WARN: codex exit $CODEX_EXIT. See $CODEX_FILE.err"
-  printf '## Position\n(codex failed to respond)\n' > "$CODEX_FILE"
+  echo "WARN: outside voice exit $CODEX_EXIT. See $CODEX_FILE.err"
+  printf '## Position\n(outside voice failed to respond)\n' > "$CODEX_FILE"
 else
   cp "$CODEX_FILE.raw" "$CODEX_FILE"
 fi
 ```
 
-**Proceed to Step 3 only after BOTH files exist.** In normal mode that means waiting for both notifications (Claude's Agent + codex's Bash). In `NO_CODEX` mode the codex placeholder file was written synchronously, so you only wait for Claude. If one task is still running when you're re-invoked by the other's notification, confirm collection of the finished one and return control again — the second notification re-invokes you.
+**Proceed to Step 3 only after BOTH files exist.** In normal mode that means waiting for both notifications (Claude's Agent + the outside voice's Bash). In `NO_CODEX` mode the codex placeholder file was written synchronously, so you only wait for Claude. If one task is still running when you're re-invoked by the other's notification, confirm collection of the finished one and return control again — the second notification re-invokes you.
 
 ## Step 3 — Synthesis
 
@@ -316,9 +326,11 @@ Read both files. Present to the user:
 === Claude's position ===
 <truncated to ~30 lines or first H2 sections; full text at $RUN_DIR/round-1-claude.md>
 
-=== Codex's position ===
+=== Outside voice's position (<provider>) ===
 <same truncation; full text at $RUN_DIR/round-1-codex.md>
 ```
+
+`<provider>` is the first word after `outside voice:` in the record line the collection printed (`agy`, `codex`, or `none` when no provider answered).
 
 Then write a **one-paragraph synthesis** identifying:
 
@@ -407,7 +419,10 @@ if [ "$ANCHOR_OK" != "1" ]; then
   echo "Anchor '$ANCHOR' is not an existing doc under \$PLANS_DIR/\$RESEARCH_DIR — fall back to Branch B."
 else
   # Append one H2 section at end of file. Existing frontmatter, headings,
-  # and prose are left untouched.
+  # and prose are left untouched. The outside-voice heading names the provider
+  # from the round's record (`read`, not awk — render-safe); Step 6 deletes
+  # $RUN_DIR, so the doc is where it survives.
+  OV_P=""; [ -f "$RUN_DIR/round-${ROUND}-codex.md.provider" ] && read -r OV_P _ < "$RUN_DIR/round-${ROUND}-codex.md.provider"
   {
     printf '\n\n---\n\n'
     printf '## Triangulated decision: %s — %s\n\n' "$TODAY" "$QUESTION"
@@ -415,7 +430,7 @@ else
     printf '<details><summary>Voice positions</summary>\n\n'
     printf '### Claude\n\n'
     cat "$RUN_DIR/round-${ROUND}-claude.md"
-    printf '\n\n### Codex\n\n'
+    printf '\n\n### Outside voice (%s)\n\n' "${OV_P:-none}"
     cat "$RUN_DIR/round-${ROUND}-codex.md"
     printf '\n\n</details>\n'
   } >> "$ABS"
@@ -518,6 +533,8 @@ esac
 
 SLUG="${REL_PATH#*/}"; SLUG="${SLUG%.md}"
 mkdir -p "$TARGET_DIR"
+# Provider for the outside-voice heading, from the round's record (render-safe read).
+OV_P=""; [ -f "$RUN_DIR/round-${ROUND}-codex.md.provider" ] && read -r OV_P _ < "$RUN_DIR/round-${ROUND}-codex.md.provider"
 
 # Auto-suffix on conflict.
 OUT="$TARGET_DIR/$SLUG.md"
@@ -540,7 +557,7 @@ done
   printf '## Voice positions\n\n'
   printf '### Claude\n\n'
   cat "$RUN_DIR/round-${ROUND}-claude.md"
-  printf '\n\n### Codex\n\n'
+  printf '\n\n### Outside voice (%s)\n\n' "${OV_P:-none}"
   cat "$RUN_DIR/round-${ROUND}-codex.md"
 } > "$OUT"
 
@@ -564,6 +581,8 @@ TODAY=$(date +%Y-%m-%d)
 # $ONE_LINE_SUMMARY = one-line headline of this finding (≤80 chars,
 # agent-derived from $SYNTHESIS_PARAGRAPH). Falls back to $QUESTION if unset.
 ONE_LINE_SUMMARY="${ONE_LINE_SUMMARY:-$QUESTION}"
+# Provider for the outside-voice heading, from the round's record (render-safe read).
+OV_P=""; [ -f "$RUN_DIR/round-${ROUND}-codex.md.provider" ] && read -r OV_P _ < "$RUN_DIR/round-${ROUND}-codex.md.provider"
 
 # Build the new dated subsection.
 NEW_SECTION=$(cat <<EOF
@@ -578,7 +597,7 @@ $SYNTHESIS_PARAGRAPH
 
 $(cat "$RUN_DIR/round-${ROUND}-claude.md")
 
-#### Codex
+#### Outside voice (${OV_P:-none})
 
 $(cat "$RUN_DIR/round-${ROUND}-codex.md")
 
@@ -652,6 +671,8 @@ if [ ! -f "$ABS" ]; then
 fi
 
 TODAY=$(date +%Y-%m-%d)
+# Provider for the outside-voice heading, from the round's record (render-safe read).
+OV_P=""; [ -f "$RUN_DIR/round-${ROUND}-codex.md.provider" ] && read -r OV_P _ < "$RUN_DIR/round-${ROUND}-codex.md.provider"
 
 # Append a new H2 section at end of file (after a separator). Existing content
 # is untouched — frontmatter, headings, prose all preserved verbatim.
@@ -662,7 +683,7 @@ TODAY=$(date +%Y-%m-%d)
   printf '<details><summary>Voice positions</summary>\n\n'
   printf '### Claude\n\n'
   cat "$RUN_DIR/round-${ROUND}-claude.md"
-  printf '\n\n### Codex\n\n'
+  printf '\n\n### Outside voice (%s)\n\n' "${OV_P:-none}"
   cat "$RUN_DIR/round-${ROUND}-codex.md"
   printf '\n\n</details>\n'
 } >> "$ABS"
@@ -680,6 +701,15 @@ echo "Appended synthesis to: ${ABS#"$PROJECT_ROOT/"}"
 ## Step 6 — Cleanup
 
 ```bash
+# Step 7's "Voices:" line names the outside voice — read each round's record
+# now, before $RUN_DIR is deleted. A numbered walk, not a glob: zsh aborts the
+# whole block on a glob with no match, which would skip the cleanup below.
+n=1
+while [ -f "$RUN_DIR/round-${n}-codex.md.provider" ]; do
+  P=""; E=""; read -r P E _ < "$RUN_DIR/round-${n}-codex.md.provider"
+  echo "round $n outside voice: $P $E"
+  n=$((n + 1))
+done
 if [ "${KEEP:-0}" = "1" ]; then
   echo "Process artifacts kept at: $RUN_DIR"
 else
@@ -692,7 +722,7 @@ fi
 ```
 triangulate: <locked | aborted>
 Question: <question>
-Voices:   Claude + codex (effort: <high|xhigh>)
+Voices:   Claude + <provider(s) from Step 6's "outside voice" lines, e.g. agy; none in Claude-only mode> (effort: <the records' effort, e.g. xhigh>)
 Rounds:   <N>
 Saved to: <folded into <anchor> | <new plan/research file> | in-session only>
 ```
@@ -701,10 +731,10 @@ Saved to: <folded into <anchor> | <new plan/research file> | in-session only>
 
 | Symptom | Cause | Mitigation |
 |---|---|---|
-| Codex hangs (no output, no timeout fire) | Stdin not closed, or web-search flag re-introduced | Skill omits `--enable web_search_cached` (confirmed silent-hang trigger) and uses `< /dev/null`. Codex's built-in research happens through its agent loop, not the cache flag. Kill PID; treat as empty position. |
-| Codex exits 124 (timeout) | Web research took too long, or xhigh ran past 30 min | Re-run with `--rounds 1` only, or invoke with a "use high effort" / "lighter pass" phrase to opt down from the xhigh default. Round prompts are kept small (single question, no cumulative round context). |
+| Outside voice hangs past its deadline | The dispatch no longer goes through `koji-outside-exec` (a hand-rolled CLI call), or stdin not redirected from the prompt file | The wrapper's adapters enforce the deadline (`koji-timeout`) and read the prompt from `$PROMPT_TXT`; each provider researches through its own agent loop. Restore the dispatch block. Kill PID; treat as empty position. |
+| Outside voice exits 124 (timeout) | Web research took too long, or xhigh ran past 30 min (each provider in the order gets the full deadline) | Re-run with `--rounds 1` only, or invoke with a "use high effort" / "lighter pass" phrase to opt down from the xhigh default. Round prompts are kept small (single question, no cumulative round context). |
 | Both voices produce nearly-identical positions | Question framing didn't differentiate them, despite the default "pick an angle and commit" nudge | Re-run with `--stances=convention,principled` (or other opposing pair) — the harder forcing function when the soft nudge isn't enough. |
-| Voices each ran heavy web research, total wallclock too slow | Both did `--search` independently | Acceptable for foundational decisions (the whole point is depth). For faster runs, invoke with a "use high effort" / "lighter pass" phrase to opt down, and set `--rounds 1`. |
+| Voices each ran heavy web research, total wallclock too slow | Both voices researched the web independently | Acceptable for foundational decisions (the whole point is depth). For faster runs, invoke with a "use high effort" / "lighter pass" phrase to opt down, and set `--rounds 1`. |
 | `--save-as plans/foo/bar.md` rejected | Nested subdirs not supported in v1 | Use a flat slug: `--save-as plans/foo-bar.md`. |
 
 ## Related

@@ -69,7 +69,8 @@ case "$SKILL" in
       "Never substitute a fresh-context Claude reviewer for it"
     )
     COUNTED=(
-      1 'koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT"'
+      1 'koji-outside-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" "'
+      1 'koji-outside-preflight || exit $?'
       1 'exit 78'
       1 'exit 79'
       1 'koji-dispatch-abort'
@@ -88,15 +89,23 @@ case "$SKILL" in
     COUNTED=(
       3 'Call the `Agent` tool'
       2 'fresh Agent context, never a fork'
-      # Both codex dispatch sites (2a and the 4b cross leg) must route through
-      # the wrapper AND carry the terminal-exit guard. Pin the full invocation,
-      # not the bare program name: `koji-codex-exec` also appears in prose here,
-      # so a count of 2 against the name alone would still pass after a real
-      # dispatch site was deleted.
-      2 'koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT"'
+      # Both outside-voice dispatch sites (2a and the 4b cross leg) must route
+      # through the wrapper AND carry the terminal-exit guard. Pin the full
+      # invocation up to the record argument's opening quote, not the bare
+      # program name: the name also appears in prose, and the trailing `"`
+      # forces the 4th (record) argument onto the dispatch line.
+      2 'koji-outside-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" "'
+      1 'koji-outside-preflight || exit $?'
       2 'exit 78 ;;'
       2 'exit 79 ;;'
       4 'koji-dispatch-abort'
+      # One provider resolver (Step 3, 4a-bis, 4c, Step 6), never an inline copy.
+      4 'koji-duet-backend b-provider "$RUN_DIR"'
+      # The embedded review's tree binding: Step 1 captures it; each of the three
+      # synthesizer calls re-checks it and passes the latch, unquoted.
+      1 'koji-tree-snapshot capture "$RUN_DIR/review.tree"'
+      3 'koji-tree-snapshot stale "$RUN_DIR"'
+      3 '${STALE:+--snapshot-stale}'
     )
     ;;
   duet-impl)
@@ -116,10 +125,19 @@ case "$SKILL" in
     COUNTED=(
       4 'Call the `Agent` tool'
       3 'fresh Agent context, never a fork'
-      1 'koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT"'
-      1 'exit 78 ;;'
-      1 'exit 79 ;;'
-      2 'koji-dispatch-abort'
+      # Three outside-voice dispatch sites (gate first pass, both-mode cross leg,
+      # consult), each with both terminal arms at its collection.
+      3 'koji-outside-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" "'
+      1 'koji-outside-preflight || exit $?'
+      3 'exit 78 ;;'
+      3 'exit 79 ;;'
+      7 'koji-dispatch-abort'
+      # Consult ownership: only the provider that raised the HIGHs may withdraw them.
+      1 '--expect consult --only "$P"'
+      # Tree binding: 2c, 3b and the deferred fallback freeze the tree; 2d and
+      # 3b-gate compare it.
+      3 'koji-tree-snapshot capture'
+      2 'koji-tree-snapshot same'
     )
     ;;
   duet-plan)
@@ -134,7 +152,8 @@ case "$SKILL" in
     COUNTED=(
       3 'Call the `Agent` tool'
       1 'fresh Agent context, never a fork'
-      1 'koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT"'
+      1 'koji-outside-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" "'
+      1 'koji-outside-preflight || exit $?'
       1 'exit 78 ;;'
       1 'exit 79 ;;'
       2 'koji-dispatch-abort'
@@ -146,7 +165,8 @@ case "$SKILL" in
       "restore the pair Step 1 resolved, never re-default it here"
     )
     COUNTED=(
-      1 'koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT"'
+      1 'koji-outside-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" "'
+      1 'koji-outside-preflight || exit $?'
       1 'exit 78'
       2 'exit 79'
       1 'koji-dispatch-abort'
@@ -159,7 +179,21 @@ case "$SKILL" in
     ;;
 esac
 
+# Retired call shapes (0.11.0): every outside-voice dispatch goes through
+# koji-outside-exec, and the preamble runs koji-outside-preflight. A call that
+# reaches koji-codex-exec directly would skip the provider order, the --expect
+# check and the provider record; the old preflight name is only a shim.
+# An inline B_BACKEND read is how five copies of the provider resolver drifted
+# apart; `koji-duet-backend provider|b-provider` is the one resolver.
+FORBIDDEN=('koji-codex-exec "' 'koji-codex-preflight' 'read -r B_BACKEND _')
+
 MISSING=0
+for m in "${FORBIDDEN[@]}"; do
+  if grep -qF -- "$m" "$FILE"; then
+    echo "RETIRED CALL SHAPE PRESENT: $m"
+    MISSING=1
+  fi
+done
 for m in "${MARKERS[@]}"; do
   if ! grep -qF -- "$m" "$FILE"; then
     echo "MISSING MARKER: $m"
@@ -171,7 +205,9 @@ i=0
 while [ "$i" -lt "${#COUNTED[@]}" ]; do
   want="${COUNTED[$i]}"
   m="${COUNTED[$((i+1))]}"
-  have="$(grep -oF -- "$m" "$FILE" | wc -l | tr -d ' ')"
+  # `|| true`: zero hits makes grep exit 1, and under pipefail + set -e that
+  # ended the script silently — still a failure, but with no line saying why.
+  have="$( { grep -oF -- "$m" "$FILE" || true; } | wc -l | tr -d ' ')"
   if [ "$have" -lt "$want" ]; then
     echo "MISSING MARKER: '$m' — need >= $want occurrence(s), found $have"
     MISSING=1

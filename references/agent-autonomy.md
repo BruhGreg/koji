@@ -4,9 +4,9 @@ Shared across all `/duet-*` skills. The duet skills execute autonomously. Humans
 
 ## Don't ask the human about
 
-- **Technical correctness** — agents (Claude + codex) decide together. If one is uncertain, consult the OTHER agent first.
+- **Technical correctness** — agents (Claude + the outside voice — agy or codex) decide together. If one is uncertain, consult the OTHER agent first.
 - **Planning details during dialogue rounds** — keep debating until consensus or until the round limit is hit. Don't bail out mid-round.
-- **Implementation choices at a gate** — if codex flags an issue, fix-and-proceed is the default. Ask only if the fix would require user judgment.
+- **Implementation choices at a gate** — if the outside voice flags an issue, fix-and-proceed is the default. Ask only if the fix would require user judgment.
 - **Routine clarifications** that reading code, running tests, or checking the diff would answer. Read the code first.
 
 ## DO ask the human about
@@ -20,11 +20,11 @@ Shared across all `/duet-*` skills. The duet skills execute autonomously. Humans
 
 ### /duet-plan (Phase 3, future)
 
-Multi-round Claude ↔ codex dialogue with consensus detection. Default round limit: 5. On deadlock, surface the disagreement summary with options to break the tie. Within rounds, agents debate freely without consulting the user.
+Multi-round Claude ↔ outside-voice dialogue with consensus detection. Default round limit: 5. On deadlock, surface the disagreement summary with options to break the tie. Within rounds, agents debate freely without consulting the user.
 
 ### /duet-impl (Phase 2, future)
 
-At each gate (foundation / mid / final), the reviewer(s) the duet setup chose review — codex, a fresh-context Claude, both, or Claude with a codex confirmation. The implementer first tries fix-and-proceed. If unsure, consults the gate reviewer with a clarifying question. Intermediate gates never block: an unresolved finding is recorded as a deferral and the walk proceeds. Escalates to user only when both are stuck on the same blind spot.
+At each gate (foundation / mid / final), the reviewer(s) the duet setup chose review — the outside voice (agy → codex), a fresh-context Claude, both, or Claude with an outside-voice confirmation. The implementer first tries fix-and-proceed. If unsure, consults the gate reviewer with a clarifying question. Intermediate gates never block: an unresolved finding is recorded as a deferral and the walk proceeds. Escalates to user only when both are stuck on the same blind spot.
 
 ### /duet-review (Phase 1, shipped v0.6.0)
 

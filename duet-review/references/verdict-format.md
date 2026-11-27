@@ -17,9 +17,10 @@ where `$RUN_DIR` is the per-invocation temp dir (mktemp -d). The path is printed
   "base": "<base-ref>",
   "head": "<head-sha>",
   "reviewers": ["claude", "codex"],
-  "reviewer_backends": { "a": "claude", "b": "codex" | "claude" },
+  "reviewer_backends": { "a": "claude", "b": "agy" | "codex" | "claude" | "none" },
   "cross_review_required": <bool>,
   "cross_review_done":     <bool>,
+  "snapshot_stale":        <bool>,
   "totals": {
     "high_consensus": <int>,
     "high_contested": <int>,
@@ -46,7 +47,7 @@ Each `<finding>` carries the reviewer-prompt.md schema plus synthesizer-added fi
 
 `claude` / `codex` in `reviewers` and in a finding's `agreed_by` are **slot identifiers** (reviewer A / reviewer B), not model names. They are kept stable whatever model actually ran, because downstream consumers key on those exact literals.
 
-`reviewer_backends` carries the real backend per slot: `a` is always `claude` (the orchestrator's own model), and `b` is set from the synthesizer's `--b-backend {codex,claude}` flag (default `codex`). Read this field — never the slot identifiers — when reporting which models produced a verdict.
+`reviewer_backends` carries the real backend per slot: `a` is always `claude` (the orchestrator's own model), and `b` is the provider that really filled slot B — `agy` or `codex` (the outside voice that answered, from `$RUN_DIR/codex.provider`), `claude` (a fresh-context Claude Reviewer B), or `none` (Reviewer B unavailable; a degraded run). It is set from the synthesizer's `--b-backend {agy,codex,claude,none}` flag (default `codex`). Read this field — never the slot identifiers — when reporting which models produced a verdict.
 
 ## Cross-review flags
 
@@ -54,6 +55,7 @@ Each `<finding>` carries the reviewer-prompt.md schema plus synthesizer-added fi
 |---|---|
 | `cross_review_required` | First-pass synthesizer sets `true` whenever ANY reviewer-exclusive finding has severity ≥ medium. Lows skip ("not a style committee"). |
 | `cross_review_done`     | `false` after first-pass synthesis; `true` after re-synthesis with `--cross-review-done` (i.e., after Step 4 of `/duet-review` runs). |
+| `snapshot_stale`        | `true` only for an embedded (`/duet-impl`) review whose tree moved after Step 1 bound it to a tree object, or could not be captured. Set by `--snapshot-stale`; it forces `REJECT` / exit 1 whatever the findings say, and Step 5 applies nothing. `false` otherwise. |
 
 **Hard gate.** `/duet-review` Step 5/6 refuse to run when `cross_review_required && !cross_review_done`. This is the structural fix for the v0.5.3-era "orchestrator skipped Step 4" failure mode — the synthesizer holds the state, the SKILL.md checks the state, the user never sees a stale verdict.
 
@@ -65,6 +67,8 @@ Each `<finding>` carries the reviewer-prompt.md schema plus synthesizer-added fi
 | `PASS-WITH-NOTES` | No `high`, but medium/low present. | 0 |
 | `REJECT` | ≥1 `high` finding agreed by both reviewers — first-pass exact-fingerprint match OR cross-review AGREE-HIGH promotion. | 1 |
 | `CONTESTED` | ≥1 `high` finding still reviewer-exclusive after cross-review (or before, if cross-review hasn't run yet). | 2 |
+
+`snapshot_stale: true` overrides this table: the verdict is `REJECT` (exit 1) — a review of a tree that moved under it is not a review of the tree that would pass.
 
 **Cross-review can flip the verdict** in either direction:
 - A first-pass solo medium can be promoted to a high-consensus finding (medium → `AGREE-HIGH` → REJECT).

@@ -117,3 +117,63 @@ test_unknown_option_is_usage_error() {
   ( cd "$d" && "$FP" --staged ) >/dev/null 2>&1 || rc=$?
   assert_exit 2 "$rc" "unknown flag"
 }
+
+_fps() { ( cd "$1" && "$FP" --state ); }
+
+test_state_sees_a_commit_the_content_digest_misses() {
+  # Edit + commit leaves `git diff HEAD` empty before and after, so the default
+  # digest cannot see it. A reviewer with shell access can do exactly that.
+  local d; d="$(_mkrepo st-commit)"
+  local c1 s1 c2 s2
+  c1="$(_fp "$d")"; s1="$(_fps "$d")"
+  printf 'more\n' >>"$d/a.txt"
+  git -C "$d" add a.txt; git -C "$d" -c commit.gpgsign=false commit -q -m "by the reviewer"
+  c2="$(_fp "$d")"; s2="$(_fps "$d")"
+  assert_eq "$c1" "$c2" "default digest blind to the commit (why --state exists)"
+  assert_ne "$s1" "$s2" "--state moves on a commit"
+}
+
+test_state_sees_index_and_untracked_name_changes() {
+  local d; d="$(_mkrepo st-index)"
+  local s1 s2 s3
+  printf 'x\n' >"$d/u1.txt"
+  s1="$(_fps "$d")"
+  mv "$d/u1.txt" "$d/u2.txt"
+  s2="$(_fps "$d")"
+  assert_ne "$s1" "$s2" "renaming an untracked file moves --state"
+  printf 'staged\n' >>"$d/a.txt"; git -C "$d" add a.txt; printf 'unstaged\n' >>"$d/a.txt"
+  s3="$(_fps "$d")"
+  git -C "$d" reset -q a.txt
+  assert_ne "$s3" "$(_fps "$d")" "unstaging moves --state"
+}
+
+test_state_is_deterministic() {
+  local d; d="$(_mkrepo st-det)"
+  assert_eq "$(_fps "$d")" "$(_fps "$d")" "two --state runs, unchanged tree"
+}
+
+test_state_sees_a_staged_mode_change() {
+  # The index section is `git diff --cached --raw --no-abbrev`: modes and full
+  # blob ids, not the patch text. A staged chmod must still move it.
+  local d; d="$(_mkrepo st-mode)"
+  local s1; s1="$(_fps "$d")"
+  chmod +x "$d/a.txt"; git -C "$d" add a.txt
+  assert_ne "$s1" "$(_fps "$d")" "a staged mode change moves --state"
+}
+
+test_state_sees_a_branch_switch() {
+  local d; d="$(_mkrepo st-branch)"
+  local s1; s1="$(_fps "$d")"
+  git -C "$d" checkout -q -b other
+  assert_ne "$s1" "$(_fps "$d")" "the same commit on another branch moves --state"
+}
+
+test_an_untracked_symlink_is_never_followed() {
+  # A link to /dev/zero used to block `cat` forever, past every deadline.
+  local d; d="$(_mkrepo symlink)"
+  ln -s /dev/zero "$d/zero"
+  local rc=0 a; a=$( cd "$d" && "$KOJI/bin/koji-timeout" 10 "$FP" ) || rc=$?
+  assert_exit 0 "$rc" "finishes instead of reading /dev/zero"
+  rm "$d/zero"; ln -s /dev/null "$d/zero"
+  assert_ne "$a" "$( cd "$d" && "$FP" )" "a changed link target moves the digest"
+}

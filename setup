@@ -124,5 +124,27 @@ echo ""
 echo "Self-check (load-bearing skill markers):"
 "$KOJI_DIR/bin/koji-selfcheck" || { echo "  SELF-CHECK FAILED — a skill's load-bearing markers are missing (see above)." >&2; exit 1; }
 
+# Presence only, never a failure: the cross-model skills need one outside voice,
+# but koji installs fine without one, and sign-in shows up at the first dispatch.
+echo ""
+echo "Outside voice (the non-Claude reviewer; order: koji-config get outside_order, default agy,codex):"
+for p in agy codex; do
+  if command -v "$p" >/dev/null 2>&1; then echo "  $p — installed"; else echo "  $p — not installed"; fi
+done
+if ! "$KOJI_DIR/bin/koji-outside-exec" --available >/dev/null 2>&1; then
+  if command -v agy >/dev/null 2>&1 || command -v codex >/dev/null 2>&1; then
+    echo "  None of the installed outside voices is in your order ($("$KOJI_DIR/bin/koji-outside-exec" --order 2>/dev/null)). Run: koji-config set outside_order agy,codex"
+  else
+    echo "  No outside voice found. /duet-*, /triangulate and /plan-triangulate-review need agy or codex."
+  fi
+fi
+if command -v agy >/dev/null 2>&1; then
+  if [ "$("$KOJI_DIR/bin/koji-config" get agy_bypass 2>/dev/null)" = yes ]; then
+    echo "  agy bypass: on — agy may run shell tools, under koji's deny rules"
+  else
+    echo "  agy bypass: off — agy reads files only. To let it run shell tools: koji-config set agy_bypass yes"
+  fi
+fi
+
 echo ""
 echo "koji is ready. Run /koji-init in any project to get started."

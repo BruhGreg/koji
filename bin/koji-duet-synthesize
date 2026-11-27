@@ -8,9 +8,13 @@ Optional second-pass inputs:
   --claude-cross  Claude's verdicts on codex's solo findings (cross-review)
   --codex-cross   codex's verdicts on Claude's solo findings (cross-review)
   --cross-review-done  Mark the verdict as final (no more cross-review passes)
+  --snapshot-stale     The tree moved during an embedded final review: force
+                       REJECT and set snapshot_stale (see reviewer-backend.md)
 
 Backend provenance:
-  --b-backend {codex,claude}  Which model actually filled reviewer slot B
+  --b-backend {agy,codex,claude,none}  Which model actually filled reviewer
+                              slot B: the outside voice that answered (agy or
+                              codex), claude, or none on a degraded run
                               (default: codex). Recorded verbatim in the output
                               as "reviewer_backends": {"a": "claude", "b": ...}.
   The literals "claude"/"codex" in `agreed_by` and `reviewers` are SLOT
@@ -268,10 +272,15 @@ def main() -> int:
                     help="codex's verdicts on Claude's solo findings")
     ap.add_argument("--cross-review-done", action="store_true",
                     help="Mark this verdict as cross-review-final")
-    ap.add_argument("--b-backend", default="codex", choices=("codex", "claude"),
-                    help="Model that actually filled reviewer slot B "
-                         "(default: codex). Recorded in reviewer_backends; does "
-                         "NOT rename the A/B slot identifiers.")
+    ap.add_argument("--snapshot-stale", action="store_true",
+                    help="The tree moved while this review ran (embedded final "
+                         "review): force REJECT and record snapshot_stale.")
+    ap.add_argument("--b-backend", default="codex", choices=("agy", "codex", "claude", "none"),
+                    help="Model that actually filled reviewer slot B: agy or "
+                         "codex (the outside voice that answered), claude, or "
+                         "none (degraded run). Default codex. Recorded in "
+                         "reviewer_backends; does NOT rename the A/B slot "
+                         "identifiers.")
     args = ap.parse_args()
 
     claude = load_findings(args.claude)
@@ -342,6 +351,11 @@ def main() -> int:
         verdict, exit_code = "PASS-WITH-NOTES", 0
     else:
         verdict, exit_code = "PASS", 0
+    # A review of a tree that moved under it is not a review of the tree that
+    # would pass: an embedded (unattended) final gate fails closed, whatever the
+    # findings say. The caller latches staleness, so this stays set on re-runs.
+    if args.snapshot_stale:
+        verdict, exit_code = "REJECT", 1
 
     # cross_review_required: any reviewer-exclusive finding at severity >= medium
     # would benefit from a second-opinion pass. Lows skip ("not a style
@@ -354,6 +368,10 @@ def main() -> int:
         if f.get("severity") in ("high", "medium"))
     cross_review_required = remaining_solo_actionable > 0
     cross_review_done = bool(args.cross_review_done)
+    # A stale verdict is already final: no cross-review can change it, so none
+    # is armed (it would cost a full outside-voice dispatch for nothing).
+    if args.snapshot_stale:
+        cross_review_required, cross_review_done = False, True
 
     out = {
         "verdict": verdict,
@@ -366,6 +384,7 @@ def main() -> int:
         "reviewer_backends": {"a": "claude", "b": args.b_backend},
         "cross_review_required": cross_review_required,
         "cross_review_done": cross_review_done,
+        "snapshot_stale": bool(args.snapshot_stale),
         "totals": {
             "high_consensus": len(high_consensus),
             "high_contested": len(high_contested),

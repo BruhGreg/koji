@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# fake agy for tests — answers the free lookups (/model, /effort, /usage) the
+# way agy 1.5.18 does and plays ONE stream-json scenario, so koji-agy-exec and
+# koji-outside-exec can be tested without spending a real call.
+#
+# Env:
+#   FAKE_AGY_DIR          where to record what it received (required)
+#   FAKE_AGY_MODE         success|prose|verdict|empty|quota|quota-stderr|trace|error|noresult|banner|hang|write|commit|toolstep|readstep|needtools
+#   FAKE_AGY_PERMISSION_MODE  the init event's permission_mode (default: always-proceed
+#                         under --dangerously-skip-permissions, else request-review — as agy)
+#   FAKE_AGY_MODEL        /model id            (default gemini-4-neon-high)
+#   FAKE_AGY_EFFORTS      /effort available    (default low,medium,high,xhigh)
+#   FAKE_AGY_USAGE        Gemini 5h remaining_fraction for /usage (default 0.9)
+#   FAKE_AGY_LOOKUP_FAIL  model|effort|usage — that lookup exits 1
+#   FAKE_AGY_REPLY        the response text for success/write/commit (default [])
+#   FAKE_AGY_LOOKUP_BANNER  print an update notice before each lookup's JSON
+#   FAKE_AGY_LOOKUP_PRETTY  pretty-print each lookup's JSON over several lines
+set -u
+D="${FAKE_AGY_DIR:?FAKE_AGY_DIR unset}"
+ARGS="$*"
+_emit() {   # a lookup's JSON on stdin → stdout, optionally after a banner / pretty-printed
+  [ -n "${FAKE_AGY_LOOKUP_BANNER:-}" ] && echo "A new version of agy is available (1.6.0) — restart to update"
+  if [ -n "${FAKE_AGY_LOOKUP_PRETTY:-}" ]; then
+    python3 -c 'import json,sys; print(json.dumps(json.loads(sys.stdin.read()), indent=2))'
+  else
+    cat
+  fi
+}
+
+case "$ARGS" in
+  "-p /model "*)
+    [ "${FAKE_AGY_LOOKUP_FAIL:-}" = model ] && exit 1
+    python3 -c 'import json,os; m=os.environ.get("FAKE_AGY_MODEL","gemini-4-neon-high")
+print(json.dumps({"conversation_id":"","status":"SUCCESS","response":m+"\n","command":{"name":"model","data":{"id":m,"effort":"high"}}}))' | _emit
+    exit 0 ;;
+  "-p /effort "*)
+    printf '%s\n' "$ARGS" > "$D/effort.argv"
+    [ "${FAKE_AGY_LOOKUP_FAIL:-}" = effort ] && exit 1
+    python3 -c 'import json,os
+print(json.dumps({"status":"SUCCESS","command":{"name":"effort","data":{"adjustable":True,"available":os.environ.get("FAKE_AGY_EFFORTS","low,medium,high,xhigh").split(",")}}}))' | _emit
+    exit 0 ;;
+  "-p /usage "*)
+    [ "${FAKE_AGY_LOOKUP_FAIL:-}" = usage ] && exit 1
+    python3 -c 'import json,os; f=float(os.environ.get("FAKE_AGY_USAGE","0.9"))
+print(json.dumps({"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"window":"5h","remaining_fraction":f,"reset_time":"2026-11-27T07:00:00Z"}]}]}}}))' | _emit
+    exit 0 ;;
+esac
+
+# --- stream mode ---
+printf '%s\n' "$ARGS" > "$D/stream.argv"
+pwd -P > "$D/stream.cwd"
+cat > "$D/stream.stdin"
+# A big prompt arrives as a short pointer to a task file: keep a copy of the
+# file (it is removed when the adapter exits) so a test can check what agy got.
+python3 -c 'import json,re,shutil,sys
+try:
+    t = json.loads(open(sys.argv[1]).read())["message"]["content"]
+except Exception:
+    sys.exit(0)
+m = re.search(r"It is in the file (\S+) \.", t)
+if m:
+    open(sys.argv[2] + "/task.path", "w").write(m.group(1))
+    try:
+        shutil.copy(m.group(1), sys.argv[2] + "/task.copy")
+    except Exception:
+        pass' "$D/stream.stdin" "$D"
+result() {   # result <status> <response> <error> <denied-json>
+  python3 -c 'import json,sys
+print(json.dumps({"event":"result","result":{"status":sys.argv[1],"response":sys.argv[2],"error":sys.argv[3],"denied_actions":json.loads(sys.argv[4])}}))' "$@"
+}
+MODE="${FAKE_AGY_MODE:-success}"
+[ "$MODE" = banner ] && echo "A new version of agy is available (1.6.0) — restart to update"
+PM=request-review
+case " $ARGS " in *" --dangerously-skip-permissions "*) PM=always-proceed ;; esac
+printf '{"event":"init","init":{"permission_mode":"%s"}}\n' "${FAKE_AGY_PERMISSION_MODE:-$PM}"
+step() { printf '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"%s"}}\n' "$1"; }
+case "$MODE" in
+  success|banner) result SUCCESS "${FAKE_AGY_REPLY:-[]}" "" "[]" ;;
+  prose)    result SUCCESS "Looks fine to me." "" "[]" ;;
+  verdict)  result SUCCESS "The plan holds.
+VERDICT: AGREE" "" "[]" ;;
+  empty)    result SUCCESS "" "" '[{"action":"command","display_name":"Bash"}]'
+            echo 'jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.' >&2 ;;
+  quota)    result ERROR "" "RESOURCE_EXHAUSTED: you have exhausted your capacity" "[]"; exit 1 ;;
+  error)    result ERROR "" "PERMISSION_DENIED (code 403): Verify your account" "[]"; exit 1 ;;
+  quota-stderr) echo "Error: rate-limit exceeded for this window, retry later" >&2; exit 1 ;;
+  trace)    echo "panic: unexpected EOF at com.example.RateLimiter.acquire(RateLimiter.java:42)" >&2
+            result ERROR "" "internal error" "[]"; exit 1 ;;
+  noresult) : ;;
+  toolstep) step read_file; step run_command
+            result SUCCESS "${FAKE_AGY_REPLY:-[]}" "" "[]" ;;
+  readstep) step read_file; step grep_search
+            result SUCCESS "${FAKE_AGY_REPLY:-[]}" "" "[]" ;;
+  needtools) result SUCCESS "KOJI-NEEDS-TOOLS" "" "[]" ;;
+  hang)     sleep 30 ;;
+  write)    echo changed >> existing.txt
+            result SUCCESS "${FAKE_AGY_REPLY:-[]}" "" "[]" ;;
+  commit)   echo changed >> existing.txt
+            git add -A >/dev/null 2>&1
+            git -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -qm x >/dev/null 2>&1
+            result SUCCESS "${FAKE_AGY_REPLY:-[]}" "" "[]" ;;
+esac
+exit 0

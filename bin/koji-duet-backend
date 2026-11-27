@@ -2,6 +2,7 @@
 # koji-duet-backend — resolve which model(s) back a duet role, from one table.
 #
 # Usage: koji-duet-backend <plan-round|impl-gate|review-b> [setup-file]
+#        koji-duet-backend provider <record> | b-provider <run-dir>   (see below)
 #
 # Prints exactly one token on stdout: `codex`, `claude` or `both`. Nothing
 # else — the caller uses it inline (`leg=$(koji-duet-backend impl-gate "$RUN_DIR/duet-setup") || exit 1`).
@@ -47,6 +48,8 @@ _usage() {
 koji-duet-backend — which model(s) back a duet role.
 
 Usage: koji-duet-backend <context> [setup-file]
+       koji-duet-backend provider <record>
+       koji-duet-backend b-provider <run-dir>
 
 Contexts:
   plan-round   a /duet-plan dialogue round
@@ -56,8 +59,55 @@ Contexts:
 Prints `codex`, `claude` or `both`. The strategy comes from <setup-file>
 (the run's duet-setup tuple; authoritative — missing/invalid → exit 3), else
 $DUET_STRATEGY, else codex.
+
+provider     who answered, from a provider record: agy | codex | none
+             (no record → codex; an empty or unknown token → none)
+b-provider   who filled /duet-review's slot B: agy | codex | claude | none
+             (lost duet-setup → exit 3; codex.unavailable → none)
 USAGE
 }
+
+# --- provider contexts: who REALLY filled the outside-voice slot ---------------
+# The strategy says which ROLE reviews; a provider record (written by
+# koji-outside-exec, line 1 `<agy|codex|none> …`) says which CLI answered. These
+# two contexts are the one resolver every SKILL.md uses — five inline copies had
+# already drifted apart.
+#
+#   koji-duet-backend provider <record>      agy | codex | none
+#       no file          → codex  (a run started before 0.11.0 wrote no record)
+#       empty / unknown  → none   (+ stderr): an existing record that proves no
+#                          provider must never be read as one — the /duet-impl
+#                          consult pins its WITHDRAW rights to this answer
+#   koji-duet-backend b-provider <run-dir>   agy | codex | claude | none
+#       duet-setup missing/invalid → exit 3 (run state lost), checked FIRST
+#       codex.unavailable exists    → none   (a degraded run, any backend)
+#       strategy role is claude     → claude
+#       otherwise                   → provider "$run_dir/codex.provider"
+_provider() {   # _provider <record>
+  local rec="$1" p=""
+  if [ ! -e "$rec" ]; then printf 'codex\n'; return 0; fi
+  # `|| true`: read returns 1 on a last line with no newline, and set -e would
+  # abort with empty stdout.
+  read -r p _ < "$rec" || true
+  case "$p" in
+    agy|codex|none) printf '%s\n' "$p" ;;
+    *) printf 'koji-duet-backend: provider record %s has no usable token (%s) — treating it as none\n' "$rec" "${p:-empty}" >&2
+       printf 'none\n' ;;
+  esac
+}
+case "$CONTEXT" in
+  provider)
+    [ -n "$SETUP_FILE" ] || { printf 'ERROR: provider needs a record path\n' >&2; exit 2; }
+    _provider "$SETUP_FILE"
+    exit 0 ;;
+  b-provider)
+    [ -n "$SETUP_FILE" ] || { printf 'ERROR: b-provider needs a run directory\n' >&2; exit 2; }
+    ROLE="$("$KOJI_BIN/koji-duet-backend" review-b "$SETUP_FILE/duet-setup")" || exit $?
+    if [ -e "$SETUP_FILE/codex.unavailable" ]; then printf 'none\n'
+    elif [ "$ROLE" = "claude" ]; then printf 'claude\n'
+    else _provider "$SETUP_FILE/codex.provider"; fi
+    exit 0 ;;
+esac
 
 case "$CONTEXT" in
   plan-round|impl-gate|review-b) ;;

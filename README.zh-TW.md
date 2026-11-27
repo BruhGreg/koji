@@ -57,9 +57,9 @@ TODO.md                      # 任務追蹤
 
 | 技能 | 功能 |
 |------|------|
-| `/duet-plan` | 多輪 Claude↔codex 規劃對話。達成共識後將計畫鎖定到 `$DOCS_PATH/plans/<slug>.md` |
+| `/duet-plan` | Claude 與外部聲音(agy → codex)之間的多輪規劃對話。達成共識後將計畫鎖定到 `$DOCS_PATH/plans/<slug>.md` |
 | `/duet-impl` | 依照鎖定的計畫逐關卡實作,並以任務清單追蹤進度。每個 `<!-- gate: NAME -->` 由你的 duet 設定所選的審查者關卡審查,最後執行 `/duet-review` |
-| `/duet-review` | 雙審查者對抗式程式碼審查。Claude + codex 並行**背景執行**——你可以繼續做其他事——意見分歧時交叉審查,高信心修正提示你套用。範圍可為 `base..HEAD`、已暫存(staged)、或未提交的**工作目錄(working tree)** |
+| `/duet-review` | 雙審查者對抗式程式碼審查。Claude + 外部聲音並行**背景執行**——你可以繼續做其他事——意見分歧時交叉審查,高信心修正提示你套用。範圍可為 `base..HEAD`、已暫存(staged)、或未提交的**工作目錄(working tree)** |
 
 所有 duet 技能皆遵循 [代理自主原則](references/agent-autonomy.md):代理之間共同解決技術問題;只有在無法協商或涉及政策選擇時才會詢問使用者。
 
@@ -67,15 +67,15 @@ TODO.md                      # 任務追蹤
 
 | 技能 | 功能 |
 |------|------|
-| `/triangulate` | Claude + codex 對同一個問題並行論述,每個聲音可進行網路與程式碼研究。你綜合判斷做出決定。可選擇儲存到 `.koji/plans/` 或 `.koji/research/`,或附加到既有計畫——根據專案目前進行中的項目以對話方式選擇 |
+| `/triangulate` | Claude + 外部聲音對同一個問題並行論述,每個聲音可進行網路與程式碼研究。你綜合判斷做出決定。可選擇儲存到 `.koji/plans/` 或 `.koji/research/`,或附加到既有計畫——根據專案目前進行中的項目以對話方式選擇 |
 
 與 `/duet-*` 不同:duet 技能讓 AI 聲音達成共識;`/triangulate` 把**你**保留為第三個參考點與綜合者。
 
-**計畫硬化** — 對鎖定計畫的自主跨模型審查(需要 gstack 與 codex)。
+**計畫硬化** — 對鎖定計畫的自主跨模型審查(需要 gstack 與一個外部聲音:agy 或 codex)。
 
 | 技能 | 功能 |
 |------|------|
-| `/plan-triangulate-review` | 在鎖定的計畫上內聯驅動 gstack 的 `/plan-eng-review`;對每項發現先分流,只有真正有爭議的才跑一輪 Claude↔codex 論述(達成共識即自動鎖定,硬性 3 輪上限),最後以一份勘誤(erratum)批准。設計上保持精簡——不是扇出。需以 `triangulate-review` 意圖叫用(非單獨的 `/triangulate`) |
+| `/plan-triangulate-review` | 在鎖定的計畫上內聯驅動 gstack 的 `/plan-eng-review`;對每項發現先分流,只有真正有爭議的才跑一輪 Claude↔外部聲音論述(達成共識即自動鎖定,硬性 3 輪上限),最後以一份勘誤(erratum)批准。設計上保持精簡——不是扇出。需以 `triangulate-review` 意圖叫用(非單獨的 `/triangulate`) |
 
 ## 設定
 
@@ -95,7 +95,7 @@ wrap:
   commit_gate: auto          # auto = 有的話跑 `npm run lint:check` | none | "<指令>"
 ```
 
-全域偏好設定（`commit_strategy` — `together` | `split` | `amend-if-same-session` —、`duet_setup` — 你上次選的 duet 設定 —、`auto_update`，以及 `session_instructions` — `/kick-off` 在整個工作階段都會遵循的文字，例如回覆風格）放在 `~/.config/koji/config.yaml`。用 `koji-config set <key> "<value>"` 設定。
+全域偏好設定（`commit_strategy` — `together` | `split` | `amend-if-same-session` —、`duet_setup` — 你上次選的 duet 設定 —、`outside_order` — 外部聲音用哪個 CLI、依什麼順序：`agy,codex`（預設）、`codex,agy`、`agy` 或 `codex` —、`auto_update`，以及 `session_instructions` — `/kick-off` 在整個工作階段都會遵循的文字，例如回覆風格）放在 `~/.config/koji/config.yaml`。用 `koji-config set <key> "<value>"` 設定。
 
 ## 重要功能
 
@@ -107,21 +107,21 @@ wrap:
 
 **Wrap 零提示。** `/wrap` 全程不提示：新增照做、確定性的移除照做、判斷式移除只在項目已「established」時才動手，提交則印出訊息後直接進行、不等待確認。它唯一會問的是提交方式（一次提交，或先程式碼再文件），每台機器問一次，答案會被記住。`wrap.commit_gate` 會在 `/wrap` 提交前先跑你的提交閘門——`auto` 會在 `package.json` 有 `npm run lint:check` 時使用它；閘門失敗絕不默默提交，閘門不存在則略過、絕不致命。`commit_strategy: amend-if-same-session` 會把僅含文件的 wrap 併入你自己本工作階段、尚未推送的最後一次提交（`git commit --amend --trailer`，保留原標題），而不是在後面多掛一個 `docs(koji)` 提交。
 
-**Duet 工作流程。** 不會卡住使用者的跨模型代理協作。`/duet-plan` 執行多輪 Claude↔codex 對話直到共識,鎖定計畫。`/duet-impl` 依關卡逐步走過計畫,每關都有關卡審查（由誰審查依下方的 duet 設定）,接著針對鎖定計畫中每一項明確承諾稽核累積 diff——這是與品質審查不同的契約驗證。`/duet-review` 進行雙審查者對抗式檢查,對於審查者間任何 medium/high 不一致皆觸發嚴重程度感知的交叉審查;硬性閘門、`-PRELIMINARY` 後綴,加上由 `/duet-impl` 內聯驅動時的呼叫端事後檢查,確保交叉審查不會被悄悄略過。三個技能皆以背景任務執行審查者——進行中你可以繼續工作；`/duet-impl` 的中間關卡從不卡住。`/duet-review` 的 Claude 端會隨你選的功夫調整深度：在 `max`（或明確說「完整審查」、「扇出」、「深度審查」）時，會扇出成五個角度審查者（正確性、移除行為、跨檔呼叫、重用簡化、設計高度），由主代理綜整成單一發現集；`xhigh` 與 `high` 則跑單次整體審查，而說「快一點」、「省 token」即使在 max 下也會強制單次。
+**Duet 工作流程。** 不會卡住使用者的跨模型代理協作。`/duet-plan` 執行多輪 Claude↔外部聲音對話直到共識,鎖定計畫。`/duet-impl` 依關卡逐步走過計畫,每關都有關卡審查（由誰審查依下方的 duet 設定）,接著針對鎖定計畫中每一項明確承諾稽核累積 diff——這是與品質審查不同的契約驗證。`/duet-review` 進行雙審查者對抗式檢查,對於審查者間任何 medium/high 不一致皆觸發嚴重程度感知的交叉審查;硬性閘門、`-PRELIMINARY` 後綴,加上由 `/duet-impl` 內聯驅動時的呼叫端事後檢查,確保交叉審查不會被悄悄略過。三個技能皆以背景任務執行審查者——進行中你可以繼續工作；`/duet-impl` 的中間關卡從不卡住。`/duet-review` 的 Claude 端會隨你選的功夫調整深度：在 `max`（或明確說「完整審查」、「扇出」、「深度審查」）時，會扇出成五個角度審查者（正確性、移除行為、跨檔呼叫、重用簡化、設計高度），由主代理綜整成單一發現集；`xhigh` 與 `high` 則跑單次整體審查，而說「快一點」、「省 token」即使在 max 下也會強制單次。
 
-**Duet 設定。** 每次 duet 執行都從一個問題開始：預算怎麼花。選一種審查策略——`both`（Claude 與 codex 每一輪、每一關都審查；在關卡與最終審查時交叉審查彼此不一致之處）、`claude-then-codex`（全新上下文的 Claude 審查每一輪與每一關，每次鎖定或通過由一次 codex 呼叫確認）、`codex`（codex 審查一切），或 `claude`（完全不用 codex——同一模型家族、訊號較弱，是配額耗盡時的逃生口）——再加上兩個家族共用的功夫層級（`max` / `xhigh` / `high`）與 Claude 審查者模型。選擇會被記住，下一次只需一鍵：沿用或更改。直接在叫用語句裡說出來（「duet impl the oauth plan with both reviewers at max」）就完全不會問。Claude 審查者透過 `setup` 安裝的 `koji-reviewer-*` 代理以你選的功夫執行——永遠是全新上下文，絕不是撰寫端工作階段的 fork；codex 則以該 `model_reasoning_effort` 執行。配額規則：當 codex 在「非最終」的審查上撞到配額（或無法啟動）時，koji 會為該次審查改用全新上下文的 Claude 審查者，下一次再試 codex；只有最終審查會等 codex。
+**Duet 設定。** 每次 duet 執行都從一個問題開始：預算怎麼花。選一種審查策略——`both`（Claude 與外部聲音每一輪、每一關都審查；在關卡與最終審查時交叉審查彼此不一致之處）、`claude-then-codex`（全新上下文的 Claude 審查每一輪與每一關，每次鎖定或通過由一次外部聲音呼叫確認）、`codex`（外部聲音審查一切），或 `claude`（完全不用外部聲音——同一模型家族、訊號較弱，是配額耗盡時的逃生口）——再加上兩個家族共用的功夫層級（`max` / `xhigh` / `high`）與 Claude 審查者模型。選擇會被記住，下一次只需一鍵：沿用或更改。直接在叫用語句裡說出來（「duet impl the oauth plan with both reviewers at max」）就完全不會問。Claude 審查者透過 `setup` 安裝的 `koji-reviewer-*` 代理以你選的功夫執行——永遠是全新上下文，絕不是撰寫端工作階段的 fork；外部聲音則以該功夫執行(agy 會降到其模型提供的最高層級,並註明)。配額規則：當所有外部聲音在「非最終」的審查上都用盡(配額、錯誤或無法啟動)時，koji 會為該次審查改用全新上下文的 Claude 審查者，下一次再試外部聲音；只有最終審查會等待。
 
 **程式碼契合（codebase fit）。** duet 技能會讓新程式碼契合「這個專案」既有的慣例——檔案結構、命名、慣用寫法、分層——而不只看正確性。`/duet-plan` 會在每份計畫中寫入一段 Codebase Fit Contract,`/duet-impl` 的關卡審查與 `/duet-review` 都帶有 `codebase-fit` 審查視角。共用的參考是 koji 文件目錄中的 `CODEBASE_CONVENTIONS.md`:一個中樞,它透過 `sources:` 清單「指向」（而非複製）專案自己的慣例文件——`CONTRIBUTING.md`、`AGENTS.md`、`.cursorrules`、`STYLE.md`——並從審查實際抓到的問題逐步累積標準範例索引與「已否決模式」紀錄。`/koji-init` 為新專案建立它,`/kick-off` 則把它回填到既有專案。
 
 **死碼掃描(dead-code sweep)。** `/duet-review` 與 `/duet-impl` 的關卡審查者會主動標出 diff 讓哪些程式碼路徑變得不可達(`deadcode` finding)——被取代的 helper、結構上已死的分支、永遠不會進入的 match arm。內建例外處理:測試 scaffolding、生成程式碼、以及前向相容/遷移橋接程式碼會被略過,讓「加新路徑、保留舊路徑」的基底搭建階段順利通過。`/duet-impl` 的執行末段報告也會在 promise 稽核旁顯示一個程式碼增刪比(例如 `+2310 / −267 (ratio 8.6:1)`)——基底搭建 vs 重構的元訊號,搭配 deadcode 發現一起判讀。
 
-**三角化(`/triangulate`)。** 當你想要多方論述但希望由「你」當綜合者(而不是讓代理收斂)時:Claude + codex 並行針對單一問題論述,各自可進行網路研究,呈現立場,你權衡與決定。可選擇儲存到 `.koji/plans/` 或 `.koji/research/`,或將綜合段落附加到既有計畫——根據專案目前進行中的項目以對話方式選擇。若要對「鎖定的」計畫做*自主*的逐項硬化,這個迴圈現在已成為獨立技能——**`/plan-triangulate-review`**(見下);單獨的 `/triangulate` 維持為純粹的單一問題引擎。
+**三角化(`/triangulate`)。** 當你想要多方論述但希望由「你」當綜合者(而不是讓代理收斂)時:Claude + 外部聲音並行針對單一問題論述,各自可進行網路研究,呈現立場,你權衡與決定。可選擇儲存到 `.koji/plans/` 或 `.koji/research/`,或將綜合段落附加到既有計畫——根據專案目前進行中的項目以對話方式選擇。若要對「鎖定的」計畫做*自主*的逐項硬化,這個迴圈現在已成為獨立技能——**`/plan-triangulate-review`**(見下);單獨的 `/triangulate` 維持為純粹的單一問題引擎。
 
-**計畫硬化(`/plan-triangulate-review`)。** 對「鎖定的」計畫做自主、精簡的跨模型硬化。內聯驅動 gstack 的 `/plan-eng-review`;對每項發現先分流——大多數只需讀原始碼就能反駁或記錄,只有真正有爭議的才進入論述(Claude↔codex,達成共識即自動鎖定,硬性 3 輪上限)。最後以一份勘誤批准已鎖定的決定、跨模型讓步與仍有分歧的項目。需以 `triangulate-review` 意圖叫用(非單獨的 `/triangulate`);需要 gstack 與 codex。參考執行在 4 次模型呼叫內硬化了一份鎖定的 ADR——是分流迴圈,不是扇出。
+**計畫硬化(`/plan-triangulate-review`)。** 對「鎖定的」計畫做自主、精簡的跨模型硬化。內聯驅動 gstack 的 `/plan-eng-review`;對每項發現先分流——大多數只需讀原始碼就能反駁或記錄,只有真正有爭議的才進入論述(Claude↔外部聲音,達成共識即自動鎖定,硬性 3 輪上限)。最後以一份勘誤批准已鎖定的決定、跨模型讓步與仍有分歧的項目。需以 `triangulate-review` 意圖叫用(非單獨的 `/triangulate`);需要 gstack 與一個外部聲音(agy 或 codex)。參考執行在 4 次模型呼叫內硬化了一份鎖定的 ADR——是分流迴圈,不是扇出。
 
-**離線(walk-away)工作階段。** `/duet-plan`、`/duet-impl` 與 `/plan-triangulate-review` 會在背景 AI 任務執行期間讓機器保持喚醒(`caffeinate` / `systemd-inhibit`),並在結束時釋放,讓你能啟動一段長時間執行後離開。(單獨的 `/triangulate` 是互動式的——它把每個決定交給你——因此跟 `/duet-review` 一樣略過喚醒。)僅這些流程採用(絕不包含一般的 `/kick-off`);採用引用計數,重疊執行共用同一個喚醒程序,且具擁有權安全:絕不會關閉你自己啟動的喚醒程序。`/duet-impl` 天生就適合無人值守:遇到卡住的關卡絕不凍結。某個關卡在用盡重試後仍無法通過時,會被記錄成 `deferred-findings.md` 中的延後項目——待你回來時一次全部呈現——並繼續往下走,而不是卡在彈窗提示上。而 codex 的配額回覆或啟動失敗也絕不會被誤讀為「零發現→通過」:最後一關之前的關卡會改用全新上下文的 Claude 審查者繼續往下走,只有最終的 `/duet-review` 關卡會退避（約 15 分鐘）並在 codex 的 5 小時視窗內恢復——配額耗盡只會讓流程變慢,絕不會默默記下一次不實的通過審查。
+**離線(walk-away)工作階段。** `/duet-plan`、`/duet-impl` 與 `/plan-triangulate-review` 會在背景 AI 任務執行期間讓機器保持喚醒(`caffeinate` / `systemd-inhibit`),並在結束時釋放,讓你能啟動一段長時間執行後離開。(單獨的 `/triangulate` 是互動式的——它把每個決定交給你——因此跟 `/duet-review` 一樣略過喚醒。)僅這些流程採用(絕不包含一般的 `/kick-off`);採用引用計數,重疊執行共用同一個喚醒程序,且具擁有權安全:絕不會關閉你自己啟動的喚醒程序。`/duet-impl` 天生就適合無人值守:遇到卡住的關卡絕不凍結。某個關卡在用盡重試後仍無法通過時,會被記錄成 `deferred-findings.md` 中的延後項目——待你回來時一次全部呈現——並繼續往下走,而不是卡在彈窗提示上。而外部聲音的配額回覆或啟動失敗也絕不會被誤讀為「零發現→通過」:最後一關之前的關卡會改用全新上下文的 Claude 審查者繼續往下走,只有最終的 `/duet-review` 關卡會退避（約 15 分鐘）並在該提供者的配額視窗內恢復——配額耗盡只會讓流程變慢,絕不會默默記下一次不實的通過審查。
 
-**Codex 派送。** koji 發出的每一次 codex 呼叫都在期限內、並透過同一個包裝器執行——在每一台機器上皆然,包含未安裝 `coreutils` 的原生 macOS(舊路徑會在此悄悄地不設上限地執行)。審查過程衍生的任何程序都不會存活得比它久。各種失敗模式被明確區分,因此沒有一種能被讀成一次乾淨的審查:當工作階段「本身」就跑在 codex 之下時,整個執行會直接停止(外部聲音不能是同一個模型,而在此改用 Claude 審查者等於讓審查者 A 為自己評分);派送區塊若遺失變數或組出空白提示,會被回報為區塊有誤,絕不會被悄悄降級成替代審查者;而真正的環境失敗——暫存目錄滿了、CLI 卡住——則依照審查者失敗一貫的方式降級,並附上明說的橫幅。koji 也會對已知有 stdin 死鎖問題的 codex CLI 版本提出警告,因為 koji 正是以 stdin 餵入每一份提示。
+**外部聲音:agy 優先,codex 其次。** 每個跨模型技能中的第二個模型永遠不是 Claude。koji 先問 agy(Google Antigravity CLI),再問 codex:當其中一個沒有可用的回答——配額、錯誤、逾時、空白回覆,或格式不符的回覆——同一份提示就交給下一個,而執行紀錄會寫明是誰回答的。用 `koji-config set outside_order codex,agy` 更改順序。agy 使用你的 Gemini 模型——agy 中的 Claude 或 GPT 模型會被拒絕——功夫則取它所提供、且不超過你所選的最高層級。**agy 預設只讀取檔案**:當審查需要 shell 指令時,改由 codex 回答。一個全域設定 `koji-config set agy_bypass yes` 讓 agy 以略過權限(bypass)模式執行 shell 工具——只在 koji 的包裝器內,你自己的 agy 設定不受影響——並以拒絕規則擋下大部分的寫入與副作用(shell 重新導向與 `$(...)` 除外);專案檔案變動時,`/duet-impl` 的關卡仍會拒絕通過。預設關閉,是因為審查內容可能包含不受信任的文字,例如 PR diff 或網頁。超過約 160 KB 的提示會改以檔案交給 agy 讀取,因為 agy 會截斷內嵌的長提示。`/duet-impl` 的關卡只會在它審查過的那棵樹上通過:若樹在審查期間變動,該關卡會重新審查,而最終審查會以失敗收場(fail closed)。每一次呼叫都在期限內、並透過同一個包裝器執行——在每一台機器上皆然,包含未安裝 `coreutils` 的原生 macOS。審查過程衍生的任何程序都不會存活得比它久。各種失敗模式被明確區分,因此沒有一種能被讀成一次乾淨的審查:當工作階段「本身」就跑在 codex 或 agy 代理之下時,整個執行會直接停止(審查者 A 不能是外部聲音自己的模型);派送區塊若遺失變數或組出空白提示,會被回報為區塊有誤,絕不會被悄悄降級成替代審查者;而真正的環境失敗——暫存目錄滿了、CLI 卡住——則依照審查者失敗一貫的方式降級,並附上明說的橫幅。koji 也會對已知有 stdin 死鎖問題的 codex CLI 版本提出警告,因為 koji 正是以 stdin 餵入每一份提示。
 
 **計畫與研究工作文件。** `.koji/plans/`(已決定、待實作的工作)與 `.koji/research/`(調查發現,待驗證)。研究檔案以主題為定址單位——新發現會累積進現有主題檔案(`## Decisions` 段落由新到舊),而不是另開以工作階段命名的平行檔案。輕量的 YAML frontmatter(`status:` 欄位,依類型而定:plans 為 pending/in-progress/completed/archived,research 為 unvalidated/validated/archived)。`/kick-off` 會在工作階段開始時列出待辦項目;`/duet-impl` 會在執行結束時將計畫標記為 `completed`;`koji-plans-research --set-status <path> <new>` 可從命令列修改,`--set-next-step <path> "<text>"` 則改寫 `next-step:` 那一行;只要本工作階段動到某個進行中的計畫,`/wrap` 就會重新確認它的 `next-step`。漂移豁免(不是程式碼覆蓋文件)。
 
@@ -130,7 +130,7 @@ wrap:
 README 刻意保持簡短。詳細內容在各 SKILL.md 中:
 - [`kick-off/SKILL.md`](kick-off/SKILL.md)、[`wrap/SKILL.md`](wrap/SKILL.md)、[`take-note/SKILL.md`](take-note/SKILL.md)、[`koji-init/SKILL.md`](koji-init/SKILL.md)、[`inspect-doc-drift/SKILL.md`](inspect-doc-drift/SKILL.md)
 - [`duet-plan/SKILL.md`](duet-plan/SKILL.md)、[`duet-impl/SKILL.md`](duet-impl/SKILL.md)、[`duet-review/SKILL.md`](duet-review/SKILL.md)
-- [`triangulate/SKILL.md`](triangulate/SKILL.md) — Claude + codex + 你 = 一個決策的三個參考點
+- [`triangulate/SKILL.md`](triangulate/SKILL.md) — Claude + 外部聲音 + 你 = 一個決策的三個參考點
 - [`plan-triangulate-review/SKILL.md`](plan-triangulate-review/SKILL.md) — 對鎖定計畫的自主逐項硬化(驅動 `/plan-eng-review` + 逐項論述)
 - [`references/agent-autonomy.md`](references/agent-autonomy.md) — duet 技能共用的自主原則
 - [`references/reviewer-backend.md`](references/reviewer-backend.md) — 審查者後端對應表、唯讀條款、配額規則

@@ -62,10 +62,12 @@ test_merge_rejects_invalid_inputs() {
 }
 
 test_summary() {
-  assert_eq "both families · codex max · claude max/inherit"                 "$(_ds summary 'both|max|max|inherit')"
-  assert_eq "Claude reviews, codex confirms · codex xhigh · claude high/opus" "$(_ds summary 'claude-then-codex|xhigh|high|opus')"
-  assert_eq "codex only · codex xhigh · claude xhigh/inherit"                 "$(_ds summary 'codex|xhigh|xhigh|inherit')"
-  assert_eq "Claude only · codex high · claude inherit/sonnet"                "$(_ds summary 'claude|high|inherit|sonnet')"
+  # Order-neutral on purpose: which outside voice runs (agy, codex) is the
+  # outside_order setting, so the summary must not name one.
+  assert_eq "both families · outside max · claude max/inherit"                         "$(_ds summary 'both|max|max|inherit')"
+  assert_eq "Claude reviews, outside voice confirms · outside xhigh · claude high/opus" "$(_ds summary 'claude-then-codex|xhigh|high|opus')"
+  assert_eq "outside voice only · outside xhigh · claude xhigh/inherit"                "$(_ds summary 'codex|xhigh|xhigh|inherit')"
+  assert_eq "Claude only · outside high · claude inherit/sonnet"                       "$(_ds summary 'claude|high|inherit|sonnet')"
 }
 
 test_field() {

@@ -5,13 +5,15 @@
 # dispatch contract can be asserted without spending a real call.
 
 EXEC="$KOJI/bin/koji-codex-exec"
-PRE="$KOJI/bin/koji-codex-preflight"
+PRE="$KOJI/bin/koji-codex-preflight"   # the 0.11.0 forwarding shim → koji-outside-preflight
+LIB="$KOJI/bin/koji-dispatch-lib"
 
 # The harness guard fires before argument validation, so a suite run from inside
 # a codex session would return 78 everywhere and the fake CLI would never run —
 # 14 of these tests fail, and two pass for the wrong reason. The guard tests set
 # these explicitly; everything else must start from a clean environment.
-unset CODEX_THREAD_ID CODEX_SANDBOX
+unset CODEX_THREAD_ID CODEX_SANDBOX ANTIGRAVITY_CONVERSATION_ID ANTIGRAVITY_TRAJECTORY_ID
+export KOJI_STATE_DIR="$TMP/state"   # the preflight reads outside_order; never the user's real config
 
 _fake_codex() {   # a PATH whose `codex` records what it received
   mkdir -p "$TMP/fake"
@@ -161,7 +163,7 @@ test_wrapper_refuses_under_codex_even_without_the_preamble() {
 # --- preflight ----------------------------------------------------------------
 test_preflight_passes_in_a_normal_session() {
   local rc=0
-  env -u CODEX_THREAD_ID -u CODEX_SANDBOX "$PRE" >/dev/null 2>&1 || rc=$?
+  env -u CODEX_THREAD_ID -u CODEX_SANDBOX -u ANTIGRAVITY_CONVERSATION_ID -u ANTIGRAVITY_TRAJECTORY_ID "$PRE" >/dev/null 2>&1 || rc=$?
   assert_exit 0 "$rc" "clean session"
 }
 
@@ -208,20 +210,44 @@ EOF
   assert_file_not_contains "stdin deadlock" "$TMP/ver2.err" "0.120.10 is not a bad version"
 }
 
-test_both_harness_guards_check_the_same_variables() {
-  # The guard is deliberately duplicated — the preflight catches it early and
-  # visibly, the wrapper catches a dispatch that never ran a preamble. Two lists
-  # means they can drift, and adding a new codex marker to only one silently
-  # narrows the backstop. Pin them to each other instead.
-  local pre_vars exec_vars
-  # An OPEN pattern. A closed set like CODEX_(THREAD_ID|SANDBOX) can only ever
-  # find the two variables the test itself names, so a third marker added to one
-  # file is invisible to both greps and the test passes while the guards differ.
-  # Matching the dereference form also excludes prose mentions.
-  pre_vars=$(grep -oE '\$\{CODEX_[A-Z_]+:-\}' "$PRE" | sort -u | tr '\n' ' ')
-  exec_vars=$(grep -oE '\$\{CODEX_[A-Z_]+:-\}' "$EXEC" | sort -u | tr '\n' ' ')
-  assert_eq "$pre_vars" "$exec_vars" "preflight and wrapper guard the same env vars"
-  assert_ne "" "$pre_vars" "the guard variables are still present at all"
+test_one_guard_covers_every_entry_point() {
+  # The guard used to be duplicated in each script, and a marker added to one
+  # copy silently narrowed the others (round-1 review: koji-codex-exec missed
+  # the agy markers). Now there is one list, in koji-dispatch-lib, and every
+  # entry point must source it and call it before anything else.
+  local vars
+  vars=$(grep -oE '\$\{(CODEX|ANTIGRAVITY)_[A-Z_]+:-\}' "$LIB" | sort -u | tr '\n' ' ')
+  assert_eq '${ANTIGRAVITY_CONVERSATION_ID:-} ${ANTIGRAVITY_TRAJECTORY_ID:-} ${CODEX_SANDBOX:-} ${CODEX_THREAD_ID:-} ' "$vars" "the lib guards both harnesses"
+  local f
+  for f in koji-codex-exec koji-agy-exec koji-outside-exec koji-outside-preflight; do
+    assert_file_contains 'koji-dispatch-lib' "$KOJI/bin/$f" "$f sources the lib"
+    assert_file_contains 'koji_harness_guard ' "$KOJI/bin/$f" "$f calls the guard"
+    # No private copy of a marker list that could drift from the lib's.
+    if grep -qE '\$\{(CODEX|ANTIGRAVITY)_[A-Z_]+:-\}' "$KOJI/bin/$f"; then _fail "$f carries its own marker list"; else _ok; fi
+  done
+}
+
+test_wrapper_refuses_under_an_agy_agent_too() {
+  local path; path=$(_fake_codex)
+  rm -f "$TMP/argv.txt"
+  local rc=0
+  printf 'a real prompt body\n' | env PATH="$path" ANTIGRAVITY_CONVERSATION_ID=c1 "$EXEC" 60 xhigh "$KOJI" >/dev/null 2>/dev/null || rc=$?
+  assert_exit 78 "$rc" "an agy agent session is a harness mismatch for codex as well"
+  if [ -f "$TMP/argv.txt" ]; then _fail "codex was started under an agy agent"; else _ok; fi
+}
+
+test_old_preflight_name_forwards() {
+  # Sessions that loaded a pre-0.11.0 SKILL.md still call koji-codex-preflight.
+  local rc=0
+  env CODEX_SANDBOX=1 "$PRE" 2>"$TMP/shim.err" || rc=$?
+  assert_exit 78 "$rc" "the shim reaches the new preflight's guard"
+  assert_file_contains "harness mismatch" "$TMP/shim.err"
+}
+
+test_boundary_names_every_harness_dir() {
+  local path; path=$(_fake_codex)
+  printf 'PROMPT-BODY\n' | env PATH="$path" "$EXEC" 60 xhigh "$KOJI" >/dev/null 2>&1
+  assert_file_contains "~/.gemini/" "$TMP/stdin.txt" "agy's config dir is off-limits like ~/.codex/"
 }
 
 test_dispatch_actually_runs_under_koji_timeout() {

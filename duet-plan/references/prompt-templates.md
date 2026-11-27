@@ -1,6 +1,6 @@
 # /duet-plan — Round Prompt Templates
 
-Both agents — Claude as drafter, and the critic(s) the run's duet setup chose (codex, a fresh-context Claude subagent, or both in parallel; see `../../references/reviewer-backend.md`) — end every turn with a `VERDICT:` line. The skill parses these to detect consensus. Every critic leg fills the same reviewer template; the backend never changes the prompt.
+Both agents — Claude as drafter, and the critic(s) the run's duet setup chose (the outside voice — agy or codex — or a fresh-context Claude subagent, or both in parallel; see `../../references/reviewer-backend.md`) — end every turn with a `VERDICT:` line. The skill parses these to detect consensus. Every critic leg fills the same reviewer template; the backend never changes the prompt.
 
 ## Verdict markers
 
@@ -55,7 +55,7 @@ End your response with the VERDICT line — exactly one of `VERDICT: AGREE`
 `VERDICT: DISAGREE: <reason>`, as the very last line.
 ```
 
-## REVIEWER — every round (codex or Claude backend)
+## REVIEWER — every round (outside voice or Claude backend)
 
 ```
 You are the adversarial reviewer for a plan drafted by another agent in a
@@ -110,7 +110,7 @@ Your previous plan:
 ---
 
 The previous round's critique (it may come from a different reviewer than the
-one who will read your update — after a rejected lock gate it is codex's):
+one who will read your update — after a rejected lock gate it is the outside voice's):
 
 ---
 {codex_critique}

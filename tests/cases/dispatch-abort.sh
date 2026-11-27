@@ -95,3 +95,19 @@ test_every_skill_call_site_uses_exec() {
   done
   assert_eq "0" "$bad" "every call site invokes the helper with exec"
 }
+
+test_every_outside_dispatch_goes_through_the_wrapper() {
+  # 0.11.0: a call site that reaches koji-codex-exec directly skips the provider
+  # order, the --expect check and the provider record. koji-selfcheck pins the
+  # same rule at install time; this keeps it in the release test run too.
+  local f s bad=0
+  for f in "$KOJI"/*/SKILL.md; do
+    if grep -qF 'koji-codex-exec "' "$f"; then echo "  direct codex dispatch: $f" >&2; bad=1; fi
+    if grep -qF 'koji-codex-preflight' "$f"; then echo "  retired preflight name: $f" >&2; bad=1; fi
+  done
+  assert_eq "0" "$bad" "no SKILL.md dispatches codex directly or names the old preflight"
+  for s in duet-plan duet-impl duet-review triangulate plan-triangulate-review; do
+    assert_file_contains 'koji-outside-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" "' "$KOJI/$s/SKILL.md" "$s dispatches through koji-outside-exec with a record"
+    assert_file_contains 'koji-outside-preflight || exit $?' "$KOJI/$s/SKILL.md" "$s runs the outside preflight"
+  done
+}

@@ -1,5 +1,5 @@
 ---
-description: "Two-reviewer adversarial review: Claude + codex in parallel, synthesize, cross-review on disagreement, prompt on auto-apply. Invocation requires the 'duet' keyword."
+description: "Two-reviewer adversarial review: Claude + an outside voice (agy → codex) in parallel, synthesize, cross-review on disagreement, prompt on auto-apply. Invocation requires the 'duet' keyword."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools:
@@ -19,22 +19,25 @@ allowed-tools:
 
 Use ONLY when the user explicitly types `/duet-review`, says "duet review", "duet-review", "let's duet review this diff", or similar — the `duet` keyword is required. Do NOT invoke on casual "review this" or "code review" phrases — gstack `/review` handles those.
 
-Two-reviewer adversarial code review. **Reviewer A** is Claude (Agent subagent, fresh context — at Claude effort `max` it fans out into five angle reviewers that the main agent consolidates; see Step 2); **Reviewer B** is codex (codex exec, at the effort you picked), or a fresh-context Claude subagent when the duet setup says so. Who reviews, at what effort, on which Claude model is the **duet setup** asked at run start — or handed in by `/duet-impl` for its final review (see **Duet setup** in Arguments). Both run in parallel; results are synthesized into a verdict; reviewer-exclusive findings at severity ≥ medium trigger a cross-review pass with severity-aware AGREE labels; high-consensus mechanical fixes prompt the user with four choices (apply / hold / apply+remember-for-repo / apply+remember-for-session).
+Two-reviewer adversarial code review. **Reviewer A** is Claude (Agent subagent, fresh context — at Claude effort `max` it fans out into five angle reviewers that the main agent consolidates; see Step 2); **Reviewer B** is the outside voice — agy first, codex second (`koji-outside-exec`, at the effort you picked; its provider record says which CLI answered) — or a fresh-context Claude subagent when the duet setup says so. Who reviews, at what effort, on which Claude model is the **duet setup** asked at run start — or handed in by `/duet-impl` for its final review (see **Duet setup** in Arguments). Both run in parallel; results are synthesized into a verdict; reviewer-exclusive findings at severity ≥ medium trigger a cross-review pass with severity-aware AGREE labels; high-consensus mechanical fixes prompt the user with four choices (apply / hold / apply+remember-for-repo / apply+remember-for-session).
 
 ## Preamble
 
 ```bash
 source <(~/.claude/skills/koji/bin/koji-detect)
-# Codex preflight: refuses to run when THIS session is itself under codex (an
-# outside voice cannot be the same model), and warns on a known-bad CLI.
+# Outside-voice preflight: refuses to run when THIS session itself runs inside
+# another agent's harness (codex, or an agy agent — an outside voice cannot be
+# the same model), prints the provider order, and warns on a known-bad codex CLI.
 # Exit 78 = harness mismatch. It must STOP THE RUN, not just this block.
-~/.claude/skills/koji/bin/koji-codex-preflight || exit $?
+# Every strategy runs it, `claude` included: inside another harness, a "fresh
+# Claude" Reviewer B is that harness's model too.
+~/.claude/skills/koji/bin/koji-outside-preflight || exit $?
 echo "=== koji duet-review ==="
 echo "Project: $PROJECT_NAME"
 echo "Session: $SESSION_DIR"
 ```
 
-**If the preamble exits 78 — harness mismatch.** (The `claude` strategy dispatches no codex at all; if the user has already asked for it in the invocation phrase, skip the preflight — `koji-codex-exec` still fails closed at any dispatch that does happen.) This session is running under codex, so codex cannot be the outside voice. Stop the run and report *"codex outside review unavailable: harness mismatch; no outside process started. Missing coverage."* **Never substitute a fresh-context Claude reviewer for it** — the quota-substitution rule does not apply here. Under codex that substitution makes Reviewer A review itself, which is exactly the two-placeholders-into-a-PASS failure koji forbids. A failed Bash block does not halt the agent; stopping is your job.
+**If the preamble exits 78 — harness mismatch.** This session runs inside another agent's harness — codex, or an agy agent — so no reviewer in this run can be a different model family. That holds under every strategy, `claude` included; there is no strategy that skips the preflight. Stop the run and report *"outside review unavailable: harness mismatch; no outside process started. Missing coverage."* **Never substitute a fresh-context Claude reviewer for it** — the quota-substitution rule does not apply here. Inside that harness the substitution makes Reviewer A review itself, which is exactly the two-placeholders-into-a-PASS failure koji forbids. A failed Bash block does not halt the agent; stopping is your job.
 
 ## Arguments
 
@@ -45,7 +48,7 @@ echo "Session: $SESSION_DIR"
 - **Review the working tree (uncommitted)** → `WORKTREE`. By default the review spans `base..HEAD` — committed only. If the user wants the uncommitted working-tree changes ("review my working tree", "review uncommitted changes", "review the working tree since `<sha>`"), set `WORKTREE=1` and optionally `SINCE` to the floor ref (default `HEAD`). This ignores `BASE` and `STAGED`. This is the scope `/duet-impl`'s final review uses — its cumulative work lives uncommitted in the working tree (`HEAD` never moves during the walk).
 - **Verdict only, no auto-apply** → `NO_AUTO_APPLY`. By default consensus mechanical fixes prompt the 4-choice apply menu. If the user wants the report without any apply prompt ("no auto-apply", "just the verdict", "report only, don't touch my files", "don't apply anything"), set `NO_AUTO_APPLY=1` — the apply step is skipped and the verdict is emitted as-is. (A required cross-review still runs first; see Step 5.)
 
-**Duet setup** → `TUPLE`. Who fills Reviewer B, at what effort, on which Claude model is decided at the start of this run — never from `.koji.yaml`. Full contract: [`../references/reviewer-backend.md`](../references/reviewer-backend.md). Resolve it **before Step 1's block**: (1) if the invocation phrase carries `duet setup: <tuple>` — `/duet-impl`'s embedded final review — validate it and use it verbatim: no prompt, no save (`EMBEDDED=1`); (2) otherwise baseline (last pick, else defaults) → phrase overlay ("codex at max", "claude reviewer on sonnet", "quick review" → high) → if Reviewer B is still open, ask: *reuse* the last setup, or the dialog. This skill's dialog asks **Reviewer B: codex / Claude** (Reviewer A is always Claude, so `both` and `claude-then-codex` both mean codex here; choosing codex keeps a saved `both` / `claude-then-codex` strategy as-is, choosing Claude sets `claude`), then effort for both families and the Claude reviewer model. `claude` makes Reviewer B a **fresh-context Claude subagent** (never a fork) on the identical reviewer prompt — same-model caveat: two Claude contexts agreeing is two independent readings, not two model families; the disagreement signal is weaker and exact-fingerprint agreement inflates the auto-apply bucket; Step 6 says so in the header.
+**Duet setup** → `TUPLE`. Who fills Reviewer B, at what effort, on which Claude model is decided at the start of this run — never from `.koji.yaml`. Full contract: [`../references/reviewer-backend.md`](../references/reviewer-backend.md). Resolve it **before Step 1's block**: (1) if the invocation phrase carries `duet setup: <tuple>` — `/duet-impl`'s embedded final review — validate it and use it verbatim: no prompt, no save (`EMBEDDED=1`); (2) otherwise baseline (last pick, else defaults) → phrase overlay ("outside at max", "claude reviewer on sonnet", "quick review" → high; a phrase that names a provider — "use codex", "agy only" — sets the global `outside_order` instead, and the reply says so) → if Reviewer B is still open, ask: *reuse* the last setup, or the dialog. This skill's dialog asks **Reviewer B: outside voice (agy → codex) / Claude (same-model, quota escape hatch)** (Reviewer A is always Claude, so `both` and `claude-then-codex` both mean the outside voice here; choosing the outside voice keeps a saved `both` / `claude-then-codex` strategy as-is, choosing Claude sets `claude`), then effort for both families and the Claude reviewer model. `claude` makes Reviewer B a **fresh-context Claude subagent** (never a fork) on the identical reviewer prompt — same-model caveat: two Claude contexts agreeing is two independent readings, not two model families; the disagreement signal is weaker and exact-fingerprint agreement inflates the auto-apply bucket; Step 6 says so in the header.
 
 **Claude reviewer depth: single pass vs angle fan-out** → `REVIEW_MODE`. Reviewer A normally runs as ONE holistic pass (`REVIEW_MODE=single`). It fans out into 5 focused angle reviewers that the main agent consolidates (Step 2b fan-out → Step 2e) when the setup's Claude effort is `max` — or, under `inherit`, when the session is at `/effort max` — or when the invocation phrase explicitly asks for a full/deep review ("full review", "fan out", "all angles", "deep review"). A "quick review" / "lighter pass" / "save tokens" phrase forces `single` even at max. Fan-out roughly 5×'s the Claude-side cost, which is why it rides on the budget question rather than a separate knob. The decision is set at the top of Step 2; single pass is the preserved lightest tier. When `/duet-impl` invokes this skill for its **final review** it passes its tuple: Claude effort `max` there means the 5-angle review, never a single pass.
 
@@ -66,8 +69,8 @@ STAGED="${STAGED:-}"                 # "1" → review the staged diff only
 WORKTREE="${WORKTREE:-}"             # "1" → review uncommitted working-tree changes (ignores BASE/STAGED)
 SINCE="${SINCE:-}"                   # floor ref for WORKTREE mode (default HEAD)
 NO_AUTO_APPLY="${NO_AUTO_APPLY:-}"   # "1" → skip the apply prompt, emit verdict only (Step 5)
-QUOTA_BACKOFF="${QUOTA_BACKOFF:-900}"      # codex quota back-off interval (s), default 15 min
-QUOTA_MAX_WAITS="${QUOTA_MAX_WAITS:-20}"   # cap on codex quota back-off retries (~5h)
+QUOTA_BACKOFF="${QUOTA_BACKOFF:-900}"      # outside-voice quota back-off interval (s), default 15 min
+QUOTA_MAX_WAITS="${QUOTA_MAX_WAITS:-20}"   # cap on outside-voice quota back-off retries (~5h)
 # Duet setup (see Arguments). The tuple was resolved just before this block —
 # embedded phrase → phrase overlay → reuse prompt → dialog → defaults; substitute
 # it here. Validate, save as the last pick (not when embedded — the parent saved
@@ -77,7 +80,7 @@ TUPLE=$("$KDS" validate "<EFFECTIVE tuple>") || exit 1
 EMBEDDED="${EMBEDDED:-0}"                        # "1" → invoked by /duet-impl with its tuple
 [ "$EMBEDDED" = "1" ] || ~/.claude/skills/koji/bin/koji-config set duet_setup "$TUPLE"
 printf '%s\n' "$TUPLE" > "$RUN_DIR/duet-setup"
-EFFORT=$("$KDS" field "$TUPLE" 2)          # codex model_reasoning_effort
+EFFORT=$("$KDS" field "$TUPLE" 2)          # outside-voice effort (codex model_reasoning_effort, agy --effort)
 CLAUDE_EFFORT=$("$KDS" field "$TUPLE" 3)   # koji-reviewer-<effort> agent for EVERY Claude reviewer here (A, angles, B, cross); inherit → general-purpose
 CLAUDE_MODEL=$("$KDS" field "$TUPLE" 4)    # Agent `model` param; inherit → omit
 CLAUDE_A_UNAVAILABLE="${CLAUDE_A_UNAVAILABLE:-}"  # "1" → Reviewer A (single mode) malformed ×2; Step 6 banner
@@ -101,13 +104,30 @@ if [ "$WORKTREE" = "1" ]; then
   # ref. A bad ref would otherwise make `git diff` fail, the error get swallowed,
   # and the empty diff read as a false "nothing to review". Surface it loudly.
   git rev-parse --verify "$SINCE^{commit}" >/dev/null 2>&1 || { echo "ERROR: bad SINCE ref: $SINCE"; exit 1; }
-  git diff "$SINCE" -- > "$DIFF_FILE"   # '--' disambiguates ref-vs-path; no 2>/dev/null so real failures surface
   BASE="$SINCE"   # label only — feeds the synthesizer's --base
-  echo "Scope: working tree since $SINCE (HEAD $HEAD_SHA)"
-  # Untracked files are NOT in `git diff` until staged — warn so an unstaged new
-  # file isn't silently unreviewed (/duet-impl stages with `git add -A` first).
-  if [ -n "$(git ls-files --others --exclude-standard | head -1)" ]; then
-    echo "WARN: untracked files exist and are NOT in this review — 'git add -A' to include them."
+  if [ "$EMBEDDED" = "1" ]; then
+    # /duet-impl's final gate runs unattended, so its verdict must describe ONE
+    # tree: freeze everything, untracked files included, as a tree object
+    # (staged into a temporary index — yours is untouched), and diff from it. Step 3, 4a-bis and 4c re-check it
+    # (`koji-tree-snapshot stale`): a moved tree latches snapshot.stale and the
+    # verdict is forced to REJECT. A failed capture stops the review before any
+    # reviewer starts: its verdict could only be REJECT.
+    : > "$RUN_DIR/embedded"
+    if REVIEW_TREE=$(~/.claude/skills/koji/bin/koji-tree-snapshot capture "$RUN_DIR/review.tree"); then
+      git diff "$SINCE" "$REVIEW_TREE" -- > "$DIFF_FILE"
+    else
+      echo "ERROR: cannot bind this embedded review to a tree object (git's reason is above) — stopping before any reviewer starts. Fix it and re-run."
+      exit 1
+    fi
+    echo "Scope: working tree since $SINCE (HEAD $HEAD_SHA), bound to tree ${REVIEW_TREE:-<none>}"
+  else
+    git diff "$SINCE" -- > "$DIFF_FILE"   # '--' disambiguates ref-vs-path; no 2>/dev/null so real failures surface
+    echo "Scope: working tree since $SINCE (HEAD $HEAD_SHA)"
+    # Untracked files are NOT in `git diff` until staged — warn so an unstaged
+    # new file isn't silently unreviewed. (The embedded review includes them.)
+    if [ -n "$(git ls-files --others --exclude-standard | head -1)" ]; then
+      echo "WARN: untracked files exist and are NOT in this review — 'git add -A' to include them."
+    fi
   fi
 elif [ "$STAGED" = "1" ]; then
   git diff --cached > "$DIFF_FILE"
@@ -155,8 +175,17 @@ REVIEWER_B=$(~/.claude/skills/koji/bin/koji-duet-backend review-b "$RUN_DIR/duet
 # Reviewer A (and its angles) have no sandbox either — snapshot the tree before
 # any Claude reviewer is dispatched; 2d compares on collection.
 ~/.claude/skills/koji/bin/koji-tree-fingerprint > "$RUN_DIR/claude.fp"
-echo "Claude reviewer mode: $REVIEW_MODE | Reviewer B backend: $REVIEWER_B"
+# REVIEWER_B is a ROLE token: `codex` = the outside voice (agy → codex). The
+# provider record written at dispatch names the CLI that really answers.
+B_LABEL="$REVIEWER_B"; [ "$REVIEWER_B" = "codex" ] && B_LABEL="outside voice"
+echo "Claude reviewer mode: $REVIEW_MODE | Reviewer B: $B_LABEL"
+# Over ~100 KB the Claude legs get the diff by PATH, not inlined (see below).
+DIFF_BYTES=$(wc -c < "$RUN_DIR/diff.patch" | tr -d ' ')
+if [ "$DIFF_BYTES" -gt 102400 ]; then echo "Diff: $DIFF_BYTES bytes — Claude reviewers get it BY PATH"
+else echo "Diff: $DIFF_BYTES bytes — Claude reviewers get it inline"; fi
 ```
+
+**Large diffs go by path.** When the block above prints `BY PATH`, every Claude reviewer prompt in this run — 2a's Claude leg, 2b single and fan-out, and 4b's Claude B cross leg — replaces the inlined diff with a `DIFF FILE PATH: <the $DIFF_FILE path>` line and the sentence *"Read the whole diff from that path with the Read tool, in parts if it is long, before you review."* The 4b Reviewer A cross prompt already works this way. Five inlined copies of a large diff cost five times its tokens and can push an angle prompt past its context. The outside-voice legs keep the diff inline: they read their prompt from stdin, and koji-agy-exec hands agy a prompt over its inline cap (`KOJI_AGY_MAX_PROMPT`) as a file in the repository's `.git` directory.
 
 Mode wiring: `single` → run 2b (single pass) + the single-mode half of 2d, and SKIP 2e. `fanout` → run 2b (fan-out) + the fan-out half of 2d, then 2e. Step 2a (Reviewer B) and Steps 3–6 are identical either way. `REVIEWER_B` is orthogonal to `REVIEW_MODE` — every combination is legal; it only selects which 2a leg runs and which 2d/4b/4c collection branch applies.
 
@@ -164,7 +193,7 @@ Mode wiring: `single` → run 2b (single pass) + the single-mode half of 2d, and
 
 **Run the leg matching `REVIEWER_B`.** Both legs end up in the same slot (`$RUN_DIR/codex.json`, written in 2d), so the synthesizer never learns which backend ran — the slot rule in [`../references/reviewer-backend.md`](../references/reviewer-backend.md).
 
-#### 2a — codex leg (`REVIEWER_B=codex`)
+#### 2a — outside-voice leg (`REVIEWER_B=codex`)
 
 ```bash
 # Fresh shell: these come from earlier blocks and are EMPTY here unless the
@@ -173,7 +202,7 @@ Mode wiring: `single` → run 2b (single pass) + the single-mode half of 2d, and
 # answer to the wrong question then classifies as a clean pass.
 : "${RUN_DIR:?RUN_DIR unset — re-substitute it in this block}"
 : "${PROJECT_ROOT:?PROJECT_ROOT unset — koji-detect assigns, never exports; re-source it in this block}"
-# Codex effort from the run's setup file (fresh shell — never a Step 1 variable).
+# Outside-voice effort from the run's setup file (fresh shell — never a Step 1 variable).
 EFFORT=$(~/.claude/skills/koji/bin/koji-duet-setup field "$(head -n1 "$RUN_DIR/duet-setup")" 2) || exit 1
 case "$EFFORT" in high) TIMEOUT=900 ;; *) TIMEOUT=1800 ;; esac   # derived, not re-defaulted: an unexported TIMEOUT=900 does not cross a shell boundary
 # Literal path, not "$KOJI_SKILLS/...": koji-detect emits an unexported
@@ -184,12 +213,11 @@ PROMPT_FILE=~/.claude/skills/koji/duet-review/references/reviewer-prompt.md
 [ -s "$PROMPT_FILE" ] || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$RUN_DIR/codex.exit" 79 "reviewer prompt template missing at $PROMPT_FILE"
 
 # Compose prompt inline (the prompt + diff together), write it to a file, and let
-# codex read it from stdin (`-`). A large diff can exceed the argv ceiling (macOS
-# ARG_MAX ≈ 1 MB shared with env); an E2BIG never starts codex, leaving an empty
+# the outside voice read it from stdin. A large diff can exceed the argv ceiling (macOS
+# ARG_MAX ≈ 1 MB shared with env); an E2BIG never starts the reviewer, leaving an empty
 # .raw that classifies as ERROR → "[]" → a false PASS. printf is a builtin, so the
 # file write has no such limit. A redirect from a regular file EOFs immediately,
-# preserving the old `< /dev/null` guarantee that codex never blocks on stdin.
-# `-` must be the ONLY positional: a prompt arg plus piped stdin changes framing.
+# preserving the old `< /dev/null` guarantee that no provider blocks on stdin.
 # A review of nothing must never be dispatched. $DIFF_FILE unset makes `cat`
 # fail while the rest of the prompt still builds, so codex is asked to review an
 # empty diff and honestly answers `[]` — which classifies as OK and passes.
@@ -206,7 +234,7 @@ $(cat "$DIFF_FILE")"
 PROMPT_TXT="$RUN_DIR/codex.prompt"
 printf '%s\n' "$CODEX_PROMPT" > "$PROMPT_TXT"
 
-~/.claude/skills/koji/bin/koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" \
+~/.claude/skills/koji/bin/koji-outside-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" "$RUN_DIR/codex.provider" --expect findings \
   < "$PROMPT_TXT" > "$RUN_DIR/codex.raw" 2> "$RUN_DIR/codex.err"
 CE=$?; echo "$CE" > "$RUN_DIR/codex.exit"
 # Exit 78 is a harness mismatch, NOT a reviewer failure: stop the run, report
@@ -214,7 +242,7 @@ CE=$?; echo "$CE" > "$RUN_DIR/codex.exit"
 # `[ ... ] && ...`: as the last command of the block the && form returns 1 on a
 # SUCCESSFUL review, so the harness would report every good dispatch as failed.
 if [ "$CE" = "78" ]; then
-  echo "FATAL: codex harness mismatch — stop the run, do not classify, do not substitute" >&2
+  echo "FATAL: harness mismatch — stop the run, do not classify, do not substitute" >&2
 fi
 ```
 
@@ -234,7 +262,7 @@ Record the tree state first — the Claude backend has no `-s read-only` sandbox
 - `subagent_type`: `koji-reviewer-$CLAUDE_EFFORT` (e.g. `koji-reviewer-max`) when `$CLAUDE_EFFORT` is not `inherit`; otherwise `general-purpose`. Unknown type (agents not installed) → print `⚠ koji-reviewer-<x> not installed — run koji setup; falling back to general-purpose (inherit effort)`, `touch "$RUN_DIR/claude-effort-fallback"`, re-dispatch with `general-purpose`.
 - `description`: `Duet review: Reviewer B (Claude) pass`
 - `model`: **omit this parameter** when `$CLAUDE_MODEL` is `inherit`; otherwise pass its value (`fable` / `opus` / `sonnet`)
-- `prompt`: exactly what the codex leg composes — the full `reviewer-prompt.md` text, the closer *"Now review the diff below. Output STRICT JSON only — no markdown fences, no preamble, no commentary. If no findings, output []."*, a `DIFF:` line and the full contents of `$DIFF_FILE` — followed by the **read-only clause** from `../references/reviewer-backend.md`
+- `prompt`: exactly what the outside-voice leg composes — the full `reviewer-prompt.md` text, the closer *"Now review the diff below. Output STRICT JSON only — no markdown fences, no preamble, no commentary. If no findings, output []."*, a `DIFF:` line and the full contents of `$DIFF_FILE` (by path instead when Step 2 printed `BY PATH`) — followed by the **read-only clause** from `../references/reviewer-backend.md`
 - `run_in_background`: `true`
 
 Reviewer A (2b) still runs as its own fresh context. Two Claude contexts on disjoint roles is still a duet *structurally*: the orchestrator never judges across the A/B boundary — it collects, writes the slot files, and runs the synthesizer. What changes is the signal strength, and Step 6 says so.
@@ -250,7 +278,7 @@ Call the `Agent` tool with **`run_in_background: true`**:
 - `subagent_type`: `koji-reviewer-$CLAUDE_EFFORT` when `$CLAUDE_EFFORT` is not `inherit`; otherwise `general-purpose` (unknown type → the fallback rule in 2a's Claude leg)
 - `model`: **omit** when `$CLAUDE_MODEL` is `inherit`; otherwise its value
 - `description`: `Duet review: Claude pass`
-- `prompt`: the full reviewer-prompt.md text PLUS the diff, with the closing instruction:
+- `prompt`: the full reviewer-prompt.md text PLUS the diff (inline, or by path when Step 2 printed `BY PATH`), with the closing instruction:
   > *"Output ONLY a JSON array. No markdown fences, no preamble, no closing remarks. If no findings, output `[]`."*
   followed by the **read-only clause** from `../references/reviewer-backend.md` — Reviewer A holds Edit/Write like any subagent
 - `run_in_background`: `true`
@@ -270,7 +298,7 @@ For each of the five fixed angles, call the `Agent` tool with:
   1. the **shared framing** paragraph from `claude-angles.md`,
   2. that angle's **lens block** from `claude-angles.md`,
   3. the **full text of `reviewer-prompt.md`**,
-  4. then this closer with the diff inlined — *"Now review the diff below. Output ONLY a JSON array. No markdown fences, no preamble, no closing remarks. If no findings, output `[]`."* — followed by a `DIFF:` line and the full contents of `$DIFF_FILE`,
+  4. then this closer with the diff inlined — *"Now review the diff below. Output ONLY a JSON array. No markdown fences, no preamble, no closing remarks. If no findings, output `[]`."* — followed by a `DIFF:` line and the full contents of `$DIFF_FILE` (the by-path form instead when Step 2 printed `BY PATH`),
   5. then the **read-only clause** from `../references/reviewer-backend.md`.
 - `run_in_background`: `true`
 
@@ -288,13 +316,13 @@ The five fixed angles (each writes to its numbered file in Step 2d):
 
 After **all** reviewers are launched (Reviewer B + the one Claude reviewer in single mode, or Reviewer B + all five angle agents in fan-out mode), tell the user something like:
 
-> *"duet-review running — Reviewer B (<codex | Claude>) + Claude reviewer(s) launched in background. I'll come back with the verdict when everything completes; in the meantime you can continue with anything else."*
+> *"duet-review running — Reviewer B (<outside voice | Claude>) + Claude reviewer(s) launched in background. I'll come back with the verdict when everything completes; in the meantime you can continue with anything else."*
 
 Then **return control**. Do NOT poll, sleep, or proactively check on progress. The harness will re-invoke you with the notification messages.
 
 ### 2d. On notification: collect outputs
 
-**Reviewer B — codex leg (`REVIEWER_B=codex`):** when the codex Bash notification arrives, extract its JSON:
+**Reviewer B — outside-voice leg (`REVIEWER_B=codex`):** when its Bash notification arrives, extract its JSON:
 
 ```bash
 # Classify into a temp file; the slot is published only after the state branch
@@ -304,16 +332,17 @@ Then **return control**. Do NOT poll, sleep, or proactively check on progress. T
 rm -f "$RUN_DIR/codex.json.tmp"
 # 78 is a harness mismatch, not a reviewer state. It must be caught BEFORE the
 # classifier, which would call it ERROR and route it into Claude substitution —
-# the one substitution that is never valid, because under codex the substitute
-# is Reviewer A. Stop the run instead.
+# the one substitution that is never valid, because inside another agent's
+# harness the substitute is Reviewer A. Stop the run instead.
 # A MISSING status file is terminal too, not ERROR: the dispatch block died
 # before recording anything, and koji-codex-classify defaults a missing file to
 # 1 — which is the substitution path. No status means no review happened.
 [ -f "$RUN_DIR/codex.exit" ] || { echo "FATAL: the dispatch block never recorded a status — it did not run to completion. Fix the block; do not substitute." >&2; exit 79; }
 case "$(cat "$RUN_DIR/codex.exit" 2>/dev/null)" in
-  78) echo "FATAL: codex harness mismatch — no outside review happened. Stop the run; do not substitute." >&2; exit 78 ;;
-  79) echo "FATAL: the dispatch block was malformed (bad timeout/effort/root/prompt) — no call was made. Fix the block; do not substitute." >&2; exit 79 ;;
+  78) echo "FATAL: harness mismatch — no outside review happened. Stop the run; do not substitute." >&2; exit 78 ;;
+  79) echo "FATAL: the dispatch block was malformed (bad timeout/effort/root/record/--expect/prompt) — no call was made. Fix the block; do not substitute." >&2; exit 79 ;;
 esac
+sed 's/^/outside voice: /' "$RUN_DIR/codex.provider" 2>/dev/null || echo "outside voice: (no record)"
 CODEX_STATE=$(~/.claude/skills/koji/bin/koji-codex-classify \
   "$RUN_DIR/codex.raw" "$RUN_DIR/codex.err" "$RUN_DIR/codex.exit" --json-out "$RUN_DIR/codex.json.tmp")
 case "$CODEX_STATE" in
@@ -326,15 +355,15 @@ case "$CODEX_STATE" in
   EMPTY) rm -f "$RUN_DIR/codex.json.tmp"; CODEX_STATE=MALFORMED ;;   # exit 0 but no array: not a review — the classifier's synthetic [] never reaches the slot
   *)     rm -f "$RUN_DIR/codex.json.tmp" ;;
 esac
-echo "codex state: $CODEX_STATE"
+echo "outside voice state: $CODEX_STATE"
 ```
 
-Branch on `$CODEX_STATE` (per-run loop-state `CODEX_WAITS`, default `0`) — **codex quota is not zero findings**, and neither is an empty reply:
+Branch on `$CODEX_STATE` (per-run loop-state `CODEX_WAITS`, default `0`) — **codex quota is not zero findings** (any outside-voice quota, agy's or codex's), and neither is an empty reply:
 
 - **`OK`** → `codex.json` written and validated; proceed.
-- **`MALFORMED`** (no array, or the array failed `~/.claude/skills/koji/bin/koji-duet-findings-check`) → when `B_RETRIED=0`, set `B_RETRIED=1` and re-dispatch the 2a codex leg once with *"Your last response was not a JSON array of the requested shape — re-output ONLY the array, `[]` if none."* appended to the prompt; a second failure → treat as `ERROR` below.
-- **`TIMEOUT` / `ERROR`** → Reviewer B did not review. `WARN: codex $CODEX_STATE — Reviewer B unavailable; this review runs Claude-only (degraded)`; set `CODEX_UNAVAILABLE=1`; write `echo "[]" > "$RUN_DIR/codex.json"` as the degraded-run placeholder (not a finding count — the Step 6 banner declares it); proceed. A codex start failure at the final review must never read as a two-reviewer PASS.
-- **`QUOTA`** → do **not** treat as findings. If `CODEX_WAITS < QUOTA_MAX_WAITS`: tell the user *"codex quota/rate-limit — backing off ${QUOTA_BACKOFF}s, retry $((CODEX_WAITS+1))/${QUOTA_MAX_WAITS}"*, dispatch a backgrounded `sleep "$QUOTA_BACKOFF"; <the Step 2a koji-codex-exec block …>` reading the **same `$PROMPT_TXT` already on disk** — an identical retry, no prompt rebuild (`run_in_background: true`), increment `CODEX_WAITS`, return control; re-classify on notification. If the cap is reached: `echo "WARN: codex unavailable (quota) after $QUOTA_MAX_WAITS back-offs — this review ran Claude-only (degraded, NOT a true duet)"`, set `CODEX_UNAVAILABLE=1`, write `echo "[]" > "$RUN_DIR/codex.json"`, and proceed. The degraded state surfaces in the Step 6 header so it is never a silent pass.
+- **`MALFORMED`** (no array, or the array failed `~/.claude/skills/koji/bin/koji-duet-findings-check`) → when `B_RETRIED=0`, set `B_RETRIED=1` and re-dispatch the 2a outside-voice leg once with *"Your last response was not a JSON array of the requested shape — re-output ONLY the array, `[]` if none."* appended to the prompt (the wrapper already tried every provider; this retry walks the whole order once more); a second failure → treat as `ERROR` below.
+- **`TIMEOUT` / `ERROR`** → Reviewer B did not review. `WARN: outside voice $CODEX_STATE — Reviewer B unavailable; this review runs Claude-only (degraded)`; set `CODEX_UNAVAILABLE=1`; write `echo "[]" > "$RUN_DIR/codex.json"` as the degraded-run placeholder (not a finding count — the Step 6 banner declares it); proceed. An outside-voice start failure at the final review — exit 127, no outside voice installed, included — must never read as a two-reviewer PASS.
+- **`QUOTA`** → do **not** treat as findings. If `CODEX_WAITS < QUOTA_MAX_WAITS`: tell the user *"outside voice quota/rate-limit — backing off ${QUOTA_BACKOFF}s, retry $((CODEX_WAITS+1))/${QUOTA_MAX_WAITS}"*, dispatch a backgrounded `sleep "$QUOTA_BACKOFF"; <the Step 2a block: its guards, the EFFORT/TIMEOUT restore, the koji-outside-exec line …>` reading the **same `$PROMPT_TXT` already on disk** — an identical retry, no prompt rebuild, and it walks the whole provider order again (`run_in_background: true`), increment `CODEX_WAITS`, return control; re-classify on notification. If the cap is reached: `echo "WARN: outside voice unavailable (quota) after $QUOTA_MAX_WAITS back-offs — this review ran Claude-only (degraded, NOT a true duet)"`, set `CODEX_UNAVAILABLE=1`, write `echo "[]" > "$RUN_DIR/codex.json"`, and proceed. The degraded state surfaces in the Step 6 header so it is never a silent pass.
 
 ```bash
 echo "codex.json:  $(wc -c < "$RUN_DIR/codex.json") bytes"
@@ -400,13 +429,21 @@ Then fall through to Step 3 exactly as single mode does — `claude.json` now ex
 > You reach this step by running the synthesizer, never around it (see the Step 2d **STOP** guard). With findings collected, `koji-duet-synthesize` is your next action — not triage, not the Edit tool.
 
 ```bash
-REVIEWER_B=$(~/.claude/skills/koji/bin/koji-duet-backend review-b "$RUN_DIR/duet-setup") || exit 1   # fresh shell: the run file, never a remembered var; exit 3 = run state lost
+# Slot B's real provider: the setup names the ROLE, the record names who
+# answered. One resolver for every block (fresh shell: the run files, never a
+# remembered var). Always agy|codex|claude|none — argparse would reject anything
+# else with exit 2, which `|| SYNTH_RC=$?` reads as CONTESTED. Exit 3 = run state lost.
+B_BACKEND=$(~/.claude/skills/koji/bin/koji-duet-backend b-provider "$RUN_DIR") || exit 1
+# Embedded final review only: is this still the tree Step 1 bound it to? A moved
+# tree latches snapshot.stale. STALE stays UNQUOTED below: empty adds no argument.
+STALE=$(~/.claude/skills/koji/bin/koji-tree-snapshot stale "$RUN_DIR")
 ~/.claude/skills/koji/bin/koji-duet-synthesize \
   --claude "$RUN_DIR/claude.json" \
   --codex  "$RUN_DIR/codex.json" \
-  --b-backend "$REVIEWER_B" \
+  --b-backend "$B_BACKEND" \
   --base   "$BASE" \
   --head   "$HEAD_SHA" \
+  ${STALE:+--snapshot-stale} \
   --out    "$RUN_DIR/verdict.json" || SYNTH_RC=$?   # 1/2 = REJECT/CONTESTED — valid verdicts, read from the file below
 
 VERDICT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/verdict.json'))['verdict'])")
@@ -431,15 +468,16 @@ python3 - <<'PY' "$RUN_DIR/verdict.json" "$RUN_DIR/codex-cross-targets.json" "$R
 import json, sys
 src, codex_out, claude_out = sys.argv[1], sys.argv[2], sys.argv[3]
 v = json.load(open(src))
-# Codex cross-reviews CLAUDE's solo findings; Claude cross-reviews CODEX's.
+# Reviewer B cross-reviews A's (Claude's) solo findings; A cross-reviews B's.
+# Slot ids stay "claude"/"codex" whichever provider filled slot B.
 solo_claude = [f for f in v["high_contested"] + v["medium"] + v["low"]
                if f.get("agreed_by") == ["claude"] and f.get("severity") in ("high","medium")]
 solo_codex  = [f for f in v["high_contested"] + v["medium"] + v["low"]
                if f.get("agreed_by") == ["codex"]  and f.get("severity") in ("high","medium")]
 json.dump(solo_claude, open(codex_out, "w"))
 json.dump(solo_codex,  open(claude_out, "w"))
-print(f"Codex will review {len(solo_claude)} Claude findings; "
-      f"Claude will review {len(solo_codex)} codex findings")
+print(f"Reviewer B will review {len(solo_claude)} Claude findings; "
+      f"Claude will review {len(solo_codex)} Reviewer B findings")
 PY
 ```
 
@@ -454,15 +492,17 @@ if [ "$codex_target_count" = "0" ] && [ "$claude_target_count" = "0" ]; then
   echo "WARN: cross_review_required but both target sets are empty. Marking done and skipping dispatch."
   echo '[]' > "$RUN_DIR/codex.cross.json"
   echo '[]' > "$RUN_DIR/claude.cross.json"
-  REVIEWER_B=$(~/.claude/skills/koji/bin/koji-duet-backend review-b "$RUN_DIR/duet-setup") || exit 1   # fresh shell: the run file, never a remembered var
+  B_BACKEND=$(~/.claude/skills/koji/bin/koji-duet-backend b-provider "$RUN_DIR") || exit 1   # same resolver as Step 3
+  STALE=$(~/.claude/skills/koji/bin/koji-tree-snapshot stale "$RUN_DIR")                     # same latch as Step 3
   ~/.claude/skills/koji/bin/koji-duet-synthesize \
     --claude "$RUN_DIR/claude.json" \
     --codex  "$RUN_DIR/codex.json" \
-    --b-backend "$REVIEWER_B" \
+    --b-backend "$B_BACKEND" \
     --claude-cross "$RUN_DIR/claude.cross.json" \
     --codex-cross  "$RUN_DIR/codex.cross.json" \
     --cross-review-done \
     --base "$BASE" --head "$HEAD_SHA" \
+    ${STALE:+--snapshot-stale} \
     --out  "$RUN_DIR/verdict.json" || SYNTH_RC=$?   # 1/2 = REJECT/CONTESTED — valid verdicts
   # Skip the rest of Step 4; proceed to Step 5.
 fi
@@ -480,7 +520,7 @@ Both use **severity-aware AGREE labels** — plain AGREE/DISAGREE loses signal w
 
 Both cross legs keep the A/B boundary: Reviewer B assesses only Reviewer A's solo findings and vice versa, each in its own context; the orchestrator collects and re-synthesizes, never judges. Under `REVIEWER_B=claude` that is still two separate fresh contexts on disjoint target sets — do not "simplify" it into one agent assessing both.
 
-**Reviewer B cross-review — codex leg (`REVIEWER_B=codex`; Bash, background)** — codex reads `$RUN_DIR/codex-cross-targets.json` (Reviewer A's solo findings) and emits a JSON array of `{fingerprint, verdict, rationale}`:
+**Reviewer B cross-review — outside-voice leg (`REVIEWER_B=codex`; Bash, background)** — the outside voice reads `$RUN_DIR/codex-cross-targets.json` (Reviewer A's solo findings) and emits a JSON array of `{fingerprint, verdict, rationale}`:
 
 ```bash
 # Fresh shell: these come from earlier blocks and are EMPTY here unless the
@@ -499,6 +539,13 @@ Both cross legs keep the A/B boundary: Reviewer B assesses only Reviewer A's sol
 # empty list, honestly return `[]`, and the cross-review would be recorded as
 # done having assessed nothing.
 [ -s "$RUN_DIR/codex-cross-targets.json" ] || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$RUN_DIR/codex.cross.exit" 79 "cross-review targets missing or empty — not dispatching a cross-review of nothing"
+# An empty list (`[]`: Reviewer A has no solo finding) is not dispatched at full
+# price; 4c keeps the [] (the .skipped marker).
+if [ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$RUN_DIR/codex-cross-targets.json")" = 0 ]; then
+  echo '[]' > "$RUN_DIR/codex.cross.json"; : > "$RUN_DIR/codex.cross.skipped"
+  echo "Reviewer A has no solo findings to assess — the outside-voice cross leg is not dispatched"
+  exit 0
+fi
 CROSS_PROMPT="You are Reviewer B. Reviewer A — a separate reviewer — flagged the following findings on this diff that you did not catch in your first-pass review. For each, return your assessment using these severity-aware labels:
 
   AGREE-HIGH     | yes, ship-blocking
@@ -514,7 +561,7 @@ REVIEWER A'S FINDINGS TO ASSESS (JSON):
 $(cat "$RUN_DIR/codex-cross-targets.json")
 
 Output STRICT JSON only — array of {\"fingerprint\": \"...\", \"verdict\": \"AGREE-HIGH\"|..., \"rationale\": \"one line\"}. No markdown fences. Empty array if nothing to assess."
-# Same stdin-file pattern as Step 2a (argv ceiling → false PASS); `-` is the only positional.
+# Same stdin-file pattern as Step 2a (argv ceiling → false PASS).
 CROSS_PROMPT_TXT="$RUN_DIR/codex.cross.prompt"
 printf '%s\n' "$CROSS_PROMPT" > "$CROSS_PROMPT_TXT"
 
@@ -525,21 +572,22 @@ printf '%s\n' "$CROSS_PROMPT" > "$CROSS_PROMPT_TXT"
 EFFORT=$(~/.claude/skills/koji/bin/koji-duet-setup field "$(head -n1 "$RUN_DIR/duet-setup")" 2) || exit 1
 case "$EFFORT" in high) TIMEOUT=900 ;; *) TIMEOUT=1800 ;; esac   # derived, not re-defaulted: an unexported TIMEOUT=900 does not cross a shell boundary
 
-~/.claude/skills/koji/bin/koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" \
+# Its own record: a fallback can make the cross leg's provider differ from 2a's.
+~/.claude/skills/koji/bin/koji-outside-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" "$RUN_DIR/codex.cross.provider" --expect cross \
   < "$CROSS_PROMPT_TXT" > "$RUN_DIR/codex.cross.raw" 2> "$RUN_DIR/codex.cross.err"
 CE=$?; echo "$CE" > "$RUN_DIR/codex.cross.exit"
 # An `if`, not `[ ... ] && ...`: as the block's last command the && form returns
 # 1 on a SUCCESSFUL cross-review and 0 on a harness mismatch — exactly backwards.
 if [ "$CE" = "78" ]; then
-  echo "FATAL: codex harness mismatch — stop the run, do not classify, do not substitute" >&2
+  echo "FATAL: harness mismatch — stop the run, do not classify, do not substitute" >&2
 fi
 ```
 
 Run with **`run_in_background: true`**.
 
-**Reviewer B cross-review — Claude leg (`REVIEWER_B=claude`; Agent, background)** — same target set, same labels, same output file. First `~/.claude/skills/koji/bin/koji-tree-fingerprint > "$RUN_DIR/codex.cross.fp"`. Then **Call the `Agent` tool** — a literal tool call; do not assess Reviewer A's findings yourself. The reviewer runs in a **fresh Agent context, never a fork**: `subagent_type: koji-reviewer-$CLAUDE_EFFORT` (or `general-purpose` under `inherit`; the 2a fallback rule applies), `description: Duet review: Reviewer B (Claude) cross-review`, `model` omitted when `$CLAUDE_MODEL` is `inherit` else its value, `run_in_background: true`, and `prompt` = the exact `$CROSS_PROMPT` text above (with the diff and the targets JSON inlined) followed by the read-only clause from `../references/reviewer-backend.md`. Its array is written to `$RUN_DIR/codex.cross.json` in 4c — the B cross slot.
+**Reviewer B cross-review — Claude leg (`REVIEWER_B=claude`; Agent, background)** — same target set, same labels, same output file. When `codex-cross-targets.json` is `[]`, do not call the Agent: write `[]` to `$RUN_DIR/codex.cross.json` and `touch "$RUN_DIR/codex.cross.skipped"`. First `~/.claude/skills/koji/bin/koji-tree-fingerprint > "$RUN_DIR/codex.cross.fp"`. Then **Call the `Agent` tool** — a literal tool call; do not assess Reviewer A's findings yourself. The reviewer runs in a **fresh Agent context, never a fork**: `subagent_type: koji-reviewer-$CLAUDE_EFFORT` (or `general-purpose` under `inherit`; the 2a fallback rule applies), `description: Duet review: Reviewer B (Claude) cross-review`, `model` omitted when `$CLAUDE_MODEL` is `inherit` else its value, `run_in_background: true`, and `prompt` = the exact `$CROSS_PROMPT` text above (the targets JSON inlined; the diff inlined, or by path when Step 2 printed `BY PATH`) followed by the read-only clause from `../references/reviewer-backend.md`. Its array is written to `$RUN_DIR/codex.cross.json` in 4c — the B cross slot.
 
-**Reviewer A cross-review (Agent, background)** — first `~/.claude/skills/koji/bin/koji-tree-fingerprint > "$RUN_DIR/claude.cross.fp"` (the 2d snapshot check covered the first pass only; this leg gets its own). Then call the `Agent` tool with `run_in_background: true`, `subagent_type: koji-reviewer-$CLAUDE_EFFORT` (or `general-purpose` under `inherit`), and `model` omitted when `$CLAUDE_MODEL` is `inherit` else its value. Prompt:
+**Reviewer A cross-review (Agent, background)** — when `$RUN_DIR/claude-cross-targets.json` is `[]` (Reviewer B has no solo finding), do not call the Agent: write `[]` to `$RUN_DIR/claude.cross.json` and `touch "$RUN_DIR/claude.cross.skipped"`. Otherwise first `~/.claude/skills/koji/bin/koji-tree-fingerprint > "$RUN_DIR/claude.cross.fp"` (the 2d snapshot check covered the first pass only; this leg gets its own). Then call the `Agent` tool with `run_in_background: true`, `subagent_type: koji-reviewer-$CLAUDE_EFFORT` (or `general-purpose` under `inherit`), and `model` omitted when `$CLAUDE_MODEL` is `inherit` else its value. Prompt:
 
 ```
 You are a code reviewer. Reviewer B — a separate reviewer — flagged the following findings on this diff that you did not catch in your first-pass review. For each, return your assessment using these labels: AGREE-HIGH / AGREE-MEDIUM / AGREE-LOW / DISAGREE / NEEDS-MORE-CONTEXT.
@@ -555,26 +603,35 @@ followed by the **read-only clause** from `../references/reviewer-backend.md` (t
 
 ### 4c. Collect both responses, re-synthesize
 
-When BOTH notifications arrive, extract JSON arrays, check each with `~/.claude/skills/koji/bin/koji-duet-findings-check --cross`, and write the ones that pass to `$RUN_DIR/codex.cross.json` and `$RUN_DIR/claude.cross.json` (a failed check is the 4d fallback for that side: `[]`). Compare `$RUN_DIR/claude.cross.fp` against a fresh `~/.claude/skills/koji/bin/koji-tree-fingerprint` and print the `⚠ working tree changed …` line on mismatch — the A cross reviewer holds Edit/Write like every other Claude leg. When `REVIEWER_B=codex`, use `koji-codex-classify` for the B cross leg (as in Step 2d): a `QUOTA` state backs off + retries up to `QUOTA_MAX_WAITS` before falling to the 4d safe-degrade — never read a quota reply as an empty cross-review. When `REVIEWER_B=claude`, extract the array from the B cross Agent's response directly — no classifier — and compare `codex.cross.fp` against a fresh `koji-tree-fingerprint` (same `⚠` line as 2d on mismatch). Then re-run the synthesizer with the new inputs:
+When BOTH notifications arrive (a side with a `.skipped` marker sends none: it already holds its `[]` — do not classify or overwrite it), extract JSON arrays, check each with `~/.claude/skills/koji/bin/koji-duet-findings-check --cross`, and write the ones that pass to `$RUN_DIR/codex.cross.json` and `$RUN_DIR/claude.cross.json` (a failed check is the 4d fallback for that side: `[]`). Compare `$RUN_DIR/claude.cross.fp` against a fresh `~/.claude/skills/koji/bin/koji-tree-fingerprint` and print the `⚠ working tree changed …` line on mismatch — the A cross reviewer holds Edit/Write like every other Claude leg. When `REVIEWER_B=codex`, use `koji-codex-classify` for the B cross leg (as in Step 2d): a `QUOTA` state backs off + retries up to `QUOTA_MAX_WAITS` (each retry re-runs the 4b outside-voice dispatch, which walks the whole provider order) before falling to the 4d safe-degrade — never read a quota reply as an empty cross-review. When `REVIEWER_B=claude`, extract the array from the B cross Agent's response directly — no classifier — and compare `codex.cross.fp` against a fresh `koji-tree-fingerprint` (same `⚠` line as 2d on mismatch). Then re-run the synthesizer with the new inputs:
 
 ```bash
+REVIEWER_B=$(~/.claude/skills/koji/bin/koji-duet-backend review-b "$RUN_DIR/duet-setup") || exit 1   # fresh shell: the run file, never a remembered var; exit 3 = run state lost
 # The cross leg needs the SAME pre-classifier guard as 2a — it was the one
 # dispatch site without it, so a malformed cross dispatch (79) degraded to `[]`
-# and read as "Reviewer B had nothing to say about A's findings".
-[ -f "$RUN_DIR/codex.cross.exit" ] || { echo "FATAL: the cross dispatch block never recorded a status — it did not run to completion. Fix the block; do not degrade to []." >&2; exit 79; }
-case "$(cat "$RUN_DIR/codex.cross.exit" 2>/dev/null)" in
-  78) echo "FATAL: codex harness mismatch — no cross-review happened. Stop the run; do not substitute." >&2; exit 78 ;;
-  79) echo "FATAL: the cross dispatch block was malformed — no call was made. Fix the block; do not degrade to []." >&2; exit 79 ;;
-esac
-REVIEWER_B=$(~/.claude/skills/koji/bin/koji-duet-backend review-b "$RUN_DIR/duet-setup") || exit 1   # fresh shell: the run file, never a remembered var; exit 3 = run state lost
+# and read as "Reviewer B had nothing to say about A's findings". Only the
+# outside-voice leg writes codex.cross.exit: under REVIEWER_B=claude the B cross
+# leg is an Agent call, and demanding the file there was a false FATAL 79.
+if [ "$REVIEWER_B" = "codex" ] && [ ! -e "$RUN_DIR/codex.cross.skipped" ]; then
+  [ -f "$RUN_DIR/codex.cross.exit" ] || { echo "FATAL: the cross dispatch block never recorded a status — it did not run to completion. Fix the block; do not degrade to []." >&2; exit 79; }
+  case "$(cat "$RUN_DIR/codex.cross.exit" 2>/dev/null)" in
+    78) echo "FATAL: harness mismatch — no cross-review happened. Stop the run; do not substitute." >&2; exit 78 ;;
+    79) echo "FATAL: the cross dispatch block was malformed — no call was made. Fix the block; do not degrade to []." >&2; exit 79 ;;
+  esac
+  sed 's/^/outside voice: /' "$RUN_DIR/codex.cross.provider" 2>/dev/null || echo "outside voice: (no record)"
+fi
+# Same resolver as Step 3 — slot B is the FIRST-pass slot, so it reads codex.provider.
+B_BACKEND=$(~/.claude/skills/koji/bin/koji-duet-backend b-provider "$RUN_DIR") || exit 1
+STALE=$(~/.claude/skills/koji/bin/koji-tree-snapshot stale "$RUN_DIR")   # same latch as Step 3
 ~/.claude/skills/koji/bin/koji-duet-synthesize \
   --claude "$RUN_DIR/claude.json" \
   --codex  "$RUN_DIR/codex.json" \
-  --b-backend "$REVIEWER_B" \
+  --b-backend "$B_BACKEND" \
   --claude-cross "$RUN_DIR/claude.cross.json" \
   --codex-cross  "$RUN_DIR/codex.cross.json" \
   --cross-review-done \
   --base "$BASE" --head "$HEAD_SHA" \
+  ${STALE:+--snapshot-stale} \
   --out  "$RUN_DIR/verdict.json" || SYNTH_RC=$?   # 1/2 = REJECT/CONTESTED — valid verdicts
 
 FINAL_VERDICT=$(python3 -c "import json; print(json.load(open('$RUN_DIR/verdict.json'))['verdict'])")
@@ -585,7 +642,7 @@ echo "Post-cross-review verdict: $FINAL_VERDICT"
 
 ### 4d. Failure-mode fallback
 
-If either cross-review times out or returns unparseable JSON, write `[]` for that side and proceed — original solo findings stay solo (safe degradation). A codex quota reply falls here too, but only *after* its back-off retries exhaust (Step 4c) — and it is logged as `codex unavailable (quota)`, distinct from a timeout, so a degraded cross-review is never a silent pass.
+If either cross-review times out or returns unparseable JSON, write `[]` for that side and proceed — original solo findings stay solo (safe degradation). An outside-voice quota reply falls here too, but only *after* its back-off retries exhaust (Step 4c) — and it is logged as `outside voice unavailable (quota)`, distinct from a timeout, so a degraded cross-review is never a silent pass.
 
 ---
 
@@ -619,6 +676,12 @@ if [ "$NO_AUTO_APPLY" = "1" ]; then
   # No fixes applied: every high_consensus finding stays for manual review.
   # Leave verdict.json untouched (no auto_applied / user_held mutation) and
   # go straight to Step 6, which prints the verdict as-is.
+  SKIP_AUTO_APPLY=1
+fi
+# A stale embedded review did not review the tree on disk: applying its fixes
+# would edit code no reviewer saw. Report only.
+if [ -e "$RUN_DIR/snapshot.stale" ]; then
+  echo "Snapshot stale — skipping the apply prompt; this REJECT verdict is reported only."
   SKIP_AUTO_APPLY=1
 fi
 ```
@@ -668,13 +731,34 @@ For choices 1, 3, 4: invoke the Edit tool with `suggested_fix.details` to apply 
 
 **Gate (same as Step 5):** refuse to print a summary if `cross_review_required && !cross_review_done`. Re-use the gate check from Step 5.
 
+Resolve which provider really filled Reviewer B, and collect the records' notes:
+
+```bash
+# Fresh shell. The setup names Reviewer B's ROLE; the records name the CLI that
+# answered. The cross leg keeps its own record, and a fallback can make the two
+# differ. Render-safe: `read` and sed, no field refs.
+: "${RUN_DIR:?RUN_DIR unset — re-substitute it in this block}"
+REVIEWER_B=$(~/.claude/skills/koji/bin/koji-duet-backend review-b "$RUN_DIR/duet-setup") || exit 1
+B_BACKEND=$(~/.claude/skills/koji/bin/koji-duet-backend b-provider "$RUN_DIR") || exit 1
+echo "Reviewer B provider: $B_BACKEND"
+[ -e "$RUN_DIR/snapshot.stale" ] && echo "⚠ SNAPSHOT STALE: the tree changed while this embedded review ran — the verdict is forced to REJECT"
+if [ "$REVIEWER_B" != "claude" ]; then
+  for R in codex.provider codex.cross.provider; do
+    [ -f "$RUN_DIR/$R" ] && sed -n "1s/^/$R: /p" "$RUN_DIR/$R"
+  done
+  # ⚠ notes (e.g. agy saw the tree move during its attempt). The user may edit
+  # during a review, so these go in the header: shown, never a reason to block.
+  cat "$RUN_DIR/codex.provider" "$RUN_DIR/codex.cross.provider" 2>/dev/null | grep -F '⚠' || true
+fi
+```
+
 Print a markdown summary to the user:
 
 ```
 duet-review verdict: <VERDICT>
 
 Setup:     <koji-duet-setup summary of $RUN_DIR/duet-setup> [(claude effort fell back to inherit — agents not installed)]
-Reviewers: claude-A (<single pass | fan-out 5 angles>, <claude effort>/<model>) [UNAVAILABLE — malformed] + <codex (<max|xhigh|high>) | claude-B (<claude effort>/<model>)> [UNAVAILABLE — <quota | error | malformed>]
+Reviewers: claude-A (<single pass | fan-out 5 angles>, <claude effort>/<model>) [UNAVAILABLE — malformed] + <outside voice: <agy|codex|none> <effort> [cross: <agy|codex|none> <effort>] | claude-B (<claude effort>/<model>)> [UNAVAILABLE — <quota | error | malformed>]
 Diff: <N> lines  base=<base>  head=<sha>
 
 Consensus high (X):   <list — auto-applied / held by user / failed apply>
@@ -686,9 +770,13 @@ Output JSON: <RUN_DIR>/verdict.json
 Exit code: <0|1|2>
 ```
 
-When `CODEX_UNAVAILABLE=1` (codex quota back-off cap reached, codex `TIMEOUT`/`ERROR`, or the Claude-B leg returned no parseable array twice), print `UNAVAILABLE — <quota | error | malformed>` after the Reviewer B entry and add a one-line banner above the verdict — *"⚠ Degraded: Reviewer B (<codex | Claude>) was unavailable; this verdict reflects Reviewer A only, not a two-reviewer duet."* — so the degradation is explicit, never a silent single-reviewer pass. Likewise when `CLAUDE_A_UNAVAILABLE=1` (Reviewer A malformed twice, or every angle failed): `UNAVAILABLE — malformed` after the Reviewer A entry and *"⚠ Degraded: Reviewer A (Claude) was unavailable; this verdict reflects Reviewer B only."* Both unavailable never reaches this step (2d stops with no verdict). The `Setup:` line is `koji-duet-setup summary` of `$RUN_DIR/duet-setup`, with the bracketed fallback note when `$RUN_DIR/claude-effort-fallback` exists.
+The outside-voice entry is the first two words of each record's line 1, as the block above printed them — `<provider> <effort>`, where agy's effort may be clamped below the setup's. Add the `cross:` part when `codex.cross.provider` exists. `none` means no provider answered.
 
-When `REVIEWER_B=claude`, add one line under the Reviewers line: *"Note: same-model duet (claude + claude) — consensus here means two independent Claude contexts, not two model families; the cross-model disagreement signal is weaker, and exact-fingerprint agreement inflates the auto-apply bucket."* If any `⚠ working tree changed …` fired during 2d/4c, repeat it here as a header note.
+When `CODEX_UNAVAILABLE=1` (outside-voice quota back-off cap reached, outside-voice `TIMEOUT`/`ERROR` after every provider in the order, or the Claude-B leg returned no parseable array twice), print `UNAVAILABLE — <quota | error | malformed>` after the Reviewer B entry and add a one-line banner above the verdict — *"⚠ Degraded: Reviewer B (<the outside voice | Claude>) was unavailable; this verdict reflects Reviewer A only, not a two-reviewer duet."* — so the degradation is explicit, never a silent single-reviewer pass. Likewise when `CLAUDE_A_UNAVAILABLE=1` (Reviewer A malformed twice, or every angle failed): `UNAVAILABLE — malformed` after the Reviewer A entry and *"⚠ Degraded: Reviewer A (Claude) was unavailable; this verdict reflects Reviewer B only."* Both unavailable never reaches this step (2d stops with no verdict). The `Setup:` line is `koji-duet-setup summary` of `$RUN_DIR/duet-setup`, with the bracketed fallback note when `$RUN_DIR/claude-effort-fallback` exists.
+
+When the block above printed `⚠ SNAPSHOT STALE` (an embedded review whose tree moved, or could not be captured), add this banner above the verdict line: *"⚠ Snapshot stale: the working tree changed while this review ran, so the verdict is forced to REJECT (`snapshot_stale: true` in verdict.json) and no fix was applied. Re-run the review on the tree as it is now."*
+
+When `REVIEWER_B=claude`, add one line under the Reviewers line: *"Note: same-model duet (claude + claude) — consensus here means two independent Claude contexts, not two model families; the cross-model disagreement signal is weaker, and exact-fingerprint agreement inflates the auto-apply bucket."* If any `⚠ working tree changed …` fired during 2d/4c, repeat it here as a header note. Repeat every `⚠` note line the block above printed from the two provider records the same way — show it; do not block on it.
 
 Then `exit $EXIT_CODE` where exit code comes from `verdict.json`.
 
@@ -698,9 +786,13 @@ Then `exit $EXIT_CODE` where exit code comes from `verdict.json`.
 
 | Symptom | Likely cause | Mitigation |
 |---|---|---|
-| Codex hangs (no output, no timeout fire) | Stdin not closed, or `--enable web_search_cached` re-introduced | This skill explicitly drops both — verify the bash above wasn't modified. Kill `$CODEX_PID` manually. |
-| Codex exits 124 | Hit the timeout. xhigh's 30-min wall isn't enough for very large diffs. | Re-run with smaller scope (name a closer `BASE`), or ask for verdict-only (`NO_AUTO_APPLY`) to at least get the report. |
-| Codex quota/rate-limit reply | 5-hour session limit depleted | `koji-codex-classify` returns `QUOTA` (not `[]`) → back off `QUOTA_BACKOFF`s and auto-retry to `QUOTA_MAX_WAITS`; cap reached → Claude-only degraded verdict with an explicit banner (`CODEX_UNAVAILABLE`), never a silent single-reviewer pass. |
+| Outside voice hangs (no reply yet) | A provider CLI stalled | `koji-timeout` ends each attempt at `$TIMEOUT`; the wrapper then tries the next provider. `$RUN_DIR/codex.provider` says who was tried and why each failed; each attempt's raw reply and stderr are in `$RUN_DIR/codex.provider.<n>.<provider>.out` / `.err`, numbered per dispatch so a retry never overwrites them (cross leg: `codex.cross.provider.<n>.<provider>.*`). A provider that timed out is tried last for the rest of the run. |
+| `agy reads this N KB prompt from a file` in the provider record | The prompt is over agy's ~190 KB inline limit (koji's cap: `KOJI_AGY_MAX_PROMPT`, 160000 bytes) | Expected: agy reads the whole prompt from a file in the repository's `.git` directory, removed afterwards. |
+| `agy skipped — … no .git directory to hand it over in` | A big prompt in a linked worktree or submodule, where `.git` is a file | codex answers. Run the review from the main checkout to bring agy back. |
+| `⚠ SNAPSHOT STALE`, verdict REJECT with `snapshot_stale: true` | An embedded (`/duet-impl`) review: the tree changed between Step 1's capture and a synthesizer call — a reviewer with shell access, or concurrent work | The verdict fails closed and Step 5 applies nothing. Re-run the final review on the tree as it is now. |
+| Outside voice exits 124 | The last provider tried hit the timeout. xhigh's 30-min wall per attempt isn't enough for very large diffs. | Re-run with smaller scope (name a closer `BASE`), or ask for verdict-only (`NO_AUTO_APPLY`) to at least get the report. |
+| Outside-voice quota/rate-limit reply | No provider in the order could answer, and at least one hit its quota (5-hour limit). A quota on one provider alone just moves the call to the next. | `koji-codex-classify` returns `QUOTA` (not `[]`) → back off `QUOTA_BACKOFF`s and auto-retry to `QUOTA_MAX_WAITS` (each retry walks the whole order); cap reached → Claude-only degraded verdict with an explicit banner (`CODEX_UNAVAILABLE`), never a silent single-reviewer pass. |
+| Outside voice exits 127 | Neither agy nor codex is on PATH (the preflight warns at run start) | Classifies as `ERROR` → Claude-only degraded verdict with the banner. Install one, or choose Reviewer B: Claude. |
 | Agent (Claude, Reviewer A) returns prose, or an array that fails `~/.claude/skills/koji/bin/koji-duet-findings-check` | Reviewer prompt drift, or model decided to chat. | Single mode: retry once with the format reminder; second failure → `CLAUDE_A_UNAVAILABLE=1`, `[]` placeholder, degraded banner — and no verdict at all when Reviewer B is unavailable too. Fan-out: that angle becomes `[]`; all five failing is the single-mode terminal. |
 | Reviewer B Claude leg returns prose / no array | Same drift, on the B side | Retry once with the format reminder (Step 2d); second failure → `CODEX_UNAVAILABLE=1` + degraded banner. Never a silent `[]` — a B slot placeholder is always announced. Never run `koji-codex-classify` on Claude output. |
 | `⚠ working tree changed while a read-only reviewer was in flight` | Reviewer B (Claude leg) edited despite the read-only clause, or the user kept working | Unattributed by design. Inspect `git status`; if the reviewer edited, re-run the review on the intended snapshot. |

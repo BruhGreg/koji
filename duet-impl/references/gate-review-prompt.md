@@ -1,6 +1,6 @@
 # Gate Review Prompt (intermediate gates)
 
-Used by `/duet-impl` at each intermediate gate (agent identifies gates from plan structure per `/duet-impl` SKILL.md "Review checkpoint strategy"). The implementer's diff for that gate is reviewed by the gate reviewer(s) the run's duet setup chose — codex, a fresh-context Claude subagent, both in parallel, or Claude with a codex confirmation; see `../../references/reviewer-backend.md`. Every leg fills this same template; the backend never changes the prompt. The FINAL phase (cumulative diff at end of run) uses `/duet-review` instead — two reviewers + cross-review pass.
+Used by `/duet-impl` at each intermediate gate (agent identifies gates from plan structure per `/duet-impl` SKILL.md "Review checkpoint strategy"). The implementer's diff for that gate is reviewed by the gate reviewer(s) the run's duet setup chose — the outside voice (agy → codex), a fresh-context Claude subagent, both in parallel, or Claude with an outside-voice confirmation; see `../../references/reviewer-backend.md`. Every leg fills this same template; the backend never changes the prompt. The FINAL phase (cumulative diff at end of run) uses `/duet-review` instead — two reviewers + cross-review pass.
 
 ## Reviewer prompt
 

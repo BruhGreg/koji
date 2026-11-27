@@ -28,3 +28,16 @@ assert_file_contains() { # assert_file_contains <needle> <file> [label]
 assert_file_not_contains() {
   if grep -qF -- "$1" "$2" 2>/dev/null; then _fail "${3:-} $2 unexpectedly has [$1]"; else _ok; fi
 }
+
+# A system PATH that holds no real agy or codex. Never add an interpreter's whole
+# directory: on a Homebrew layout python3 and codex share /opt/homebrew/bin, and
+# a "no provider installed" test would then spend a real call. Only a python3
+# symlink is added, in a directory of its own.
+_clean_sys_path() {
+  local d="$TMP/.sysbin" py
+  if [ ! -d "$d" ]; then
+    mkdir -p "$d"
+    py=$(command -v python3) && ln -sf "$py" "$d/python3"
+  fi
+  printf '%s' "/usr/bin:/bin:/usr/sbin:/sbin:$d"
+}

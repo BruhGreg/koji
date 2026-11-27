@@ -16,16 +16,30 @@ set -euo pipefail
 
 FILE="${1:?Usage: koji-duet-verdict <file>}"
 
-# grep isolates VERDICT lines (any case). Strip everything up to the first colon
-# — portable, and avoids the BSD-incompatible sed `I` (case-insensitive) flag,
-# since grep already case-folded the match. Then take the first token, uppercase
-# it, and drop any trailing ":reason". A missing/empty verdict yields UNKNOWN.
-verdict=$(
-  grep -iE '^[[:space:]]*VERDICT[[:space:]]*:' "$FILE" 2>/dev/null \
+# grep isolates VERDICT lines (any case), allowing markdown before the word and
+# around the colon — `**VERDICT: AGREE**`, `> VERDICT:`, `- **VERDICT:** AGREE`,
+# and inline code (`VERDICT: AGREE` in backticks, the form the prompt templates
+# show) — because reviewers decorate the line and an unread vote costs a call.
+# Strip everything up to the first colon (portable; grep already case-folded),
+# then leading emphasis, take the first token, uppercase it, cut a trailing
+# ":reason" BEFORE stripping trailing emphasis (`PARTIAL**: x` → `PARTIAL`).
+# Exact tokens only: `AGREEMENT IS NOT POSSIBLE` is not AGREE. Anything but
+# AGREE / PARTIAL / DISAGREE — or no verdict line — is UNKNOWN.
+REST=$(
+  grep -iE '^[[:space:]*_>#`-]*VERDICT[[:space:]*_`]*:' "$FILE" 2>/dev/null \
     | tail -1 \
-    | sed -E 's/^[^:]*:[[:space:]]*//' \
-    | awk '{print toupper($1)}' \
-    | sed 's/:.*$//' \
+    | sed -E 's/^[^:]*:[[:space:]*_`]*//' \
     || true
 )
-printf '%s\n' "${verdict:-UNKNOWN}"
+# The token is a vote only when nothing but closing decoration or a REASON
+# follows it: `PARTIAL: needs X`, `DISAGREE — skips X`, `AGREE (nits)`.
+# `AGREE is not possible until X` and `**VERDICT: AGREE** would be my vote`
+# are prose about a vote — UNKNOWN, so they can never auto-lock a plan.
+verdict=UNKNOWN
+if printf '%s\n' "$REST" | grep -qiE '^(AGREE|PARTIAL|DISAGREE)[*_`~.,;!]*[[:space:]]*($|:|\(|—|–|-([[:space:]]|$))'; then
+  verdict=$(printf '%s' "$REST" | awk '{print toupper($1)}' | sed -E 's/(:|\(|—|–).*$//; s/[*_`~.,;!-]+$//')
+fi
+case "$verdict" in
+  AGREE|PARTIAL|DISAGREE) printf '%s\n' "$verdict" ;;
+  *)                      printf 'UNKNOWN\n' ;;
+esac

@@ -1,5 +1,5 @@
 ---
-description: "Autonomous, lean, cross-model hardening of a LOCKED plan: drives gstack's /plan-eng-review inline, and for each genuinely contentious finding runs a Claude+codex vote on one proposed resolution that auto-locks on consensus. One end-of-run erratum ratifies — and nothing is written until it does. Invocation requires the 'triangulate-review' intent (distinct from bare /triangulate). Requires gstack AND codex."
+description: "Autonomous, lean, cross-model hardening of a LOCKED plan: drives gstack's /plan-eng-review inline, and for each genuinely contentious finding runs a Claude + outside-voice (agy → codex) vote on one proposed resolution that auto-locks on consensus. One end-of-run erratum ratifies — and nothing is written until it does. Invocation requires the 'triangulate-review' intent (distinct from bare /triangulate). Requires gstack AND an outside voice (agy or codex)."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools:
@@ -20,7 +20,7 @@ allowed-tools:
 
 > Follows the [agent-autonomy principle](../references/agent-autonomy.md): agents resolve technical questions together; users see prompts only for cost safety, deadlocks, and the final ratification.
 
-Run an **autonomous, lean, cross-model hardening pass** over a locked plan. This skill drives gstack's `/plan-eng-review` **inline** (you become its reviewer), and for each finding it **triages** — most findings it resolves solo by reading the cited source; only the genuinely contentious ones get a **Claude + codex vote on a single proposed resolution** that **`consensus (both AGREE) auto-locks`**. At the end, ONE ratification prompt (the *erratum*) surfaces the decisions — and **`nothing is written to the plan until you ratify`**.
+Run an **autonomous, lean, cross-model hardening pass** over a locked plan. This skill drives gstack's `/plan-eng-review` **inline** (you become its reviewer), and for each finding it **triages** — most findings it resolves solo by reading the cited source; only the genuinely contentious ones get a **Claude + outside-voice vote on a single proposed resolution** that **`consensus (both AGREE) auto-locks`**. At the end, ONE ratification prompt (the *erratum*) surfaces the decisions — and **`nothing is written to the plan until you ratify`**.
 
 It is the first-class home for the hand-driven loop koji ran ad-hoc — made reproducible and drift-guarded. It is **not** a fan-out: the reference run hardened a locked ADR in **4 model calls across 2 findings**. If a run is spawning tens of agents, the triage discipline has broken.
 
@@ -32,9 +32,9 @@ Operates on a **locked** plan (e.g. one `/duet-plan` produced, or any structured
 
 ## Dependencies & startup
 
-**gstack AND codex are REQUIRED.**
+**gstack AND an outside voice (agy or codex) are REQUIRED.**
 - **gstack** supplies the review lens — the eng-manager cognitive patterns and the Architecture / Code-Quality / Test / Performance sections of `/plan-eng-review`. **eng-only at v1**: `/plan-devex-review` is dimension-*scoring*, not finding-by-finding; `/plan-ceo-review` and `/plan-design-review` are holistic — skip all three.
-- **codex** is the second voice in every debate. Auto-locking on a single model's vote is meaningless, so without codex there is no honest cross-model consensus — it is a hard dependency, not a degrade.
+- **The outside voice** — agy first, codex second; either one is enough — is the second voice in every debate. Auto-locking on a single model's vote is meaningless, so without an outside voice there is no honest cross-model consensus — it is a hard dependency, not a degrade. (Not the same thing as gstack's **Outside Voice** red-team in Step 4, which is a fresh agent challenging the finished plan.)
 
 ## Preamble
 
@@ -45,22 +45,23 @@ if [ ! -f "$HOME/.claude/skills/gstack/plan-eng-review/SKILL.md" ]; then
   echo "plan-triangulate-review needs gstack's /plan-eng-review (the review lens it hardens). Install gstack, then re-run."
   exit 0
 fi
-if ! command -v codex >/dev/null 2>&1; then
-  echo "plan-triangulate-review needs codex on PATH (the second voice in every debate)."
-  echo "Without it there is no cross-model consensus to auto-lock on. Install codex, then re-run."
+if ! ~/.claude/skills/koji/bin/koji-outside-exec --available >/dev/null 2>&1; then
+  echo "plan-triangulate-review needs an outside voice on PATH — agy or codex (the second voice in every debate)."
+  echo "Without one there is no cross-model consensus to auto-lock on. Install agy or codex, then re-run."
   exit 0
 fi
 
 source <(~/.claude/skills/koji/bin/koji-detect)
-# Codex preflight: refuses to run when THIS session is itself under codex (an
-# outside voice cannot be the same model), and warns on a known-bad CLI.
+# Outside-voice preflight: refuses to run when THIS session is itself inside
+# another agent's harness (codex or agy — an outside voice cannot be the same
+# model), prints the outside-voice order, and warns on a known-bad codex CLI.
 # Exit 78 = harness mismatch. It must STOP THE RUN, not just this block.
-~/.claude/skills/koji/bin/koji-codex-preflight || exit $?
+~/.claude/skills/koji/bin/koji-outside-preflight || exit $?
 echo "=== koji plan-triangulate-review ==="
 echo "Project: $PROJECT_NAME"
 ```
 
-**If the preamble exits 78 — harness mismatch.** This session is running under codex, so codex cannot be the outside voice. Stop the run and report *"codex outside review unavailable: harness mismatch; no outside process started. Missing coverage."* **Never substitute a fresh-context Claude reviewer for it** — the quota-substitution rule does not apply here. Under codex that substitution makes Reviewer A review itself, which is exactly the two-placeholders-into-a-PASS failure koji forbids. A failed Bash block does not halt the agent; stopping is your job.
+**If the preamble exits 78 — harness mismatch.** This session is running inside another agent's harness (codex or agy), so no outside voice is possible here. Stop the run and report *"outside review unavailable: harness mismatch; no outside process started. Missing coverage."* **Never substitute a fresh-context Claude reviewer for it** — the quota-substitution rule does not apply here. Inside another agent's harness that substitution makes Reviewer A review itself, which is exactly the two-placeholders-into-a-PASS failure koji forbids. A failed Bash block does not halt the agent; stopping is your job.
 
 ## Arguments / plan resolution
 
@@ -72,7 +73,7 @@ The plan path comes from the user's invocation (intent, not flags):
 | `plan-triangulate-review the port-shape plan` | glob `$PLANS_DIR/*port-shape*.md`; 1 match → use; multiple → AskUserQuestion to pick |
 | `plan-triangulate-review` (no plan) | AskUserQuestion to pick from `$PLANS_DIR/*.md` |
 
-**Codex effort: default xhigh, opt down by saying so** (same rule as `/triangulate` and `/duet-review`). Drop to `high` only on an explicit lighter-effort signal. Claude inherits the parent session's effort.
+**Outside-voice effort: default xhigh, opt down by saying so** (same rule as `/triangulate` and `/duet-review`). Drop to `high` only on an explicit lighter-effort signal. Claude inherits the parent session's effort.
 
 ---
 
@@ -80,10 +81,10 @@ The plan path comes from the user's invocation (intent, not flags):
 
 Before any model spend or keep-awake, show a one-time estimate and get one opt-in (a legitimate **cost-safety** prompt under [agent-autonomy.md](../references/agent-autonomy.md)). The finding count is unknowable until the review runs, so the estimate is a **ceiling** — say so honestly:
 
-> Hardening `<plan>` with `/plan-eng-review` + per-finding Claude↔codex debate.
-> Up to ~`F` findings × 2 voices × ≤3 rounds at `<xhigh|high>` — but **most findings resolve by reading source with zero model calls; only genuinely contentious ones spend.** codex runs serial (~up to 30 min worst case each). Reference run: 4 calls / 2 findings.
+> Hardening `<plan>` with `/plan-eng-review` + per-finding Claude↔outside-voice (agy → codex) debate.
+> Up to ~`F` findings × 2 voices × ≤3 rounds at `<xhigh|high>` — but **most findings resolve by reading source with zero model calls; only genuinely contentious ones spend.** The outside voice runs serial (~up to 30 min per provider, worst case). Reference run: 4 calls / 2 findings.
 
-`AskUserQuestion` — options: **Proceed (recommended)** / **Lighter (codex `high`)** / **Include Outside-Voice red-team** (+1 fresh agent; default OFF for leanness; see Step 4) / **Cancel** (`exit 0`; nothing spawned).
+`AskUserQuestion` — options: **Proceed (recommended)** / **Lighter (outside voice `high`)** / **Include Outside-Voice red-team** (+1 fresh agent; default OFF for leanness; see Step 4) / **Cancel** (`exit 0`; nothing spawned).
 
 ## Step 2 — Start the review (keep-awake, run dir, then drive plan-eng-review inline)
 
@@ -120,7 +121,7 @@ Count every finding you triage in **`TRIAGED`** (any bucket) — it feeds the re
 
 **Do not fire plan-eng-review's per-section AskUserQuestion for a finding.** The triage + (maybe) debate + the single end-of-run ratification (Step 6) is the one user gate — see "Autonomy reconciliation" below; this override is deliberate.
 
-### Step 3a — The debate (Claude + codex vote on ONE proposed resolution)
+### Step 3a — The debate (Claude + outside voice vote on ONE proposed resolution)
 
 A debate is a vote on a **single proposed resolution**, not an open-ended "what do you think." This is load-bearing: without a shared proposition, two voices can both say "AGREE" while meaning *different* fixes. So FIRST commit to the **proposed resolution** you'd lock (from your triage read), then ask both voices to vote on exactly that.
 
@@ -150,7 +151,7 @@ Then one paragraph: your reasoning + the crux.
 Dispatch both voices in parallel, backgrounded, each to its own file:
 
 - **Claude voice** — `Agent` tool, `run_in_background: true`, `general-purpose`. When it returns, **you (the main agent) write its full output to `$RUN_DIR/finding-$FINDING_N-r$ROUND-claude.md`** via the Write tool — the subagent does not write the file.
-- **codex voice** — embedded bash, `run_in_background: true` (the canonical koji dispatch via `bin/koji-codex-exec` — prompt on stdin as a regular file, deadline enforced by `bin/koji-timeout`):
+- **outside voice** (agy → codex) — embedded bash, `run_in_background: true` (the canonical koji dispatch via `bin/koji-outside-exec` — prompt on stdin as a regular file, deadline enforced by `bin/koji-timeout`, the provider order walked inside; the record says who voted):
 
 ```bash
 # Fresh shell: these come from earlier blocks and are EMPTY here unless the
@@ -173,11 +174,12 @@ IFS='|' read -r EFFORT TIMEOUT < "$RUN_DIR/codex-settings" \
   || exec ~/.claude/skills/koji/bin/koji-dispatch-abort "$CF.exit" 79 "cannot read the run's codex settings — effort/timeout unresolved"
 # $CODEX_PROMPT = the finding + options + proposed resolution + lens + the
 # VERDICT-closing instruction above.
-# Prompt to a file, then codex reads it from stdin (`-`) — a prompt on argv can
-# exceed the argv ceiling; printf is a builtin and has no such limit.
+# Prompt to a file, then the outside voice reads it from stdin — a prompt on argv
+# can exceed the argv ceiling; printf is a builtin and has no such limit.
 printf '%s\n' "$CODEX_PROMPT" > "$CF.prompt"
 
-~/.claude/skills/koji/bin/koji-codex-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" \
+# --expect verdict: a vote without a VERDICT line moves to the next provider.
+~/.claude/skills/koji/bin/koji-outside-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" "$CF.provider" --expect verdict \
   < "$CF.prompt" > "$CF.raw" 2> "$CF.err"
 CE=$?; echo "$CE" > "$CF.exit"
 # Exit 78 is a harness mismatch, NOT a reviewer failure: stop the run, report
@@ -189,15 +191,17 @@ CE=$?; echo "$CE" > "$CF.exit"
 # 78 and 79 are the exceptions: neither is a vote at all, and a DISAGREE for
 # either would read as a real cross-model objection and drive another round.
 if [ "$CE" = "78" ]; then
-  echo "FATAL: codex harness mismatch — no cross-model vote possible. Stop the run; do not record a vote." >&2
+  echo "FATAL: harness mismatch (this session runs inside codex or agy) — no cross-model vote possible. Stop the run; do not record a vote." >&2
   exit 78
 elif [ "$CE" = "79" ]; then
-  echo "FATAL: the codex dispatch block was malformed — no call was made. Fix the block; do not record a vote." >&2
+  echo "FATAL: the outside-voice dispatch block was malformed — no call was made. Fix the block; do not record a vote." >&2
   exit 79
-elif [ "$CE" = "0" ]; then
+fi
+sed 's/^/outside voice: /' "$CF.provider" 2>/dev/null || echo "outside voice: (no record)"
+if [ "$CE" = "0" ]; then
   cp "$CF.raw" "$CF"
 else
-  printf 'VERDICT: DISAGREE\n(codex exit %s — failed/timeout, not a real vote)\n' "$CE" > "$CF"
+  printf 'VERDICT: DISAGREE\n(outside voice exit %s — failed/timeout, not a real vote)\n' "$CE" > "$CF"
 fi
 ```
 
@@ -238,21 +242,23 @@ Build the erratum **in memory** from the locked decisions, concessions, absorpti
 ## Cross-model hardening erratum — <YYYY-MM-DD>
 
 _Additive. The locked plan above is unchanged. /plan-eng-review run inline with
-per-finding Claude+codex debate (via /plan-triangulate-review)._
+per-finding Claude + outside-voice (<provider(s), e.g. agy>) debate (via /plan-triangulate-review)._
 
 ### Decisions locked (one line each)
 - <finding> → <resolution> (<both AGREE | refuted-solo | recorded-solo | user-resolved>)
 
 ### Cross-model concessions
 - Claude conceded on <X>: <one line, with the deciding evidence>.
-- codex conceded on <Y>: <one line>.
+- <provider, e.g. agy> conceded on <Y>: <one line>.
 
 ### /duet-impl absorption list
 - [ ] <PARTIAL/SOLID item routed forward> — <where it lands>
 
 ### Still split (surfaced to you)
-- <finding> — <Claude pos> vs <codex pos> after 3 rounds; you picked <…>.
+- <finding> — <Claude pos> vs <provider pos> after 3 rounds; you picked <…>.
 ```
+
+`<provider>` is the voter named in that vote's `outside voice:` line (its record, printed by the dispatch block): `agy` or `codex`. Read it while the run dir exists — the erratum is written in Step 7, before Step 8 deletes `$RUN_DIR`.
 
 ## Step 6 — Ratify (the single end-of-run AUQ)
 
@@ -299,6 +305,16 @@ fi
 
 ```bash
 ~/.claude/skills/koji/bin/koji-keepawake stop || true   # once, on EVERY exit path (ratify, discard, BLOCKED, escalation)
+# The report's "Outside:" line — who voted, from the vote records, read before
+# they are deleted (`read`, not awk — render-safe). find, not a glob: zsh aborts
+# the block on a glob with no match (a run that debated nothing), which would
+# skip the cleanup below.
+OUTSIDE=""
+while IFS= read -r rec; do
+  P=""; read -r P _ < "$rec"
+  case " $OUTSIDE " in *" $P "*) ;; *) OUTSIDE="${OUTSIDE:+$OUTSIDE }$P" ;; esac
+done < <(find "$RUN_DIR" -name 'finding-*-codex.md.provider' 2>/dev/null)
+echo "outside voice(s) on record: ${OUTSIDE:-none — nothing was debated}"
 [ "${KEEP:-0}" = "1" ] || rm -rf "$RUN_DIR"
 ```
 
@@ -307,6 +323,7 @@ plan-triangulate-review: <ratified | discarded | BLOCKED | concerns>
 Plan:      <plan-path>
 Findings:  <T triaged> — <R refuted-solo> / <K recorded-solo> / <DEBATED debated>
 Debate:    <DEBATED findings, M model calls, C concessions, STILL_SPLIT still-split>
+Outside:   <the "outside voice(s) on record" line, e.g. agy; `none` marks a failed vote>   [omit if nothing was debated]
 Review:    logged once (via plan-triangulate-review) — /ship dashboard updated   [omit if discarded/BLOCKED]
 Erratum:   appended to <plan>                                                    [omit if discarded/BLOCKED]
 ```
@@ -319,7 +336,7 @@ Erratum:   appended to <plan>                                                   
 - **`Debate is the exception, not the default`.**
 - **`Stream per finding`** — one at a time; no upfront fan-out over all findings.
 - **`consensus (both AGREE) auto-locks`** at round 1 where possible; **`hard round cap = 3`**.
-- **2 voices** (Claude + codex) voting on one proposed resolution, not a panel.
+- **2 voices** (Claude + the outside voice) voting on one proposed resolution, not a panel.
 
 Reference run: **4 model calls / 2 findings**. If a run spawns tens of agents, it has regressed to a fan-out. (`bin/koji-selfcheck` canaries that these markers still live in this file; it fails loud at install if an edit guts them.)
 
@@ -333,9 +350,9 @@ Reference run: **4 model calls / 2 findings**. If a run spawns tens of agents, i
 
 | Symptom | Cause | Mitigation |
 |---|---|---|
-| gstack or codex absent | a hard dependency is missing | Preamble probes both and exits 0 (before keep-awake), pointing the user at the missing one. |
+| gstack or an outside voice (agy or codex) absent | a hard dependency is missing | Preamble probes both and exits 0 (before keep-awake), pointing the user at the missing one. |
 | Every finding goes to debate | triage discipline lost | The fan-out regression. Refute/record-solo by reading source; debate only what you can't settle or that flips a locked decision. |
-| codex exits 124 at a finding | xhigh ran past 30 min | The dispatch writes `VERDICT: DISAGREE` on any nonzero exit, so it can't auto-lock; another round or escalate. Opt down to `high`. |
+| The outside voice exits 124 at a finding | xhigh ran past 30 min (each provider in the order gets the full deadline) | The dispatch writes `VERDICT: DISAGREE` on any nonzero exit, so it can't auto-lock; another round or escalate. Opt down to `high`. |
 | Two voices "both AGREE" but meant different fixes | no shared proposition | Can't happen here — both vote on ONE proposed resolution; AGREE means agreement on that exact call. |
 | `/ship` dashboard doesn't show the review | didn't log explicitly | koji must emit `gstack-review-log` itself, once, with `via` (Step 7b) — driving plan-eng-review inline does NOT auto-log for a non-plan-mode run. |
 | Research persistence errors on a new topic | `decisions-merge` needs an existing target | Step 7c creates the topic file (frontmatter + `## Decisions`) before merging. |

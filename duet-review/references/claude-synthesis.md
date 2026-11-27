@@ -13,9 +13,10 @@ job is the part it cannot do.
 
 - **Inputs:** `$RUN_DIR/angle-1.json … angle-5.json` ONLY — each a JSON array of findings in the
   `reviewer-prompt.md` schema (any may be `[]`). The diff is at `$DIFF_FILE`; have it in context.
-  **Never read or pool `$RUN_DIR/codex.json` here.** codex is the B-side; the Step 3 synthesizer
-  (`koji-duet-synthesize`) is the *only* place A and B meet. Folding codex into the A-side does two
-  kinds of damage: it manufactures false consensus (codex findings exact-match themselves →
+  **Never read or pool `$RUN_DIR/codex.json` here.** That file is the B-side (the outside voice —
+  agy or codex — or a fresh Claude Reviewer B); the Step 3 synthesizer
+  (`koji-duet-synthesize`) is the *only* place A and B meet. Folding B into the A-side does two
+  kinds of damage: it manufactures false consensus (B findings exact-match themselves →
   spurious `agreed_by:[claude,codex]`), and that fake consensus then **suppresses cross-review** —
   consensus findings skip Step 4, so contaminating the A-side shrinks the reviewer-exclusive set
   that should have triggered it. Keep the A-side strictly the five angles.

@@ -1,0 +1,558 @@
+#!/usr/bin/env bash
+# koji-agy-exec — the agy (Google Antigravity CLI) adapter. Same contract as
+# koji-codex-exec: prompt on stdin, reply on stdout, diagnostics on stderr.
+#
+#   koji-agy-exec <timeout_secs> <effort> <project_root>   # prompt on stdin
+#
+# Exit: 0   a usable reply is on stdout
+#       75  agy ran (or was skipped) but gave no usable reply — reason on stderr
+#       78  harness mismatch   79  the caller is broken
+#       124 timeout            125 the environment is broken
+# agy's own exit codes never pass through: they all become 75, so none of
+# them can be read as 78/79 by a collection site.
+#
+# Skills reach it through koji-outside-exec, which walks the provider order.
+# Notes for the run record go to stderr as `koji-note: …`; the effort and model
+# actually used as one `koji-used: <effort> <model>` line. koji-outside-exec
+# moves both into the record and strips them from the call site's .err.
+#
+# Why each piece exists (measured on agy 1.5.18; see references/reviewer-backend.md):
+# - stream-json on stdin: the only way agy reads a long prompt from stdin.
+#   `-p "<text>"` is argv-only, and Linux caps one argv string at 128 KB.
+# - Bypass (--dangerously-skip-permissions) is an explicit, global opt-in:
+#   `koji-config set agy_bypass yes`. Off (the default), agy runs in its
+#   `default` mode and reads files only; any action that needs approval ends
+#   the run with an EMPTY reply and exit 0 (antigravity-cli#650), which is 75
+#   here, so the next provider answers. On, agy may run shell tools: a
+#   deny-rule hit is a soft error the model works around, and the session-only
+#   deny rules below block most writes and side effects. Either way they guard
+#   against accidents, not an adversary: the real guarantee is /duet-impl's
+#   tree binding, which refuses a PASS on a tree that moved during its review.
+# - Model rule: agy also serves Claude and GPT models, and koji's outside voice
+#   must never be Claude. Only plain `gemini-<n>…` ids pass. A failed /model
+#   lookup skips agy (75) rather than run an unpinned model.
+# - Effort clamp: no current agy model offers `max`; koji asks for the highest
+#   level the model offers at or below the request, and says so in a note.
+#   A failed /effort lookup never fails the run.
+# - An empty reply is never a reply: SUCCESS with a blank response is 75.
+set -uo pipefail
+
+case "$0" in */*) KOJI_BIN="${0%/*}" ;; *) KOJI_BIN=. ;; esac
+KOJI_BIN="$(cd "$KOJI_BIN" 2>/dev/null && pwd)" || { echo "koji-agy-exec: cannot resolve its own directory — no call made" >&2; exit 125; }
+# shellcheck source=koji-dispatch-lib
+. "$KOJI_BIN/koji-dispatch-lib" || { echo "koji-agy-exec: cannot load $KOJI_BIN/koji-dispatch-lib — no call made" >&2; exit 125; }
+
+koji_harness_guard koji-agy-exec || exit $?
+
+[ "$#" -eq 3 ] || { echo "usage: koji-agy-exec <timeout_secs> <effort> <project_root>" >&2; exit 79; }
+TIMEOUT="$1"; EFFORT="$2"; PROJECT_ROOT="$3"
+koji_check_dispatch_args koji-agy-exec "$TIMEOUT" "$EFFORT" "$PROJECT_ROOT" || exit $?
+
+note() { printf 'koji-note: %s\n' "$*" >&2; }
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/koji-agy.XXXXXX") || { echo "koji-agy-exec: cannot create a work dir in ${TMPDIR:-/tmp} — no call made" >&2; exit 125; }
+TASK_DIR=""   # set only when a big prompt is handed over as a file (below)
+trap 'rm -rf "$WORK" ${TASK_DIR:+"$TASK_DIR"}' EXIT
+
+koji_buffer_prompt koji-agy-exec "$WORK/body" || exit $?
+
+command -v python3 >/dev/null 2>&1 || { echo "koji-agy-exec: python3 is not on PATH — no call made" >&2; exit 125; }
+
+# --- the prompt: boundary first, the caller's prompt, the guard clause last ------
+# Task-neutral on purpose: this wrapper carries plan critiques, review findings,
+# debate positions and votes, so it must not tell the model what its task is —
+# only what it may not do here. The caller's prompt owns the role and format.
+# --- bypass: an explicit, global opt-in -------------------------------------------
+# Off unless `koji-config get agy_bypass` is exactly `yes`. It is off by default
+# because a review carries untrusted text (a PR diff, a web page), and the deny
+# rules do not see `$(...)` or a redirect.
+BYPASS=0
+[ "$("$KOJI_BIN/koji-config" get agy_bypass 2>/dev/null)" = yes ] && BYPASS=1
+CLAUSE_BASE="Do not modify the repository or this machine: no file edits or file creation (shell redirects with > included), no state-changing git, no build, test, install, format or fix commands."
+CLAUSE_END="Never try another way to make a change that was blocked. Reply with only the output the task above asks for."
+if [ "$BYPASS" = 1 ]; then
+  CLAUSE="$CLAUSE_BASE In this session these are blocked and return an error: file-writing tools; file-changing commands (rm, mv, cp, touch, mkdir, tee, sed -i and similar); programs run by a path; shells and interpreters (sh, bash, python, node, perl, awk and similar); package managers, build, test and format tools; curl, wget and other network tools; browser actions; and git commands that change state or refs. Web search and reading web pages are allowed: use your own web tools. $CLAUSE_END"
+else
+  CLAUSE="$CLAUSE_BASE Shell commands and web tools are not available in this session: do not use them; use your own file-reading and file-search tools. If the task cannot be done with file reading and file search alone, reply with exactly KOJI-NEEDS-TOOLS and nothing else. $CLAUSE_END"
+fi
+koji_boundary "$PROJECT_ROOT" > "$WORK/boundary" || { echo "koji-agy-exec: cannot write the prompt buffer (disk full?) — no call made" >&2; exit 125; }
+printf '%s' "$CLAUSE" > "$WORK/clause" || { echo "koji-agy-exec: cannot write the prompt buffer (disk full?) — no call made" >&2; exit 125; }
+python3 -c 'import sys
+r = lambda p: open(p, encoding="utf-8", errors="replace").read()
+t = r(sys.argv[1]) + r(sys.argv[2]).rstrip("\n") + "\n\n" + r(sys.argv[3])
+open(sys.argv[4], "w", encoding="utf-8").write(t)' \
+  "$WORK/boundary" "$WORK/body" "$WORK/clause" "$WORK/composed.txt" \
+  || { echo "koji-agy-exec: cannot compose the prompt — no call made" >&2; exit 125; }
+
+# --- size: agy cuts one prompt at ~190 KB -> hand a big one over as a file -------
+# Measured on agy 1.5.18: a 376 KB prompt reached the model as its first ~190 KB
+# plus `<truncated N bytes>`. So above the cap the whole task goes into a file
+# and agy gets a short prompt that points at it (the agy fan-out experiment read
+# a 441 KB diff this way). The file lives in the repository's .git directory:
+# inside agy's reading boundary (the repo; allowNonWorkspaceAccess is off) and
+# invisible to git status, the tree fingerprint and the snapshot. A linked
+# worktree or a submodule has a .git FILE: there agy is skipped as before and
+# the next provider answers. Size = UTF-8 bytes of the composed text, NOT the
+# JSON line: json.dumps escapes every non-ASCII char to \uXXXX, which would push
+# a ~90 KB CJK prompt over the cap.
+MAX_PROMPT="${KOJI_AGY_MAX_PROMPT:-160000}"
+case "$MAX_PROMPT" in
+  ''|*[!0-9]*|0) echo "koji-agy-exec: KOJI_AGY_MAX_PROMPT='$MAX_PROMPT' is not a positive integer — using the default" >&2; MAX_PROMPT=160000 ;;
+esac
+PROMPT_BYTES=$(wc -c < "$WORK/composed.txt" | tr -d ' ')
+if [ "$PROMPT_BYTES" -gt "$MAX_PROMPT" ]; then
+  # Plain stderr lines carry no numbers: the classifier reads them, and a byte
+  # count such as 164290 must never look like an HTTP 429. Sizes go in notes.
+  if [ -d "$PROJECT_ROOT/.git" ] \
+     && TASK_DIR=$(mktemp -d "$PROJECT_ROOT/.git/koji-agy.XXXXXX" 2>/dev/null) \
+     && cp "$WORK/body" "$TASK_DIR/task.md" 2>/dev/null; then
+    note "agy reads this $((PROMPT_BYTES / 1024)) KB prompt from a file — over the ~190 KB it accepts inline (koji's cap: KOJI_AGY_MAX_PROMPT)"
+    python3 -c 'import sys
+r = lambda p: open(p, encoding="utf-8", errors="replace").read()
+pointer = ("Your task is too long to send inline. It is in the file " + sys.argv[2] + " . "
+           "Read the whole file with your file-reading tool, in parts if it is long, "
+           "then do exactly what it asks and reply with only the output it asks for.")
+open(sys.argv[4], "w", encoding="utf-8").write(r(sys.argv[1]) + pointer + "\n\n" + r(sys.argv[3]))' \
+      "$WORK/boundary" "$TASK_DIR/task.md" "$WORK/clause" "$WORK/composed.txt" \
+      || { echo "koji-agy-exec: cannot compose the file-handover prompt — no call made" >&2; exit 125; }
+  else
+    [ -n "$TASK_DIR" ] && rm -rf "$TASK_DIR"; TASK_DIR=""
+    note "agy skipped — the prompt is $((PROMPT_BYTES / 1024)) KB, over koji's cap for agy, and $PROJECT_ROOT has no .git directory to hand it over in (a linked worktree or submodule?)"
+    echo "koji-agy-exec: the prompt is over koji's size cap for agy and cannot go by file — no call made" >&2
+    exit 75
+  fi
+fi
+
+command -v agy >/dev/null 2>&1 || { echo "koji-agy-exec: agy is not on PATH — no call made" >&2; exit 75; }
+
+# --- free lookups (answered by the CLI itself, no model call) ------------------
+# stdin detached and capped: a lookup must never be the thing that hangs.
+_lookup() {   # _lookup <out-file> <slash-command> [agy args...]
+  local out="$1"; shift
+  ( cd "$PROJECT_ROOT" && exec "$KOJI_BIN/koji-timeout" "${KOJI_AGY_LOOKUP_CAP:-20}" agy -p "$@" --output-format json ) \
+    < /dev/null > "$out" 2>/dev/null
+}
+# One parser for all three lookups: scan for JSON objects with raw_decode and keep
+# the last one that carries `command`, so an update notice on stdout, or a
+# pretty-printed object, cannot read as "no model".
+_cmd_data() {   # _cmd_data <file> — the last command.data as JSON, {} when none
+  python3 -c 'import json,sys
+s = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+dec, data, i = json.JSONDecoder(), {}, s.find("{")
+while i != -1:
+    try:
+        obj, end = dec.raw_decode(s, i)
+    except ValueError:
+        i = s.find("{", i + 1); continue
+    if isinstance(obj, dict) and isinstance(obj.get("command"), dict):
+        data = obj["command"].get("data") or {}
+    i = s.find("{", end)
+print(json.dumps(data))' "$1" 2>/dev/null || printf '{}'
+}
+
+if ! _lookup "$WORK/model.json" /model; then
+  note "agy skipped — its /model lookup failed (agy never runs without a pinned Gemini model)"
+  echo "koji-agy-exec: agy /model lookup failed — no call made" >&2
+  exit 75
+fi
+MODEL_ID=$(_cmd_data "$WORK/model.json" | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("id") or "")
+except Exception:
+    print("")')
+case "$MODEL_ID" in
+  gemini-[0-9]*) ;;
+  *) note "agy skipped — its model '${MODEL_ID:-unknown}' is not a plain Gemini model (the outside voice must never be Claude or GPT; pick a Gemini model with /model in agy)"
+     echo "koji-agy-exec: agy's model '${MODEL_ID:-unknown}' is not a plain Gemini model — no call made" >&2
+     exit 75 ;;
+esac
+BASE=$(printf '%s' "$MODEL_ID" | sed -E 's/-(low|medium|high|xhigh|max)$//')
+
+# Clamp: the highest level the model offers at or below koji's request.
+AGY_EFFORT=""
+if _lookup "$WORK/effort.json" /effort --model "$BASE"; then
+  # The highest level at or below the request; when the model offers none that
+  # low, the LOWEST level above it — never silently the most expensive tier.
+  AGY_EFFORT=$(_cmd_data "$WORK/effort.json" | python3 -c 'import json,sys
+order = ["low", "medium", "high", "xhigh", "max"]
+try:
+    avail = [e for e in (json.load(sys.stdin).get("available") or []) if e in order]
+except Exception:
+    avail = []
+want = order.index(sys.argv[1])
+fit = [e for e in avail if order.index(e) <= want]
+if fit:
+    print(max(fit, key=order.index))
+elif avail:
+    print(min(avail, key=order.index))
+else:
+    print("")' "$EFFORT")
+fi
+EFF_ARGS=()
+if [ -n "$AGY_EFFORT" ]; then
+  EFF_ARGS=(--effort "$AGY_EFFORT")
+  [ "$AGY_EFFORT" = "$EFFORT" ] || note "agy runs $BASE at $AGY_EFFORT — $EFFORT is not offered by $BASE"
+else
+  AGY_EFFORT=default
+  note "agy runs $BASE at its default effort — the /effort lookup failed"
+fi
+printf 'koji-used: %s %s\n' "$AGY_EFFORT" "$BASE" >&2
+
+# --- session-only deny rules (bypass guard) -------------------------------------
+# How agy 1.5.18 matches a deny rule. Live-probed, because the CLI docs do not
+# say; tests/cases/agy-dispatch.sh models it and reviewer-backend.md keeps the
+# live pass/fail table:
+#   - each part of a chain (a && b, a | b, a; b) is checked on its own;
+#   - `command(x y)` matches when the command's first words are exactly x y;
+#   - `command(regex:A B)` matches word by word from the START: each
+#     space-separated piece is a whole-word pattern for the command word in that
+#     position, and more words may follow. It never matches in the middle of a
+#     command: `pc[.]txt` does not stop `touch pc.txt`;
+#   - agy reads the rule text the way a shell reads a line: it drops a
+#     backslash (`\s` becomes `s`) and a quote breaks the rule. So no rule here
+#     has a backslash or a quote — `[.]` is a literal dot — and a space only
+#     separates words. (The first version of this list used `\s` everywhere,
+#     so every regex rule in it was dead.);
+#   - agy reads a `>` in a rule as a redirect and drops it, so `.*>.*` and
+#     `.*>>.*` match EVERY command (live bisect); and a command's own redirect
+#     is not part of what a rule sees. So no deny rule can stop
+#     `echo x > file`: the guard clause asks the model not to, and
+#     /duet-impl's tree binding refuses a PASS when a repo file changed.
+# A flag can sit at any position, and a rule only matches from the start, so
+# _at_positions spells out the common positions (sed -i, find -delete, sort -o,
+# git branch/tag). Not covered: shell redirects (above), flags past those
+# positions, git global options other than the ones below, and any command that
+# uses $(...), backticks or a similar construct — agy checks those against the
+# whole line only. The list
+# guards against accidents, not an adversary; /duet-impl's tree binding is the
+# guarantee (reviewer-backend.md).
+_at_positions() {   # _at_positions <head words> <flag pattern> <positions>
+  local head="$1" flag="$2" n="$3" any="" i=0
+  while [ "$i" -lt "$n" ]; do
+    printf 'command(regex:%s %s%s)\n' "$head" "$any" "$flag"
+    any="$any.* "; i=$((i+1))
+  done
+}
+# git: one list of state-changing subcommands feeds both the plain rules and the
+# `--no-pager` / `-P` forms, so the two can never drift apart.
+GIT_WRITE="commit push pull fetch reset checkout switch restore stash clean rebase merge cherry-pick revert add stage rm mv apply am worktree config update-ref update-index symbolic-ref notes replace filter-branch filter-repo gc prune repack maintenance submodule sparse-checkout read-tree checkout-index init clone bisect format-patch archive bundle send-email credential"
+GIT_REMOTE_WRITE="add remove rm rename set-url set-head set-branches prune update"
+BRANCH_FLAG='-(-delete|-move|-copy|-force|-track.*|-no-track|-set-upstream-to.*|-unset-upstream|-edit-description|[a-zA-Z]*[dDmMcCftu].*)'
+TAG_FLAG='-(-delete|-force|-annotate|-sign|-local-user.*|-message.*|-file.*|-edit|[a-zA-Z]*[adefFmsu].*)'
+_git_rules() {
+  local w head
+  for w in $GIT_WRITE; do printf 'command(git %s)\n' "$w"; done
+  for w in $GIT_REMOTE_WRITE; do printf 'command(git remote %s)\n' "$w"; done
+  printf 'command(git reflog expire)\ncommand(git reflog delete)\n'
+  printf 'command(git -C)\ncommand(git -c)\n'
+  printf 'command(regex:git --(git-dir|work-tree|exec-path|namespace).*)\n'
+  printf 'command(regex:git (--no-pager|-P) (%s))\n' "$(printf '%s' "$GIT_WRITE" | tr ' ' '|')"
+  printf 'command(regex:git (--no-pager|-P) remote (%s))\n' "$(printf '%s' "$GIT_REMOTE_WRITE" | tr ' ' '|')"
+  printf 'command(regex:git (--no-pager|-P) reflog (expire|delete))\n'
+  for head in 'git' 'git (--no-pager|-P)'; do
+    printf 'command(regex:%s branch [^-].*)\ncommand(regex:%s tag [^-].*)\n' "$head" "$head"
+    _at_positions "$head branch" "$BRANCH_FLAG" 2
+    _at_positions "$head tag" "$TAG_FLAG" 2
+  done
+}
+DENY_RULES="write_file(/)
+execute_url(*)
+mcp(*)
+command(regex:[^/]*/.*)
+command(rm)
+command(rmdir)
+command(mv)
+command(cp)
+command(ln)
+command(touch)
+command(mkdir)
+command(tee)
+command(dd)
+command(truncate)
+command(chmod)
+command(chown)
+command(chgrp)
+command(install)
+command(rsync)
+command(curl)
+command(wget)
+command(scp)
+command(sftp)
+command(ftp)
+command(ssh)
+command(nc)
+command(ncat)
+command(netcat)
+command(telnet)
+command(socat)
+command(xargs)
+command(open)
+command(kill)
+command(pkill)
+command(killall)
+command(nohup)
+command(nice)
+command(time)
+command(timeout)
+command(command)
+command(builtin)
+command(sudo)
+command(doas)
+command(su)
+command(stdbuf)
+command(caffeinate)
+command(watch)
+command(script)
+command(parallel)
+command(sh)
+command(bash)
+command(zsh)
+command(dash)
+command(ksh)
+command(fish)
+command(csh)
+command(tcsh)
+command(env)
+command(eval)
+command(exec)
+command(source)
+command(.)
+command(python)
+command(python3)
+command(perl)
+command(ruby)
+command(node)
+command(deno)
+command(bun)
+command(php)
+command(lua)
+command(osascript)
+command(swift)
+command(awk)
+command(gawk)
+command(mawk)
+command(nawk)
+command(patch)
+command(ed)
+command(ex)
+command(vi)
+command(vim)
+command(nvim)
+command(nano)
+command(emacs)
+command(tar)
+command(unzip)
+command(zip)
+command(gzip)
+command(gunzip)
+command(bzip2)
+command(xz)
+command(npm)
+command(npx)
+command(pnpm)
+command(yarn)
+command(pip)
+command(pip3)
+command(uv)
+command(cargo)
+command(make)
+command(cmake)
+command(go)
+command(gradle)
+command(mvn)
+command(pytest)
+command(brew)
+command(docker)
+command(kubectl)
+command(poetry)
+command(pipenv)
+command(pipx)
+command(conda)
+command(mamba)
+command(bundle)
+command(bundler)
+command(gem)
+command(rake)
+command(rspec)
+command(mix)
+command(dotnet)
+command(bazel)
+command(bazelisk)
+command(xcodebuild)
+command(tsc)
+command(jest)
+command(vitest)
+command(mocha)
+command(tox)
+command(nox)
+command(just)
+command(ninja)
+command(meson)
+command(prettier)
+command(eslint)
+command(black)
+command(ruff)
+command(isort)
+command(gofmt)
+command(rustfmt)
+command(clang-format)
+command(rubocop)
+command(terraform)
+command(defaults)
+command(launchctl)
+command(crontab)
+command(security)
+command(gh)
+command(agy)
+command(codex)
+command(claude)
+$(_git_rules)
+$(_at_positions sed '-(-in-place.*|[a-zA-Z]*i.*)' 3)
+$(_at_positions sort '-(-output.*|[a-zA-Z]*o.*)' 3)
+$(_at_positions find '-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)' 8)" \
+  || { echo "koji-agy-exec: cannot build the deny rules — no call made" >&2; exit 125; }
+# ONE --settings object: agy accepts a single JSON object, so a second flag is
+# never passed. Off pins every scope that could loosen it: agentMode "" is agy's
+# default mode (headless otherwise runs auto, which approves edits),
+# toolPermission pins the preset over a global always-proceed, and nothing
+# outside the workspace is reachable.
+SETTINGS_JSON=$(printf '%s' "$DENY_RULES" | python3 -c 'import json,sys
+s = {"permissions": {"deny": [l for l in sys.stdin.read().splitlines() if l.strip()]}}
+if sys.argv[1] != "1":
+    s.update({"agentMode": "", "toolPermission": "request-review", "allowNonWorkspaceAccess": False})
+print(json.dumps(s))' "$BYPASS") \
+  || { echo "koji-agy-exec: cannot build the agy settings — no call made" >&2; exit 125; }
+BYPASS_ARGS=()
+if [ "$BYPASS" = 1 ]; then BYPASS_ARGS=(--dangerously-skip-permissions)
+else note "no bypass (koji-config agy_bypass is not yes) — file tools only, no shell or web"; fi
+
+# --- the stream-json line ---------------------------------------------------------
+python3 -c 'import json,sys
+t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+sys.stdout.write(json.dumps({"event": "user", "message": {"content": t}}) + "\n")' \
+  "$WORK/composed.txt" > "$WORK/prompt.ndjson" \
+  || { echo "koji-agy-exec: cannot build the stream-json prompt — no call made" >&2; exit 125; }
+
+# --- run ------------------------------------------------------------------------
+# Both fingerprints run in PROJECT_ROOT (the digest is cwd-relative) and the
+# second runs whatever agy's outcome, so a failed attempt that wrote is noted.
+# Bounded: the fingerprint reads untracked files, and it must never hold the
+# adapter past its deadline (a diagnostic, not the guarantee).
+_fp() { ( cd "$PROJECT_ROOT" && "$KOJI_BIN/koji-timeout" 60 "$KOJI_BIN/koji-tree-fingerprint" --state 2>/dev/null ) || echo unknown; }
+FP_BEFORE=$(_fp)
+
+# Files, never a pipe: under pipefail a pipe reports the wrong status, and the
+# parser must see agy's output even when agy exits non-zero.
+( cd "$PROJECT_ROOT" && GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true exec "$KOJI_BIN/koji-timeout" "$TIMEOUT" \
+    agy --input-format stream-json --output-format stream-json \
+        --model "$BASE" ${EFF_ARGS[@]+"${EFF_ARGS[@]}"} \
+        ${BYPASS_ARGS[@]+"${BYPASS_ARGS[@]}"} --settings "$SETTINGS_JSON" --disable-slash-commands ) \
+  < "$WORK/prompt.ndjson" > "$WORK/out.ndjson" 2> "$WORK/agy.err"
+RC=$?
+
+FP_AFTER=$(_fp)
+[ "$FP_BEFORE" = "$FP_AFTER" ] || note "⚠ working tree changed during the agy attempt (agy or concurrent work) — review snapshot may be stale"
+
+# The LAST result event wins; lines that are not JSON (an update notice) are
+# skipped. The init event's permission_mode and every tool step agy COMPLETED
+# are read too: without bypass, both are checked below.
+# Tools that cannot change the repository or the machine (names from agy 1.5.18's
+# init tool list; a completed step reports `read_file` for view_file).
+READ_TOOLS="read_file view_file grep_search find_by_name list_dir manage_task finish wait wait_5_seconds command_status list_permissions list_resources read_resource"
+python3 -c 'import json,sys
+res, mode, used = None, "", set()
+read_only = set(sys.argv[4].split())
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    try:
+        e = json.loads(line)
+    except Exception:
+        continue
+    if not isinstance(e, dict):
+        continue
+    if e.get("event") == "result":
+        res = e.get("result") or {}
+    elif e.get("event") == "init":
+        mode = (e.get("init") or {}).get("permission_mode") or ""
+    elif e.get("event") == "step_update":
+        st = e.get("step_update") or {}
+        if st.get("step_type") == "tool" and st.get("state") == "DONE":
+            used.add(st.get("tool_name") or "?")
+res = res or {}
+open(sys.argv[2], "w", encoding="utf-8").write(res.get("response") or "")
+denied = ", ".join(sorted({(a or {}).get("action", "?") for a in (res.get("denied_actions") or [])}))
+open(sys.argv[3], "w", encoding="utf-8").write("%s\n%s\n%s\n%s\n%s\n" % (
+    res.get("status") or "none", denied, (res.get("error") or "").replace("\n", " "),
+    mode, ", ".join(sorted(used - read_only))))' \
+  "$WORK/out.ndjson" "$WORK/resp" "$WORK/meta" "$READ_TOOLS" 2>/dev/null \
+  || printf 'none\n\n\n\n\n' > "$WORK/meta"
+STATUS=$(sed -n 1p "$WORK/meta"); DENIED=$(sed -n 2p "$WORK/meta"); AGY_ERROR=$(sed -n 3p "$WORK/meta")
+PERM_MODE=$(sed -n 4p "$WORK/meta"); WRITE_TOOLS=$(sed -n 5p "$WORK/meta")
+
+case "$RC" in
+  124) echo "koji-agy-exec: agy timed out after ${TIMEOUT}s" >&2; tail -n 20 "$WORK/agy.err" >&2; exit 124 ;;
+  125) echo "koji-agy-exec: the deadline supervisor could not start agy" >&2; tail -n 20 "$WORK/agy.err" >&2; exit 125 ;;
+esac
+# Without bypass the reply is used only if agy really stayed read-only. The
+# permission_mode in init reports the toolPermission preset; it cannot see the
+# agent mode, so the completed tool steps are checked as well — they catch a
+# future agy that ignores agentMode "", allow rules from agy's other scopes, and
+# subagents. The check runs after the fact: the reply is discarded, and the tree
+# binding still covers any repo write.
+if [ "$BYPASS" != 1 ]; then
+  if [ -n "$WRITE_TOOLS" ]; then
+    note "⚠ agy used $WRITE_TOOLS without bypass — its reply is not used"
+    echo "koji-agy-exec: agy used $WRITE_TOOLS although bypass is off — reply discarded" >&2
+    exit 75
+  fi
+  if [ "$RC" = 0 ] && [ "$STATUS" = SUCCESS ] && [ "$PERM_MODE" != request-review ]; then
+    note "⚠ agy ran with permission mode '${PERM_MODE:-none}', not request-review — its reply is not used"
+    echo "koji-agy-exec: agy did not apply koji's no-bypass settings (permission mode ${PERM_MODE:-none}) — reply discarded" >&2
+    exit 75
+  fi
+fi
+# Without bypass, agy answers KOJI-NEEDS-TOOLS when the task needs a shell or the
+# web (live: asked for web research, it otherwise wrote a polite "I cannot" — a
+# reply a prose site would show as a position). That is no reply: the next
+# provider answers.
+if [ "$BYPASS" != 1 ] && awk 'NF{print; exit}' "$WORK/resp" | tr -d ' \t`*_.' | grep -q '^KOJI-NEEDS-TOOLS'; then
+  note "agy needs shell or web tools, which need bypass — the next provider answers"
+  echo "koji-agy-exec: agy replied KOJI-NEEDS-TOOLS (no bypass) — no usable reply" >&2
+  exit 75
+fi
+if [ "$RC" = 0 ] && [ "$STATUS" = SUCCESS ] && grep -q '[^[:space:]]' "$WORK/resp"; then
+  cat "$WORK/resp"
+  exit 0
+fi
+
+# No usable reply. Everything that explains it goes to stderr, where the
+# classifier looks for quota markers.
+echo "koji-agy-exec: agy gave no usable reply (status ${STATUS:-none}, agy exit $RC${DENIED:+, denied: $DENIED})" >&2
+[ -n "$AGY_ERROR" ] && echo "koji-agy-exec: agy error: $AGY_ERROR" >&2
+tail -n 20 "$WORK/agy.err" >&2
+# agy's own quota wording (`exhausted your capacity`, `rate-limit`, 429), read
+# from result.error AND agy's stderr, becomes one line the classifier's 'quota'
+# marker reads. Word-bounded here, so a trace that mentions a RateLimiter class
+# is not a quota; the shared classifier list stays phrase-only (it also reads
+# review text).
+QUOTA_LINE=$(python3 -c 'import re,sys
+t = sys.argv[1] + "\n" + open(sys.argv[2], encoding="utf-8", errors="replace").read()[-8000:]
+m = re.search(r"RESOURCE_EXHAUSTED|\bquota\b|\b429\b|exhausted your capacity|\brate[-_ ]?limit(ed|ing|s)?\b", t, re.I)
+if m:
+    k = m.group(0).lower()
+    print(next((l.strip() for l in t.splitlines() if k in l.lower()), m.group(0))[:240])' "$AGY_ERROR" "$WORK/agy.err" 2>/dev/null)
+[ -n "$QUOTA_LINE" ] && echo "koji-agy-exec: agy quota exhausted: $QUOTA_LINE" >&2
+# Advisory: name the window when a Gemini quota bucket is empty.
+if _lookup "$WORK/usage.json" /usage; then
+  _cmd_data "$WORK/usage.json" | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+    for g in d.get("groups") or []:
+        if "gemini" not in (g.get("name") or "").lower():
+            continue
+        for b in g.get("buckets") or []:
+            if (b.get("remaining_fraction") is not None) and b["remaining_fraction"] <= 0:
+                print("koji-agy-exec: agy quota exhausted (%s window, resets %s)" % (b.get("window"), b.get("reset_time")))
+except Exception:
+    pass' >&2
+fi
+exit 75

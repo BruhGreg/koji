@@ -112,3 +112,58 @@ test_output_is_one_bare_token() {
   out="$(_bef 'both|max|max|inherit' impl-gate | wc -l | tr -d ' ')"
   assert_eq "1" "$out" "exactly one output line (file)"
 }
+
+# --- provider contexts: who really filled the outside-voice slot ------------------
+test_provider_reads_the_record() {
+  printf 'agy xhigh — ok (gemini-4-neon)\nagy: a note\n' > "$TMP/p.rec"
+  assert_eq agy "$("$BE" provider "$TMP/p.rec" 2>/dev/null)"
+  printf 'codex max — answered after agy: quota' > "$TMP/p.rec"
+  assert_eq codex "$("$BE" provider "$TMP/p.rec" 2>/dev/null)" "a last line with no newline still reads"
+  printf 'none - — agy: quota; codex: error (exit 1)\n' > "$TMP/p.rec"
+  assert_eq none "$("$BE" provider "$TMP/p.rec" 2>/dev/null)"
+}
+
+test_provider_with_no_record_is_codex() {
+  assert_eq codex "$("$BE" provider "$TMP/no-such.rec" 2>/dev/null)" "a run that started before 0.11.0"
+}
+
+test_a_record_that_proves_no_provider_is_none() {
+  local t
+  for t in '' 'claude x' 'gemini y' '   '; do
+    printf '%s\n' "$t" > "$TMP/p.rec"
+    assert_eq none "$("$BE" provider "$TMP/p.rec" 2>"$TMP/p.err")" "token [$t]"
+    assert_file_contains "treating it as none" "$TMP/p.err" "token [$t] warns"
+  done
+}
+
+test_b_provider_precedence() {
+  local d="$TMP/run-bp"; rm -rf "$d"; mkdir -p "$d"
+  printf 'codex|max|max|opus\n' > "$d/duet-setup"
+  assert_eq codex "$("$BE" b-provider "$d" 2>/dev/null)" "no record yet"
+  printf 'agy xhigh — ok\n' > "$d/codex.provider"
+  assert_eq agy "$("$BE" b-provider "$d" 2>/dev/null)" "the record names the CLI"
+  touch "$d/codex.unavailable"
+  assert_eq none "$("$BE" b-provider "$d" 2>/dev/null)" "a degraded run beats the record"
+  rm -f "$d/codex.unavailable"
+  printf 'claude|max|max|opus\n' > "$d/duet-setup"
+  assert_eq claude "$("$BE" b-provider "$d" 2>/dev/null)" "role claude beats the record"
+  touch "$d/codex.unavailable"
+  assert_eq none "$("$BE" b-provider "$d" 2>/dev/null)" "a degraded Claude-B run is none too"
+}
+
+test_b_provider_with_lost_setup_is_exit_3() {
+  local d="$TMP/run-lost" rc=0; rm -rf "$d"; mkdir -p "$d"
+  printf 'agy xhigh — ok\n' > "$d/codex.provider"
+  "$BE" b-provider "$d" >/dev/null 2>&1 || rc=$?
+  assert_exit 3 "$rc" "lost run state is checked FIRST, before the record"
+  printf 'bogus\n' > "$d/duet-setup"
+  rc=0; "$BE" b-provider "$d" >/dev/null 2>&1 || rc=$?
+  assert_exit 3 "$rc" "an invalid setup is lost state too"
+}
+
+test_provider_contexts_need_an_argument() {
+  local rc=0; "$BE" provider >/dev/null 2>&1 || rc=$?
+  assert_exit 2 "$rc" "provider without a record"
+  rc=0; "$BE" b-provider >/dev/null 2>&1 || rc=$?
+  assert_exit 2 "$rc" "b-provider without a run dir"
+}

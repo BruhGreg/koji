@@ -14,7 +14,7 @@
 #   koji-duet-setup validate <tuple>        normalized tuple on stdout; exit 1 + reason on stderr when invalid
 #   koji-duet-setup defaults                codex|xhigh|xhigh|inherit
 #   koji-duet-setup merge <base> <overlay>  field-wise: overlay field when non-empty, else base; validated
-#   koji-duet-setup summary <tuple>         one human line, e.g. "both families · codex max · claude max/inherit"
+#   koji-duet-setup summary <tuple>         one human line, e.g. "both families · outside max · claude max/inherit"
 #   koji-duet-setup field <tuple> <1-4>     one field
 #
 # This is the only place tuple syntax is known. Every consumer (saved pick,
@@ -67,8 +67,8 @@ _validate() {
 _label() {
   case "$1" in
     both)              printf 'both families' ;;
-    claude-then-codex) printf 'Claude reviews, codex confirms' ;;
-    codex)             printf 'codex only' ;;
+    claude-then-codex) printf 'Claude reviews, outside voice confirms' ;;
+    codex)             printf 'outside voice only' ;;
     claude)            printf 'Claude only' ;;
   esac
 }
@@ -92,7 +92,7 @@ case "${1:-}" in
     [ $# -eq 2 ] || _usage
     T="$(_validate "$2")" || exit 1
     _split "$T"
-    printf '%s · codex %s · claude %s/%s\n' "$(_label "$F1")" "$F2" "$F3" "$F4"
+    printf '%s · outside %s · claude %s/%s\n' "$(_label "$F1")" "$F2" "$F3" "$F4"
     ;;
   field)
     [ $# -eq 3 ] || _usage

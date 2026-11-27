@@ -4,6 +4,7 @@
 # Usage:
 #   koji-tree-fingerprint            # uncommitted content: diff vs HEAD + untracked
 #   koji-tree-fingerprint --cached   # the staged set only
+#   koji-tree-fingerprint --state    # default + index, HEAD, branch ref, untracked names
 #
 # Prints one digest token (hex, or a decimal cksum on hosts with no hasher) and
 # nothing else. Outside a git repo it prints `nogit` and exits 0 — callers get a
@@ -27,6 +28,7 @@ MODE="default"
 case "${1:-}" in
   "")        ;;
   --cached)  MODE="cached" ;;
+  --state)   MODE="state" ;;
   --help|-h)
     cat <<'USAGE'
 koji-tree-fingerprint — digest of the working tree's content state.
@@ -35,6 +37,8 @@ Usage:
   koji-tree-fingerprint            diff vs HEAD (or the index, on an unborn
                                    HEAD) plus every untracked, non-ignored file
   koji-tree-fingerprint --cached   the staged set only
+  koji-tree-fingerprint --state    the default digest plus the index, HEAD,
+                                   the branch ref and untracked file NAMES
 
 Prints one digest token, or `nogit` outside a repo (exit 0 either way).
 Compare two runs to detect that the tree moved while a reviewer read it.
@@ -43,7 +47,7 @@ USAGE
     ;;
   *)
     printf 'ERROR: unknown option: %s\n' "$1" >&2
-    printf 'Usage: koji-tree-fingerprint [--cached]\n' >&2
+    printf 'Usage: koji-tree-fingerprint [--cached|--state]\n' >&2
     exit 2
     ;;
 esac
@@ -100,7 +104,33 @@ _stream() {
   list="$(mktemp "${TMPDIR:-/tmp}/koji-fp.XXXXXX")"
   git ls-files --others --exclude-standard -z >"$list"
   if [ -s "$list" ]; then
-    sort -z <"$list" | xargs -0 cat
+    # Never follow a symlink: an untracked link to /dev/zero would block `cat`
+    # forever, past every caller's deadline. A link hashes its target text, a
+    # regular file its content (unreadable: a marker), anything else a marker.
+    sort -z <"$list" | while IFS= read -r -d '' f; do
+      if [ -L "$f" ]; then printf 'link:%s\n' "$(readlink "$f")"
+      elif [ -f "$f" ]; then cat -- "$f" 2>/dev/null || printf 'unreadable:%s\n' "$f"
+      else printf 'special:%s\n' "$f"
+      fi
+    done
+  fi
+
+  # --state: what a reviewer could change WITHOUT changing the bytes above. A
+  # commit leaves `git diff HEAD` identical when the edit moves into HEAD; a
+  # stage or unstage changes only the index; a rename of an untracked file
+  # changes only its name. A reviewer with shell access (agy in bypass mode)
+  # can do all three, so the snapshot check must see them.
+  if [ "$MODE" = "state" ]; then
+    # Modes + full blob ids pin the staged state exactly, without generating
+    # the whole cumulative patch a second time.
+    printf '\n--koji-state: index--\n'
+    git diff --cached --raw --no-abbrev -z
+    printf '\n--koji-state: head--\n'
+    git rev-parse --verify -q HEAD 2>/dev/null || printf 'unborn\n'
+    git symbolic-ref -q HEAD 2>/dev/null || printf 'detached\n'
+    # The names of the files whose contents were hashed above, from the same list.
+    printf '\n--koji-state: untracked names--\n'
+    sort -z <"$list"
   fi
   rm -f "$list"
 }

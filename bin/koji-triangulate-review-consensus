@@ -26,18 +26,18 @@ set -euo pipefail
 usage() { echo "usage: koji-triangulate-review-consensus <claude-file> <codex-file>" >&2; exit 2; }
 [ "$#" -eq 2 ] || usage
 
-# Read a voice's verdict, ANCHORED to the VERDICT: token. Isolate the
-# "VERDICT: <token>" span of the LAST such line, then read the token from that
-# span ONLY — so "VERDICT: AGREE despite DISAGREEMENT" reads AGREE, and
-# "I AGREE, so VERDICT: DISAGREE" reads DISAGREE. Empty if no verdict / no file.
+# Read a voice's verdict through koji-duet-verdict — the SAME parser the
+# wrapper's `--expect verdict` check uses, so the two can never disagree about a
+# vote. It takes the LAST VERDICT line and an EXACT token: the old in-file grep
+# read `VERDICT: AGREEMENT IS NOT POSSIBLE` as AGREE (prefix match) and ignored
+# a later `VERDICT: PARTIAL` (not in its token set) — both auto-locked a plan.
+KOJI_BIN="$(cd "$(dirname "$0")" && pwd)"
 _verdict() {
   f="$1"
   [ -f "$f" ] || { printf '%s' ""; return; }
-  tok="$(grep -ioE 'VERDICT:[[:space:]]*(AGREE|DISAGREE)' "$f" 2>/dev/null \
-         | tail -n 1 \
-         | grep -ioE '(AGREE|DISAGREE)' \
-         | tail -n 1)"
-  printf '%s' "$tok" | tr '[:lower:]' '[:upper:]'
+  tok="$("$KOJI_BIN/koji-duet-verdict" "$f" 2>/dev/null || true)"
+  [ "$tok" = "UNKNOWN" ] && tok=""
+  printf '%s' "$tok"
 }
 
 C_CLAUDE="$(_verdict "$1")"

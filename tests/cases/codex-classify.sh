@@ -79,14 +79,17 @@ test_prose_real_review_is_ok() {
   assert_eq OK "$out" "healthy prose review with VERDICT line"
 }
 
-test_prose_trap_without_flag_is_quota() {
-  # Same inputs, no --prose: the false-QUOTA trap the flag closes.
+test_prose_trap_is_closed_without_the_flag_too() {
+  # Same inputs, no --prose. This used to read QUOTA — the false back-off the
+  # flag was made for. Since an exit-0 reply's stdout counts toward a quota only
+  # when it is shaped like a refusal, a healthy critique that DISCUSSES quotas
+  # is EMPTY here (the call site's malformed-reply path), never QUOTA.
   local out
   cp "$KOJI/tests/fixtures/codex-prose-review.txt" "$TMP/p2.raw"
   : > "$TMP/p2.err"
   echo 0 > "$TMP/p2.exit"
   out="$(bash "$CLASSIFY" "$TMP/p2.raw" "$TMP/p2.err" "$TMP/p2.exit")"
-  assert_eq QUOTA "$out" "same review WITHOUT --prose is misclassified"
+  assert_eq EMPTY "$out" "a critique about quotas is not a quota, even without --prose"
 }
 
 test_prose_real_quota_still_quota() {
@@ -122,4 +125,63 @@ VERDICT: PARTIAL' '' 0 --json-out "$TMP/p6.json" --prose)"
   else
     _ok
   fi
+}
+
+test_identifier_fragments_are_not_quota() {
+  # The scan also reads review TEXT and codex transcripts, so it matches phrases
+  # only. A failed run whose output names a RateLimiter class is an ERROR or a
+  # TIMEOUT, never a five-hour quota back-off. (agy's own wording is normalized
+  # in koji-agy-exec — see agy-dispatch.sh.)
+  local out
+  out="$(_run idf "at com.example.RateLimiter.acquire; X-RateLimit-Remaining: 0" "" 1)"
+  assert_eq ERROR "$out" "identifier fragments on a failed run"
+  out="$(_run idt "" "rateLimit middleware stalled" 124)"
+  assert_eq TIMEOUT "$out" "a timeout that mentions rateLimit"
+}
+
+test_an_array_of_non_objects_is_not_a_review() {
+  # "Error [429]: You have hit your usage limit." at exit 0 yields `[429]`. It used
+  # to read OK, so a findings/cross/consult site saw a shape mismatch instead of a
+  # quota, and the final review degraded instead of waiting.
+  local out
+  out="$(_run q429 "Error [429]: You have hit your usage limit." "" 0 --json-out "$TMP/q429.json")"
+  assert_eq QUOTA "$out" "an exit-0 [429] refusal"
+  out="$(_run strs '["no issues found"]' "" 0)"
+  assert_eq EMPTY "$out" "an array of strings is not a findings array"
+  out="$(_run emptyarr '[]' "" 0 --json-out "$TMP/e.json")"
+  assert_eq OK "$out" "[] is still a clean review"
+  out="$(_run dictrl '[{"severity":"low","file":"a","line":1,"category":"perf","description":"add a rate limit"}]' "" 0 --json-out "$TMP/d.json")"
+  assert_eq OK "$out" "a findings array that mentions rate limits is still OK"
+}
+
+test_429_counts_only_as_a_standalone_number() {
+  local out
+  out="$(_run sz "" "koji-agy-exec: prompt is 4290 bytes" 75)"
+  assert_eq ERROR "$out" "a byte count is not an HTTP 429"
+  out="$(_run ln "" "fatal: bad object at line 164290" 1)"
+  assert_eq ERROR "$out" "neither is a line number"
+  out="$(_run st "" "request failed: status 429" 1)"
+  assert_eq QUOTA "$out" "a real 429"
+}
+
+test_a_standalone_429_survives_a_long_diagnostic() {
+  # Under pipefail, `grep -q` in a pipe SIGPIPEd the producer of a long input
+  # and the check failed: a real 429 read ERROR.
+  local big; big="$(printf 'request failed: status 429\n'; python3 -c 'print("diag line\n" * 20000)')"
+  local out; out="$(_run big429 "" "$big" 1)"
+  assert_eq QUOTA "$out" "a 429 at the start of a 130 KB diagnostic"
+}
+
+test_an_exit0_answer_about_rate_limits_is_malformed_not_quota() {
+  local out
+  out="$(_run rlp "We should add a rate limit and return 429 on overload." "" 0 --json-out "$TMP/rlp.json")"
+  assert_eq EMPTY "$out" "the call site's malformed-reply retry, not a back-off"
+  out="$(_run rlpe "We should add a rate limit." "codex: rate limit exceeded" 0)"
+  assert_eq QUOTA "$out" "stderr always counts"
+  out="$(_run rlp1 "We should add a rate limit." "" 1)"
+  assert_eq QUOTA "$out" "a non-zero exit keeps the full scan"
+  printf 'Error [429]: You have hit your usage limit.\n' > "$TMP/ref.txt"
+  bash "$CLASSIFY" --refusal "$TMP/ref.txt" && _ok || _fail "--refusal: a refusal"
+  printf 'Error budgets beat a fixed rate limit.\n' > "$TMP/nref.txt"
+  bash "$CLASSIFY" --refusal "$TMP/nref.txt" && _fail "--refusal: a position read as a refusal" || _ok
 }

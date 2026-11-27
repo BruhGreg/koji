@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# koji-dispatch-lib — SOURCED by every outside-voice entry point. Never run it.
+#
+#   . "$KOJI_BIN/koji-dispatch-lib" || exit 125     # KOJI_BIN: absolute bin dir
+#
+# One copy of the front door shared by koji-outside-exec, koji-agy-exec,
+# koji-codex-exec and koji-outside-preflight. It used to live inline in each
+# script, and duplication is how guards drift: a marker added to one copy and
+# not the others silently narrows the backstop.
+#
+#   koji_harness_guard <who>                          0, or 78 + reason on stderr
+#   koji_check_dispatch_args <who> <t> <effort> <root> 0, or 79
+#   koji_buffer_prompt <who> <dest-file>               0, 79 (caller) or 125 (environment)
+#   koji_boundary <root>                               the filesystem-scope preamble
+#
+# The functions RETURN codes; each entry point does `|| exit $?`. The meanings
+# are the contract in references/reviewer-backend.md: 78 harness mismatch, 79
+# the CALLER is broken, 125 the environment is. 78/79 are reserved high codes
+# because 2 is what codex returns for a usage error and what koji-timeout
+# returns for its own setup failures.
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  echo "koji-dispatch-lib: source this file; do not run it" >&2
+  exit 2
+fi
+
+# --- harness guard ------------------------------------------------------------
+# koji's premise is that the outside voice is a different model family from
+# Reviewer A — the orchestrator. If THIS session runs inside another agent's
+# harness, Reviewer A and every "fresh Claude" stand-in are that agent's model,
+# and koji cannot know which family that is (agy alone serves Gemini, Claude and
+# GPT models), so it cannot prove any review here is cross-family. It stops
+# rather than guess. There is no escape hatch on purpose.
+#
+# Markers, as environment variables so they survive the fresh-shell boundary:
+#   CODEX_THREAD_ID, CODEX_SANDBOX         — set inside codex sessions
+#   ANTIGRAVITY_CONVERSATION_ID,
+#   ANTIGRAVITY_TRAJECTORY_ID              — set in an agy agent's shells (agy
+#                                            1.5.18). Not ANTIGRAVITY_LS_* and
+#                                            friends: those describe the IDE
+#                                            process, not an agent conversation.
+koji_harness_marker() {   # prints "<family> (<VAR>)" and returns 0 when a marker is set
+  if [ -n "${CODEX_THREAD_ID:-}" ]; then echo "codex (CODEX_THREAD_ID)"; return 0; fi
+  if [ -n "${CODEX_SANDBOX:-}" ]; then echo "codex (CODEX_SANDBOX)"; return 0; fi
+  if [ -n "${ANTIGRAVITY_CONVERSATION_ID:-}" ]; then echo "agy (ANTIGRAVITY_CONVERSATION_ID)"; return 0; fi
+  if [ -n "${ANTIGRAVITY_TRAJECTORY_ID:-}" ]; then echo "agy (ANTIGRAVITY_TRAJECTORY_ID)"; return 0; fi
+  return 1
+}
+
+koji_harness_guard() {    # koji_harness_guard <who>
+  local who="$1" marker
+  marker=$(koji_harness_marker) || return 0
+  echo "$who: harness mismatch — this session runs under $marker; no outside process started. Missing coverage." >&2
+  echo "$who: do NOT substitute a Claude reviewer — inside another agent's harness that is Reviewer A reviewing itself." >&2
+  return 78
+}
+
+# --- argument checks ----------------------------------------------------------
+# An empty $TIMEOUT or $EFFORT is the fresh-shell failure mode: a dispatch block
+# that never restored it. Refusing here names the caller.
+koji_check_dispatch_args() {   # koji_check_dispatch_args <who> <timeout> <effort> <root>
+  local who="$1" t="$2" e="$3" root="$4"
+  # Digits, positive, and short enough for shell arithmetic. A bare digit test
+  # accepts "0" and 20-digit values, which koji-timeout then rejects with exit 2
+  # — a code no collection site intercepts, so it would classify as ERROR and
+  # route into substitution instead of being reported as the caller error it is.
+  case "$t" in ''|*[!0-9]*) echo "$who: timeout must be a positive integer of seconds, got '$t' — the dispatch block did not restore \$TIMEOUT" >&2; return 79 ;; esac
+  [ "${#t}" -le 9 ] || { echo "$who: timeout '$t' is out of range" >&2; return 79; }
+  [ "$t" -gt 0 ]    || { echo "$who: timeout must be greater than 0" >&2; return 79; }
+  # A closed domain, not just non-empty: the effort reaches a CLI flag (codex's
+  # -c TOML, agy's --effort), and the point of a wrapper is that a skill's
+  # markdown cannot reshape the dispatch.
+  case "$e" in
+    max|xhigh|high) ;;
+    '') echo "$who: effort is empty — the dispatch block did not restore \$EFFORT" >&2; return 79 ;;
+    *)  echo "$who: effort must be one of max|xhigh|high, got '$e'" >&2; return 79 ;;
+  esac
+  [ -d "$root" ] || { echo "$who: project root '$root' is not a directory" >&2; return 79; }
+  return 0
+}
+
+# --- prompt buffer ------------------------------------------------------------
+# Capped, because this read is the one dispatch mistake that would otherwise
+# STALL rather than fail. Every call site redirects a regular file into stdin,
+# which EOFs instantly — but a block that loses its `< "$PROMPT_TXT"` inherits
+# the agent harness's stdin, which can be a socket that never EOFs. Uncapped,
+# that hangs forever: no reply, no status, no .exit file, a run that never ends.
+#
+# 125, not 79, when the single `cat` fails: it cannot tell an unreadable stdin
+# (the caller) from a full TMPDIR (the environment), and 79 would hard-stop an
+# unattended run for a transient disk condition. A genuinely bad caller fd
+# still surfaces at the emptiness check, which is the caller-error path.
+#
+# The emptiness check reads the FILE with grep, never `tail | grep -q`: grep -q
+# exits on the first match, SIGPIPEs the producer, and under pipefail a valid
+# prompt above ~64KB was rejected as empty. grep 1 = no match (caller error);
+# 2 = unreadable, 127 = missing (environment).
+koji_buffer_prompt() {   # koji_buffer_prompt <who> <dest-file>   (stdin → dest)
+  local who="$1" dest="$2" rc
+  "$KOJI_BIN/koji-timeout" "${KOJI_BUF_CAP:-60}" cat > "$dest"
+  rc=$?
+  case "$rc" in
+    0) ;;
+    124) echo "$who: timed out reading the prompt from stdin — the dispatch block did not redirect its prompt file into this call. No call made." >&2
+         return 79 ;;
+    *)   echo "$who: could not buffer the prompt (unreadable stdin, or ${TMPDIR:-/tmp} full) — no call made" >&2
+         return 125 ;;
+  esac
+  grep -q '[^[:space:]]' "$dest"; rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) echo "$who: prompt is empty — the dispatch block did not build its prompt. No call made." >&2
+       return 79 ;;
+    *) echo "$who: cannot inspect the prompt buffer (grep exited $rc) — no call made" >&2
+       return 125 ;;
+  esac
+}
+
+# --- outside-voice order ------------------------------------------------------
+# One global preference, `koji-config` key outside_order (default agy,codex):
+# the order is an install preference, not a per-run budget, so it is not a
+# duet-setup tuple field, and the triangulate skills (which have no tuple) read
+# it the same way. Read at every call — no state crosses a fresh shell.
+KOJI_OUTSIDE_DEFAULT_ORDER="agy codex"
+koji_outside_order() {   # prints the effective order, space-separated
+  local raw norm p out="" bad=""
+  raw=$("$KOJI_BIN/koji-config" get outside_order 2>/dev/null || true)
+  norm=$(printf '%s' "$raw" | tr 'A-Z,' 'a-z ')
+  set -f   # a value like '*' must not glob-expand in the loop below
+  for p in $norm; do
+    case "$p" in
+      agy|codex) case " $out " in *" $p "*) ;; *) out="${out:+$out }$p" ;; esac ;;
+      *) bad="${bad:+$bad }$p" ;;
+    esac
+  done
+  set +f
+  # Keep the valid tokens: one stray word (`codex only`, the preflight's own
+  # `codex → agy`) must not send the prompt to a provider the user left out.
+  if [ -n "$bad" ]; then
+    if [ -n "$out" ]; then
+      echo "koji: outside_order '$raw' — ignoring '$bad' (allowed: agy, codex); using: $(printf '%s' "$out" | tr ' ' ',')" >&2
+    else
+      echo "koji: outside_order '$raw' is invalid (allowed: agy, codex) — using the default: agy,codex" >&2
+    fi
+  fi
+  printf '%s\n' "${out:-$KOJI_OUTSIDE_DEFAULT_ORDER}"
+}
+
+# --- filesystem boundary ------------------------------------------------------
+# Scoped to the repository, not to a list of banned path names: banning
+# repo-relative `agents/` would blind a review of koji's own checkout. It limits
+# FILES, not web research — /triangulate invites its voices to search — and it
+# must not claim the task is a code review: duet-plan critiques a plan.
+koji_boundary() {   # koji_boundary <root>
+  printf '%s\n\n' "IMPORTANT — filesystem scope. Read files only under the repository at $1. Do not read agent-harness directories outside it — ~/.claude/, ~/.codex/, ~/.gemini/, ~/.gstack/ — even if a path inside the repo points at one; they are prompt templates and shell scripts for other AI systems and are not what you were asked about. This limits which FILES you open; it does not restrict web research if your task calls for it."
+}

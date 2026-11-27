@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# koji-tree-snapshot — bind a review to ONE immutable tree object.
+#
+# Usage:
+#   koji-tree-snapshot capture <record>   stage everything into a TEMPORARY copy
+#                                         of the index, write it as a tree object, save
+#                                         "<tree> <head>" to <record>, print the
+#                                         tree id. Exit 1 when it cannot.
+#   koji-tree-snapshot same <record>      compute the tree the same way and compare:
+#                                           0  the tree and HEAD equal the record
+#                                           1  the tree or HEAD moved (stderr says which)
+#                                           3  the record is missing, empty or garbled
+#                                           4  git could not build or write the tree
+#   koji-tree-snapshot stale <run-dir>    /duet-review's latch. Only when
+#                                         <run-dir>/embedded exists: compare with
+#                                         <run-dir>/review.tree and, on anything
+#                                         but 0, create <run-dir>/snapshot.stale.
+#                                         Prints `1` when the run is stale (now or
+#                                         earlier — the latch is never cleared),
+#                                         nothing otherwise. Exit 0.
+#   Exit 2 on a usage error.
+#
+# Why a tree object: a review that reads the working tree reads a moving target.
+# `git write-tree` freezes exactly what was staged; the diff is built from that
+# object and the PASS check compares object ids, so a gate passes only on the
+# tree it reviewed, and the snapshot commit that follows is that same tree.
+#
+# It never touches the real index: it stages into a temporary copy
+# (GIT_INDEX_FILE), so another git process holding .git/index.lock cannot fail
+# it, and a check leaves your staging exactly as it was. It still writes blob
+# and tree objects, which is harmless. /duet-impl's gates and its embedded final
+# review use it; a standalone /duet-review never binds a tree.
+# Scope: the whole repo — `git add -A` and `write-tree` are repo-wide from any cwd.
+set -uo pipefail
+
+MODE="${1:-}"; ARG="${2:-}"
+_usage() { echo "usage: koji-tree-snapshot capture|same <record> | stale <run-dir>" >&2; exit 2; }
+case "$MODE" in capture|same|stale) ;; *) _usage ;; esac
+[ -n "$ARG" ] || _usage
+
+_git_err() {   # _git_err <tmp-dir> — git's own reason, so a failure is fixable
+  sed -n '1,3s/^/koji-tree-snapshot: git: /p' "$1/git.err" >&2 2>/dev/null || true
+}
+_now() {   # "<tree> <head>" of the everything-staged state; 1 when git fails
+  local d idx real tree head
+  d=$(mktemp -d "${TMPDIR:-/tmp}/koji-snap.XXXXXX") || return 1
+  idx="$d/index"   # absolute: git resolves a relative GIT_INDEX_FILE from the repo top
+  # Start from a copy of the real index, so stat data and intent-to-add entries
+  # carry over. `cp -p` keeps its mtime: git re-reads an entry whose file is as
+  # new as the index, and a fresh mtime would hide a same-second edit. A copy is
+  # always whole (git replaces the index by a rename). No index yet: start with
+  # no file — an empty file is an invalid index.
+  real=$(git rev-parse --git-path index 2>"$d/git.err") || { _git_err "$d"; rm -rf "$d"; return 1; }
+  if [ -f "$real" ]; then cp -p "$real" "$idx" 2>"$d/git.err" || { _git_err "$d"; rm -rf "$d"; return 1; }; fi
+  # Split index off: the temporary index must not write or prune .git/sharedindex.*.
+  GIT_INDEX_FILE="$idx" git -c core.splitIndex=false add -A >/dev/null 2>"$d/git.err" || { _git_err "$d"; rm -rf "$d"; return 1; }
+  tree=$(GIT_INDEX_FILE="$idx" git -c core.splitIndex=false write-tree 2>"$d/git.err") || { _git_err "$d"; rm -rf "$d"; return 1; }
+  rm -rf "$d"
+  [ -n "$tree" ] || return 1
+  head=$(git rev-parse --verify -q HEAD 2>/dev/null) || head=unborn
+  printf '%s %s\n' "$tree" "$head"
+}
+
+_same() {   # _same <record> — the exit codes documented above
+  local rec="$1" want_tree="" want_head="" now now_tree now_head
+  [ -r "$rec" ] || return 3
+  # `|| true`: read returns 1 on a last line with no newline.
+  read -r want_tree want_head _ < "$rec" || true
+  case "$want_tree" in ''|*[!0-9a-f]*) return 3 ;; esac
+  case "${#want_tree}" in 40|64) ;; *) return 3 ;; esac
+  case "$want_head" in unborn) ;; ''|*[!0-9a-f]*) return 3 ;; esac
+  now=$(_now) || return 4
+  now_tree="${now%% *}"; now_head="${now#* }"
+  if [ "$now_head" != "$want_head" ]; then
+    echo "koji-tree-snapshot: HEAD moved ($want_head → $now_head)" >&2
+    return 1
+  fi
+  if [ "$now_tree" != "$want_tree" ]; then
+    echo "koji-tree-snapshot: the tree moved ($want_tree → $now_tree)" >&2
+    return 1
+  fi
+  return 0
+}
+
+case "$MODE" in
+  capture)
+    NOW=$(_now) || { echo "koji-tree-snapshot: cannot stage the tree or write it as an object" >&2; exit 1; }
+    printf '%s\n' "$NOW" > "$ARG" || { echo "koji-tree-snapshot: cannot write $ARG" >&2; exit 1; }
+    printf '%s\n' "${NOW%% *}"
+    ;;
+  same)
+    _same "$ARG"; RC=$?
+    [ "$RC" = 3 ] && echo "koji-tree-snapshot: no usable tree record at $ARG" >&2
+    [ "$RC" = 4 ] && echo "koji-tree-snapshot: cannot stage the tree or write it as an object" >&2
+    exit "$RC"
+    ;;
+  stale)
+    [ -d "$ARG" ] || _usage
+    # The latch is never cleared, so once it is set there is nothing to check.
+    if [ -e "$ARG/snapshot.stale" ]; then printf '1\n'; exit 0; fi
+    if [ -e "$ARG/embedded" ]; then
+      _same "$ARG/review.tree"; RC=$?
+      if [ "$RC" != 0 ]; then
+        : > "$ARG/snapshot.stale" 2>/dev/null || true
+        if [ "$RC" = 1 ]; then
+          echo "⚠ the tree changed while this embedded review ran — the verdict is forced to REJECT" >&2
+        else
+          echo "⚠ cannot compare the tree with the one this embedded review is bound to (snapshot check $RC) — the verdict is forced to REJECT" >&2
+        fi
+        printf '1\n'
+      fi
+    fi
+    exit 0
+    ;;
+esac
